@@ -37,6 +37,7 @@ def register_system(reg, s):
         ToolDef("open_app","搜索并打开应用",{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},s.open_app,"system"),
         ToolDef("launch_app","打开应用(别名)",{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},s.open_app,"system"),
         ToolDef("find_app","搜索已安装应用",{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},s.find_app,"system"),
+        ToolDef("brain_status","检视自身大脑: 知识库/记忆/经验状态、分类分布、高优先级知识",{"type":"object","properties":{},"required":[]},s.brain_status,"system"),
     ])
 
 def register_file(reg, f):

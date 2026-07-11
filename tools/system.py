@@ -14,6 +14,7 @@ def system_info(**kwargs) -> ToolResult:
     except Exception as e:
         logger.warning(f"system_info 异常: {e}")
         return ToolResult.failure(f"获取系统信息失败: {e}")
+        return ToolResult.failure(f"获取系统信息失败: {e}")
 
 def system_execute(command: str, timeout: int = 30) -> ToolResult:
     try:
@@ -95,3 +96,32 @@ def open_app(name: str = "", app: str = "", **kwargs) -> ToolResult:
         paths=[p.strip() for p in result.data.split("\n") if p.strip() and "卸载" not in p]
         if paths: return open_file(paths[0])
     return ToolResult.failure(f"未找到 {target}，请确认已安装")
+
+
+def brain_status(**kwargs) -> ToolResult:
+    """检视自身的 Brain（知识库/记忆/经验）状态"""
+    try:
+        import main as _main
+        b = getattr(_main, 'brain', None)
+        if not b:
+            return ToolResult.success("大脑实例未加载")
+        stats = b.get_stats()
+        high_pri = [f for f in b._facts if f.priority >= 4]
+        recent = b._facts[-10:] if len(b._facts) >= 10 else b._facts[:]
+        lines = [
+            f"大脑: {stats['facts_count']} 事实, {stats['experiences_count']} 经验",
+            f"分类 ({len(stats.get('categories', {}))}):",
+        ]
+        for cat, cnt in sorted(stats.get('categories', {}).items(), key=lambda x: -x[1])[:8]:
+            lines.append(f"  {cat}: {cnt}")
+        lines.append("")
+        lines.append(f"高优先级(>=4★): {len(high_pri)} 条")
+        for f in high_pri[-5:]:
+            lines.append(f"  [{f.priority}★] {f.content[:70]}")
+        lines.append("")
+        lines.append(f"最近学习:")
+        for f in recent[-5:]:
+            lines.append(f"  [{f.category}] {f.content[:60]}")
+        return ToolResult.success("\n".join(lines))
+    except Exception as e:
+        return ToolResult.failure(f"检视失败: {e}")
