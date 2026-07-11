@@ -31,7 +31,7 @@ uploads/
 # 本地模型 (大文件)
 ollama_models/
 brain_data/
-memory/
+memory/index.json
 harness_output/
 workspace/
 

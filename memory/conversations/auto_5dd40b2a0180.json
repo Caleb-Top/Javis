@@ -1,0 +1,1 @@
+{"id": "auto_5dd40b2a0180", "updated_at": 1783716768.7348595, "created_at": 1783716768.7348595, "cards": [{"role": "user", "text": "打开微信"}, {"role": "assistant", "text": "[调用工具: open_app]"}, {"role": "assistant", "text": "[工具 open_app: ✅成功]"}, {"role": "assistant", "text": "微信已经打开，可以开始使用了！"}]}
