@@ -34,15 +34,13 @@ try:
 except Exception as e:
     logger.warning(f"执行引擎初始化跳过: {e}")
 try:
-    from core.style_learner import get_learner
-    get_learner(brain)
     brain.learn_fact("用户风格: 自然口语，先结论后数据，不读原始数据行，短句优先",
-                     category="style.base", source="user_feedback", priority=5)
+                     category="user_style.base", source="user_feedback", priority=5)
     brain.learn_fact("规则: 工具原始数据不能复读，用自己的话重新组织",
-                     category="style.rules.no_repeat_data", source="user_feedback", priority=5)
-    logger.info("🔤 风格学习器已连接大脑")
+                     category="user_style.rule.no_repeat_data", source="user_feedback", priority=5)
+    logger.info("用户风格初始化完成")
 except Exception as e:
-    logger.warning(f"风格学习器初始化跳过: {e}")
+    logger.warning(f"用户风格初始化跳过: {e}")
 try:
     from tools_lib.tool_superpowers import inject_to_brain as _sp_inj
     _sp_inj(brain)

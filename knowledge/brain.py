@@ -106,6 +106,58 @@ class Brain:
 
     # ── 学习 ──
 
+    # ── 风格信号词典（大脑原生） ──
+    _STYLE_SIGNS = {
+        "短句": ["好", "行", "嗯", "对", "可以", "看看", "试试"],
+        "复读数据": ["CPU:", "内存:", "磁盘:", "✅ system", "❌ tool"],
+        "口语": ["了", "嘛", "吧", "呢", "哦", "嗯", "啊", "哈", "咱", "我们", "对了", "不过"],
+        "先结论": ["还行", "挺", "没什么", "没问题", "正常", "还好"],
+        "用emoji": ["✅", "❌", "📸", "💻", "⭐", "🔧", "📁"],
+        "精简": ["ok", "好", "继续", "嗯", "对"],
+    }
+
+    @classmethod
+    def extract_style(cls, text: str) -> dict:
+        """从文本中提取风格维度"""
+        if not text:
+            return {}
+        dims = {}
+        for dim, signs in cls._STYLE_SIGNS.items():
+            n = sum(text.count(s) for s in signs)
+            if n > 0:
+                dims[dim] = n
+        import re as _re
+        sents = [s.strip() for s in _re.split(r'[。！？\n]', text) if s.strip()]
+        dims["avg_len"] = round(sum(len(s) for s in sents) / max(len(sents), 1))
+        return dims
+
+    def learn_style(self, user_msg: str, assistant_msg: str = ""):
+        """从一轮对话中学习风格 — 原生大脑能力"""
+        if not user_msg:
+            return
+        try:
+            u = self.extract_style(user_msg)
+            if u:
+                summary = "用户风格:" + ",".join(f"{k}={v}" for k, v in sorted(u.items()) if k != "avg_len") + f"|均句{u.get('avg_len',0)}字"
+                self.learn_fact(summary, category="user_style.obs", source="self", priority=4)
+            if assistant_msg and len(assistant_msg) > 10:
+                a = self.extract_style(assistant_msg)
+                if not a:
+                    return
+                if "复读数据" in a and "复读数据" not in u:
+                    self.learn_fact("用户不喜欢回复中出现原始数据行(CPU:xxx%)，用自己的话重说",
+                                    category="user_style.avoid.repeat", source="self", priority=5)
+                if u.get("用emoji", 0) == 0 and a.get("用emoji", 0) > 2:
+                    self.learn_fact("用户不太用emoji，助手少用",
+                                    category="user_style.avoid.emoji", source="self", priority=4)
+                uv = u.get("avg_len", 0)
+                av = a.get("avg_len", 0)
+                if uv > 0 and av > uv * 1.5:
+                    self.learn_fact(f"用户短句(均{uv}字)，助手可更精简(均{av}字)",
+                                    category="user_style.avoid.verbose", source="self", priority=4)
+        except Exception:
+            pass
+
     def learn_fact(self, content: str, category: str = "general",
                    source: str = "conversation", priority: int = 1):
         """学习一个新知识点，带优先级"""

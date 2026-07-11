@@ -89,13 +89,20 @@ read_ui_window, get_window_state
 
 
 def build_dynamic_prompt(brain=None) -> str:
-    """构建动态 System Prompt：基础提示 + 高优先级经验规则"""
+    """构建动态 System Prompt：基础提示 + 高优先级经验规则 + 用户风格知识"""
     rules = []
     if brain:
         for exp in brain.get_priority_experiences(min_priority=3):
             if exp.lesson and len(exp.lesson) > 10:
                 rules.append(exp.lesson[:120])
         rules = rules[:5]
+        # 也拉高优先级风格事实（用户偏好 natural 融入 prompt）
+        style_rules = []
+        for f in brain._facts:
+            if f.category.startswith("user_style") and f.priority >= 4:
+                style_rules.append(f.content[:100])
+        if style_rules:
+            rules.append("风格守则: " + "; ".join(style_rules[-3:]))
     if rules:
         return (BASE_SYSTEM_PROMPT +
                 "\n\n## 📋 经验规则（从过去错误中学习）\n" +
@@ -231,13 +238,6 @@ class Agent:
             "verifying": "\n\n【当前阶段: 验证】检查上一步是否正确, 如失败则重试.",
         }
         prompt += phase_guide.get(self.state.phase, "")
-        try:
-            from core.style_learner import style_guide_for_prompt
-            sg = style_guide_for_prompt()
-            if sg:
-                prompt += sg
-        except Exception:
-            pass
         return prompt
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
@@ -575,16 +575,13 @@ class Agent:
                 if reply:
                     self.learner.learn_from_conversation(user_input, reply, self._action_history)
 
-            try:
-                from core.style_learner import learn_from_exchange
+            if self.brain:
                 r2 = ""
                 for m in reversed(self.state.messages):
                     if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) > 10:
                         r2 = m["content"][:500]
                         break
-                learn_from_exchange(user_input, r2)
-            except Exception:
-                pass
+                self.brain.learn_style(user_input, r2)
 
             # ★ 自主知识学习：从工具执行结果中自动提取知识
             self._auto_learn_from_actions()
