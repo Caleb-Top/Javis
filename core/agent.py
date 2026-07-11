@@ -65,6 +65,7 @@ BASE_SYSTEM_PROMPT = """你是 Javis — 一个真正能思考、能编程、能
 - 不用每段都加 emoji
 - 数据和结论之间自然过渡，不要让用户感觉在读 log
 - 遇到问题直说，不用铺垫
+- 绝对不要复读工具返回的原始数据。工具返回了 "CPU:10% 内存:61%" 你看到了就行，换成你自己的话说
 
 ## 你的核心能力
 当用户提出需求时, 按阶段推进:
@@ -222,14 +223,22 @@ class Agent:
         self._action_history = []
 
     def _build_system_prompt(self) -> str:
-        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引）"""
+        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引 + 风格指导）"""
         prompt = build_dynamic_prompt(brain=self.brain)
         phase_guide = {
             "planning": "\n\n【当前阶段: 规划】先分析需求, 输出完整计划后再执行工具.",
             "executing": "\n\n【当前阶段: 执行】按计划逐步执行, 每步汇报结果.",
             "verifying": "\n\n【当前阶段: 验证】检查上一步是否正确, 如失败则重试.",
         }
-        return prompt + phase_guide.get(self.state.phase, "")
+        prompt += phase_guide.get(self.state.phase, "")
+        try:
+            from core.style_learner import style_guide_for_prompt
+            sg = style_guide_for_prompt()
+            if sg:
+                prompt += sg
+        except Exception:
+            pass
+        return prompt
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
         window = list(self.state.messages[-40:])
@@ -389,9 +398,16 @@ class Agent:
 
                     yield {"type": "tool_result", "tool": tn, "success": result.success,
                            "data": (result.data or result.error or "")[:800]}
+                    raw = (result.data or result.error or "")[:2000]
+                    # system_info: 不让LLM看到原始数据, 防止复读
+                    if tn == "system_info" and result.success and result.data:
+                        import re
+                        m = re.search(r"CPU:([\d.]+)%.*?内存:([\d.]+)%.*?磁盘:([\d.]+)%", result.data)
+                        if m:
+                            raw = f"[system] CPU {m.group(1)}%, memory {m.group(2)}%, disk {m.group(3)}%"
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
-                                     "content": (result.data or result.error or "")[:2000]})
-                    self.state.messages.append({"role": "assistant", "content": f"[{tn}: {'✅' if result.success else '❌'}]"})
+                                     "content": raw})
+                    self.state.messages.append({"role": "assistant", "content": f"[{tn}: {'ok' if result.success else 'fail'}]"})
                 continue
 
             text = resp.text or ""
@@ -558,6 +574,17 @@ class Agent:
                             break
                 if reply:
                     self.learner.learn_from_conversation(user_input, reply, self._action_history)
+
+            try:
+                from core.style_learner import learn_from_exchange
+                r2 = ""
+                for m in reversed(self.state.messages):
+                    if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) > 10:
+                        r2 = m["content"][:500]
+                        break
+                learn_from_exchange(user_input, r2)
+            except Exception:
+                pass
 
             # ★ 自主知识学习：从工具执行结果中自动提取知识
             self._auto_learn_from_actions()
