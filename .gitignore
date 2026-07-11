@@ -66,3 +66,5 @@ _build_*.py
 Thumbs.db
 .DS_Store
 server_*.txt
+memory/__pycache__/
+memory/conversations/
