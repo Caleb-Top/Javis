@@ -93,7 +93,7 @@ read_ui_window, get_window_state
 
 
 def build_dynamic_prompt(brain=None) -> str:
-    """构建动态 System Prompt：基础提示 + 高优先级经验规则 + 用户风格知识"""
+    """构建动态 System Prompt：基础提示 + 经验 + 风格 + 上次话题 + 你说"""
     rules = []
     if brain:
         seen_exp = set()
@@ -102,7 +102,6 @@ def build_dynamic_prompt(brain=None) -> str:
                 seen_exp.add(exp.lesson[:100])
                 rules.append(exp.lesson[:120])
         rules = rules[:5]
-        # 也拉高优先级风格事实（用户偏好 natural 融入 prompt）
         style_rules = []
         seen = set()
         for f in sorted(brain._facts, key=lambda x: -x.priority):
@@ -110,11 +109,19 @@ def build_dynamic_prompt(brain=None) -> str:
                 seen.add(f.content[:60])
                 style_rules.append(f.content[:100])
         if style_rules:
-            rules.append("风格守则: " + "; ".join(style_rules[:5]))
+            rules.append("风格: " + "; ".join(style_rules[:5]))
+        tops = sorted([f for f in brain._facts if f.category == "session.topic"],
+                      key=lambda x: x.created_at, reverse=True)[:3]
+        if tops:
+            rules.append("上次: " + "; ".join(t.content[:60] for t in tops))
+        msgs = sorted([f for f in brain._facts if f.category == "conversation.user_msgs"],
+                      key=lambda x: x.created_at, reverse=True)[:3]
+        if msgs:
+            rules.append("你说: " + "; ".join(f.content[:50] for f in msgs))
     if rules:
         return (BASE_SYSTEM_PROMPT +
-                "\n\n## 📋 经验规则（从过去错误中学习）\n" +
-                "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules)))
+                "\n\n## 📋 记忆\n" +
+                "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules[:8])))
     return BASE_SYSTEM_PROMPT
 
 
@@ -251,58 +258,55 @@ class Agent:
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
         window = list(self.state.messages[-40:])
-
-        # ── 情景记忆: 创建 Episode 记录 ──
         try:
             from memory.episodic import Episode, extract_fingerprint
             self._current_episode = Episode(user_input, session_id=str(time.time()))
         except Exception:
             self._current_episode = None
 
-        # ── 加载上次会话摘要 ──
-        if self.brain and not hasattr(self, '_session_memory_loaded'):
-            try:
-                summaries = sorted([f for f in self.brain._facts if f.category == "session.topic" and f.priority >= 2], key=lambda x: x.created_at, reverse=True)[:3]
-                if summaries:
-                    recent = sorted(summaries, key=lambda x: x.created_at, reverse=True)[:3]
-                    for s in recent:
-                        if hasattr(self, '_last_session_summary'):
-                            self._last_session_summary += chr(10) + s.content[:100]
-                        else:
-                            self._last_session_summary = "上次: " + s.content[:100]
-            except Exception:
-                pass
-            self._session_memory_loaded = True
-
-        # ── 上下文构建（含语义记忆检索 + 程序记忆检索） ──
+        # 跨会话记忆: 全部从大脑 facts + experiences 检索
         context = ""
-        if hasattr(self, '_last_session_summary'):
-            context = chr(10) + "[上次]: " + self._last_session_summary[:200]
         if self.brain:
-            facts = self.brain.recall(user_input, max_results=3)
-            if facts:
-                context = "\n[相关知识]:\n" + "\n".join(f"- {f.content[:80]}" for f in facts)
-            exps = self.brain.get_experiences(user_input, max_results=2)
-            if exps:
-                context += "\n[相关经验]:\n" + "\n".join(f"- {e.intent[:40]}: {e.lesson[:60]}" for e in exps)
             try:
-                fp = extract_fingerprint(user_input)
-                now = time.time()
-                if not hasattr(self, '_mc_ts') or now - self._mc_ts > 30:
-                    from memory.semantic import find_relevant_rules as _sr
-                    self._mc_rules = _sr(fp)
-                    from memory.procedural import find_procedural as _sp
-                    self._mc_proc = _sp(fp.get("domain", ""), fp.get("task_type", ""))
-                    self._mc_ts = now
-                if self._mc_rules:
-                    context += "\n[记忆]: " + self._mc_rules[0].get('conclusion','')[:100]
-                if self._mc_proc and self._mc_proc.get("success_rate", 0) > 0.8:
-                    seq = " -> ".join(self._mc_proc.get("tool_sequence", [])[:4])
-                    context += f" => {seq} ({self._mc_proc.get('success_rate',0):.0%})"
-            except Exception:
-                pass
+                # 1. 上次对话话题（从 brain facts 中 session.topic 取）
+                topics = sorted([f for f in self.brain._facts if f.category == "session.topic"],
+                    key=lambda x: x.created_at, reverse=True)[:3]
+                if topics:
+                    context = "上次: " + "; ".join(t.content[:60] for t in topics)
+                # 2. 最近用户消息（从 brain facts 中 conversation.user_msgs 取）
+                msgs = sorted([f for f in self.brain._facts if f.category == "conversation.user_msgs"],
+                    key=lambda x: x.created_at, reverse=True)[:5]
+                if msgs:
+                    context += (" | " if context else "") + "你说过: " + " | ".join(f.content[:60] for f in msgs)
+                # 3. 知识检索
+                facts = self.brain.recall(user_input, max_results=4)
+                if facts:
+                    context += (" | " if context else "") + "知道: " + " ".join(f.content[:70] for f in facts)
+                # 4. 经验检索
+                exps = self.brain.get_experiences(user_input, max_results=2)
+                if exps:
+                    context += (" | " if context else "") + "经验: " + " ".join(e.lesson[:50] for e in exps)
+                # 5. 语义规则 + 程序记忆
+                try:
+                    from memory.episodic import extract_fingerprint
+                    fp = extract_fingerprint(user_input)
+                    now = time.time()
+                    if not hasattr(self, "_mc_ts") or now - self._mc_ts > 30:
+                        from memory.semantic import find_relevant_rules as _sr
+                        self._mc_rules = _sr(fp)
+                        from memory.procedural import find_procedural as _sp
+                        self._mc_proc = _sp(fp.get("domain",""), fp.get("task_type",""))
+                        self._mc_ts = now
+                    if self._mc_rules:
+                        context += (" | " if context else "") + "注意: " + self._mc_rules[0].get("conclusion","")[:80]
+                    if hasattr(self,"_mc_proc") and self._mc_proc and self._mc_proc.get("success_rate",0) > 0.8:
+                        seq = " -> ".join(self._mc_proc.get("tool_sequence",[])[:4])
+                        context += " | 方案: " + seq
+                except: pass
+            except: pass
 
-        # ── 规划阶段 ──
+        self.state.phase = "planning"
+# ── 规划阶段 ──
         self.state.phase = "planning"
         self.planner.create_plan(user_input)
         plan_snapshot = self.planner.get_plan_snapshot()
@@ -602,15 +606,17 @@ class Agent:
             pass
 
     def _after_learn(self, user_input: str):
+        # ★ 所有对话永久存入大脑 ★
+        if self.brain and user_input:
+            try:
+                clean = user_input.strip().replace(chr(10), " ")[:100]
+                self.brain.learn_fact("你说: " + clean,
+                    category="conversation.user_msgs", source="self", priority=2)
+            except: pass
         if not self.learner or not self.brain:
             return
         try:
             self.state.phase = "verifying"
-            for word in ["喜欢", "习惯", "不要", "请"]:
-                if word in user_input:
-                    self.brain.learn_fact(f"用户偏好: {user_input[:60]}", category="user_pref", priority=2)
-                    break
-
             if self._action_history:
                 result = self.reflector.reflect(user_input, self._action_history)
                 for act in self._action_history:
@@ -629,53 +635,16 @@ class Agent:
                     self.brain.learn_fact(f"[经验] {result.reusable_lesson}",
                         category=f"experience.{result.domain}", source="self_reflection",
                         priority=result.priority)
-
             if self._action_history:
                 reply = ""
                 for m in reversed(self.state.messages):
-                    if m.get("role") == "assistant" and m.get("content"):
-                        c = m["content"]
-                        if isinstance(c, str) and len(c) > 10:
-                            reply = c[:500]
-                            break
+                    if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) > 10:
+                        reply = m["content"][:500]
+                        break
                 if reply:
                     self.learner.learn_from_conversation(user_input, reply, self._action_history)
-
-            if self.brain:
-                r2 = ""
-                for m in reversed(self.state.messages):
-                    if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) > 10:
-                        r2 = m["content"][:500]
-                        break
-                self.brain.learn_style(user_input, r2)
-
-            # ★ 自主知识学习：从工具执行结果中自动提取知识
+                    self.brain.learn_style(user_input, reply)
             self._auto_learn_from_actions()
+        except Exception:
+            pass
 
-            try:
-                from core.workspace_manager import WorkspaceManager
-                wm = WorkspaceManager()
-                if wm.get_temp_files():
-                    wm.record_as_fact(self.brain)
-            except: pass
-
-            try:
-                from utils.memory import save_conversation
-                sid = uuid.uuid4().hex[:12]
-                cards = []
-                for m in self.state.messages[-50:]:
-                    role = m.get("role","")
-                    content = m.get("content","")
-                    if isinstance(content, str) and content:
-                        cards.append({"role":role,"text":content[:500]})
-                if cards:
-                    save_conversation(f"auto_{sid}", cards)
-            except: pass
-
-            try:
-                self.brain.cleanup()
-            except: pass
-
-            logger.info(f"自学习完成: {len(self._action_history)} 次操作 phase={self.state.phase}")
-        except Exception as e:
-            logger.debug(f"自学习跳过: {e}")

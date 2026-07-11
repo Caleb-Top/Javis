@@ -77,9 +77,15 @@ def find_relevant_rules(fingerprint: dict, min_confidence: float = 0.3) -> list[
         if t_fp and t_r:
             common = t_fp & t_r
             score += len(common) * 2
-        # 平台匹配
-        if fingerprint.get("platform") and rf.get("platform") == fingerprint.get("platform"):
-            score += 1
+        # 平台匹配（支持字符串和列表）
+        fp_p = fingerprint.get("platform")
+        rf_p = rf.get("platform")
+        if fp_p and rf_p:
+            if (isinstance(rf_p, list) and fp_p in rf_p) or rf_p == fp_p:
+                score += 1
+        # 工具匹配（rules 的 fingerprint 有 tool 字段）
+        if rf.get("tool") and rf["tool"] in str(fingerprint.get("tools_involved", [])):
+            score += 2
 
         if score >= 2:
             scored.append((score * rule.get("confidence", 0.5), rule))
