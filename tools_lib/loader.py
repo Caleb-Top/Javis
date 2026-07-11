@@ -112,5 +112,14 @@ def register(registry) -> int:
     except Exception as e:
         logger.warning(f"AnthropicPlugins 注册失败: {e}")
 
+    try:
+        from tools_lib.tool_catch2 import tools_for_registry as ct_tools
+        for td in ct_tools():
+            registry.register(td)
+            count += 1
+            logger.info(f"Catch2: {td.name} [{td.category}]")
+    except Exception as e:
+        logger.warning(f"Catch2 注册失败: {e}")
+
     logger.info(f"工具库加载完成: 共 {count} 个工具")
     return count

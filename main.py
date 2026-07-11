@@ -51,6 +51,12 @@ try:
     logger.info("📦 Anthropic 插件库已注入大脑")
 except Exception as _ap_e:
     logger.warning(f"Anthropic 插件注入跳过: {_ap_e}")
+try:
+    from tools_lib.tool_catch2 import inject_to_brain as _ct_inj
+    _ct_inj(brain)
+    logger.info("Catch2 C++ 测试已注入大脑")
+except Exception as _ct_e:
+    logger.warning(f"Catch2 注入跳过: {_ct_e}")
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
 engine=InferenceEngine(llm)
 import importlib,pkgutil;import skills as skills_pkg
