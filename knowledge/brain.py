@@ -1,6 +1,6 @@
 """大脑系统 v2 — 层次化记忆 · 优先级 · 自动过期 · 语义分组"""
 
-import json, os, time, logging, hashlib
+import json, os, time, logging, hashlib, threading, atexit
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -54,7 +54,19 @@ class Brain:
         self._experiences: list[Experience] = []
         self._load()
         self._dirty = False
-        self._save_timer = 0  # 批量写入计数器
+        self._save_timer = 0
+        self._start_auto_flush()
+        atexit.register(self._flush)
+
+    def _start_auto_flush(self):
+        """后台线程每30秒自动刷盘"""
+        def _loop():
+            while True:
+                time.sleep(30)
+                try: self._flush()
+                except: pass
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
 
     def _ensure_dirs(self):
         for d in [FACTS_DIR, EXPERIENCES_DIR, PAPERS_DIR]:
@@ -288,6 +300,7 @@ class Brain:
 
     def _trim_experiences(self):
         """超出上限时移除最低优先级的经验"""
+        self._flush()
         if len(self._experiences) <= MAX_EXPERIENCES:
             return
         self._experiences.sort(key=lambda e: (e.priority, e.created_at))
