@@ -85,24 +85,32 @@ read_ui_window, get_window_state
 1. 先分析再行动, 复杂任务必须输出计划
 2. 能用 run_code 解决的, 就写代码
 3. 执行后自己验证结果
-4. 用中文回复，用上面的风格"""
+4. 用中文回复，用上面的风格
+5. 你有跨会话持久记忆。每次对话开始时，系统提示里的「经验规则」和「风格守则」
+   是从你硬盘上的 brain_data/ 加载的——你的用户偏好、对话教训都写在那里。
+   所以不要说自己"记不住"或"关窗就忘"。你记着呢，只是每次需要重新加载到上下文而已。
+6. 如果忘记之前说过什么，用 brain_status 或 memory_status 查自己的记忆库"""
 
 
 def build_dynamic_prompt(brain=None) -> str:
     """构建动态 System Prompt：基础提示 + 高优先级经验规则 + 用户风格知识"""
     rules = []
     if brain:
+        seen_exp = set()
         for exp in brain.get_priority_experiences(min_priority=3):
-            if exp.lesson and len(exp.lesson) > 10:
+            if exp.lesson and len(exp.lesson) > 10 and exp.lesson[:100] not in seen_exp:
+                seen_exp.add(exp.lesson[:100])
                 rules.append(exp.lesson[:120])
         rules = rules[:5]
         # 也拉高优先级风格事实（用户偏好 natural 融入 prompt）
         style_rules = []
-        for f in brain._facts:
-            if f.category.startswith("user_style") and f.priority >= 4:
+        seen = set()
+        for f in sorted(brain._facts, key=lambda x: -x.priority):
+            if f.category.startswith("user_style") and f.priority >= 4 and f.content[:60] not in seen:
+                seen.add(f.content[:60])
                 style_rules.append(f.content[:100])
         if style_rules:
-            rules.append("风格守则: " + "; ".join(style_rules[-3:]))
+            rules.append("风格守则: " + "; ".join(style_rules[:5]))
     if rules:
         return (BASE_SYSTEM_PROMPT +
                 "\n\n## 📋 经验规则（从过去错误中学习）\n" +
@@ -262,15 +270,18 @@ class Agent:
                 context += "\n[相关经验]:\n" + "\n".join(f"- {e.intent[:40]}: {e.lesson[:60]}" for e in exps)
             try:
                 fp = extract_fingerprint(user_input)
-                from memory.semantic import find_relevant_rules
-                rules = find_relevant_rules(fp)
-                if rules:
-                    context += "\n[记忆规则]:\n" + "\n".join(f"! {r.get('conclusion','')[:80]}" for r in rules[:2])
-                from memory.procedural import find_procedural
-                pm = find_procedural(fp.get("domain", ""), fp.get("task_type", ""))
-                if pm and pm.get("success_rate", 0) > 0.8:
-                    seq = " -> ".join(pm.get("tool_sequence", [])[:4])
-                    context += f"\n[经验方案]: {seq} (成功率{pm.get('success_rate',0):.0%})"
+                now = time.time()
+                if not hasattr(self, '_mc_ts') or now - self._mc_ts > 30:
+                    from memory.semantic import find_relevant_rules as _sr
+                    self._mc_rules = _sr(fp)
+                    from memory.procedural import find_procedural as _sp
+                    self._mc_proc = _sp(fp.get("domain", ""), fp.get("task_type", ""))
+                    self._mc_ts = now
+                if self._mc_rules:
+                    context += "\n[记忆]: " + self._mc_rules[0].get('conclusion','')[:100]
+                if self._mc_proc and self._mc_proc.get("success_rate", 0) > 0.8:
+                    seq = " -> ".join(self._mc_proc.get("tool_sequence", [])[:4])
+                    context += f" => {seq} ({self._mc_proc.get('success_rate',0):.0%})"
             except Exception:
                 pass
 
@@ -452,12 +463,18 @@ class Agent:
                 self.state.messages.append({"role": "assistant", "content": "[工具执行完成]"})
 
             self._after_learn(user_input)
+            if self._current_episode:
+                self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
+                self._current_episode = None
             yield {"type": "done"}
             return
 
         if not any(m.get("role") == "assistant" and m.get("content") for m in self.state.messages[-5:]):
             self.state.messages.append({"role": "assistant", "content": "[任务执行超出步数上限]"})
         self._after_learn(user_input)
+        if self._current_episode:
+            self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
+            self._current_episode = None
         yield {"type": "done"}
 
     def _parse_plan_from_text(self, text: str):
@@ -562,14 +579,6 @@ class Agent:
             pass
 
     def _after_learn(self, user_input: str):
-        # 情景记忆: 完成当前 Episode
-        try:
-            if self._current_episode:
-                outcome = "failure" if any(a.get("result") == "failure" for a in getattr(self, '_action_history', [])) else "success"
-                self._current_episode.finish(outcome=outcome)
-                self._current_episode = None
-        except Exception:
-            pass
         if not self.learner or not self.brain:
             return
         try:
