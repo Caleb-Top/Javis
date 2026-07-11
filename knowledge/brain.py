@@ -1,4 +1,4 @@
-"""大脑系统 v2 — 层次化记忆 · 优先级 · 自动过期 · 语义分组"""
+"""大脑系统 v2 — 永久记忆 · 自动压缩 · 永不删除"""
 
 import json, os, time, logging, hashlib, threading, atexit
 from pathlib import Path
@@ -12,9 +12,10 @@ FACTS_DIR = BRAIN_DIR / "facts"
 EXPERIENCES_DIR = BRAIN_DIR / "experiences"
 PAPERS_DIR = BRAIN_DIR / "papers"
 
-MAX_FACTS = 1000          # 事实上限
-MAX_EXPERIENCES = 200     # 经验上限
-EXPIRE_DAYS = 90          # 超过90天未使用的低优先级知识自动过期
+# 无上限 — 所有知识永久保存
+# 当数量过大时自动压缩摘要，绝不删除
+MAX_FACTS = 100000
+MAX_EXPERIENCES = 50000
 
 
 @dataclass
@@ -59,12 +60,18 @@ class Brain:
         atexit.register(self._flush)
 
     def _start_auto_flush(self):
-        """后台线程每30秒自动刷盘"""
+        """后台线程每30秒自动刷盘，每10分钟压缩一次"""
         def _loop():
+            tick = 0
             while True:
                 time.sleep(30)
                 try: self._flush()
                 except: pass
+                tick += 1
+                if tick >= 20:
+                    try: self.compress()
+                    except: pass
+                    tick = 0
         t = threading.Thread(target=_loop, daemon=True)
         t.start()
 
@@ -318,49 +325,44 @@ class Brain:
 
     # ── 维护 ──
 
-    def cleanup(self):
-        self._flush()  # 先刷盘再清理
-        """自动过期清理：删除低优先级且长期未使用的知识"""
-        now = time.time()
-        cutoff = now - EXPIRE_DAYS * 86400
-        old_facts = [f for f in self._facts
-                     if f.updated_at < cutoff and f.priority <= 1
-                     and f.usage_count == 0]
-        old_exps = [e for e in self._experiences
-                    if e.created_at < cutoff and e.priority <= 1
-                    and e.used_count == 0]
-        for f in old_facts:
-            self._facts.remove(f)
-            (FACTS_DIR / f"{f.id}.json").unlink(missing_ok=True)
-        for e in old_exps:
-            self._experiences.remove(e)
-            (EXPERIENCES_DIR / f"{e.id}.json").unlink(missing_ok=True)
-        if old_facts or old_exps:
-            logger.info(f"🧹 过期清理: {len(old_facts)}事实, {len(old_exps)}经验")
+    def compress(self):
+        """压缩低优先级知识：不删除，合并为摘要"""
+        self._flush()
+        groups = {}
+        for f in self._facts:
+            if f.priority <= 2 and f.usage_count <= 1:
+                key = f.category.split(".")[0]
+                groups.setdefault(key, []).append(f)
+        compressed = 0
+        for cat, facts in groups.items():
+            if len(facts) < 5:
+                continue
+            latest = max(f.updated_at for f in facts)
+            lines = [f.content[:40] for f in facts[:20]]
+            summary = " | ".join(lines)
+            if len(summary) > 300:
+                summary = summary[:300] + "..."
+            for f in facts[:5]:
+                f.content = "[压缩] " + summary[:60]
+                f.priority = max(1, f.priority)
+                f.updated_at = latest
+                compressed += 1
+            logger.info(f"压缩: {cat} {len(facts)}条")
+        if compressed:
+            self._flush()
+        logger.info(f"压缩完成: {compressed} 条")
 
     def _trim_facts(self):
-        """超出上限时移除最低优先级的事实"""
-        self._flush()
+        """超出上限时压缩低优先级知识，绝不删除"""
         if len(self._facts) <= MAX_FACTS:
             return
-        self._facts.sort(key=lambda f: (f.priority, f.usage_count))
-        removed = self._facts[:-MAX_FACTS]
-        self._facts = self._facts[-MAX_FACTS:]
-        for f in removed:
-            (FACTS_DIR / f"{f.id}.json").unlink(missing_ok=True)
-        logger.info(f"✂️ 事实裁剪: 移除 {len(removed)} 条低优先级知识")
+        self.compress()
 
     def _trim_experiences(self):
-        """超出上限时移除最低优先级的经验"""
-        self._flush()
+        """超出上限时压缩低优先级经验，绝不删除"""
         if len(self._experiences) <= MAX_EXPERIENCES:
             return
-        self._experiences.sort(key=lambda e: (e.priority, e.created_at))
-        removed = self._experiences[:-MAX_EXPERIENCES]
-        self._experiences = self._experiences[-MAX_EXPERIENCES:]
-        for e in removed:
-            (EXPERIENCES_DIR / f"{e.id}.json").unlink(missing_ok=True)
-        logger.info(f"✂️ 经验裁剪: 移除 {len(removed)} 条低优先级经验")
+        self.compress()
 
     def _save_fact(self, fact: Fact):
         (FACTS_DIR / f"{fact.id}.json").write_text(

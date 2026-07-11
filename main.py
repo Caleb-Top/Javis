@@ -19,7 +19,7 @@ from core.engine import InferenceEngine,LOCAL_MODEL
 from knowledge.brain import Brain;from knowledge.learner import Learner
 from knowledge.papers_db import ingest_to_brain;from knowledge.human_knowledge import inject_to_brain as inject_human
 brain=Brain();learner=Learner()
-try:brain.cleanup()
+try:brain.compress()
 except:pass
 try:ingest_to_brain(brain);logger.info("论文知识已注入大脑")
 except Exception as e:logger.warning(f"论文注入跳过:{e}")
@@ -67,12 +67,11 @@ except Exception as _ct_e:
     logger.warning(f"Catch2 注入跳过: {_ct_e}")
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
 try:
-    from memory.consolidator import get_consolidator
-    c = get_consolidator(brain)
-    c.start()
-    logger.info("记忆整合器已启动 (情景→语义→程序)")
+    from memory.controller import get_controller
+    get_controller(brain).start_cycles()
+    logger.info("记忆控制器已启动 (循环: 语义5m/压缩10m/摘要30m)")
 except Exception as e:
-    logger.warning(f"记忆整合器启动跳过: {e}")
+    logger.warning(f"记忆控制器启动跳过: {e}")
 engine=InferenceEngine(llm)
 import importlib,pkgutil;import skills as skills_pkg
 SKILL_LIST=[];CURRENT_SKILL="全功能"

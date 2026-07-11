@@ -264,46 +264,14 @@ class Agent:
         except Exception:
             self._current_episode = None
 
-        # 跨会话记忆: 全部从大脑 facts + experiences 检索
+        # 跨会话记忆: 使用统一控制器多通道检索
         context = ""
-        if self.brain:
-            try:
-                # 1. 上次对话话题（从 brain facts 中 session.topic 取）
-                topics = sorted([f for f in self.brain._facts if f.category == "session.topic"],
-                    key=lambda x: x.created_at, reverse=True)[:3]
-                if topics:
-                    context = "上次: " + "; ".join(t.content[:60] for t in topics)
-                # 2. 最近用户消息（从 brain facts 中 conversation.user_msgs 取）
-                msgs = sorted([f for f in self.brain._facts if f.category == "conversation.user_msgs"],
-                    key=lambda x: x.created_at, reverse=True)[:5]
-                if msgs:
-                    context += (" | " if context else "") + "你说过: " + " | ".join(f.content[:60] for f in msgs)
-                # 3. 知识检索
-                facts = self.brain.recall(user_input, max_results=4)
-                if facts:
-                    context += (" | " if context else "") + "知道: " + " ".join(f.content[:70] for f in facts)
-                # 4. 经验检索
-                exps = self.brain.get_experiences(user_input, max_results=2)
-                if exps:
-                    context += (" | " if context else "") + "经验: " + " ".join(e.lesson[:50] for e in exps)
-                # 5. 语义规则 + 程序记忆
-                try:
-                    from memory.episodic import extract_fingerprint
-                    fp = extract_fingerprint(user_input)
-                    now = time.time()
-                    if not hasattr(self, "_mc_ts") or now - self._mc_ts > 30:
-                        from memory.semantic import find_relevant_rules as _sr
-                        self._mc_rules = _sr(fp)
-                        from memory.procedural import find_procedural as _sp
-                        self._mc_proc = _sp(fp.get("domain",""), fp.get("task_type",""))
-                        self._mc_ts = now
-                    if self._mc_rules:
-                        context += (" | " if context else "") + "注意: " + self._mc_rules[0].get("conclusion","")[:80]
-                    if hasattr(self,"_mc_proc") and self._mc_proc and self._mc_proc.get("success_rate",0) > 0.8:
-                        seq = " -> ".join(self._mc_proc.get("tool_sequence",[])[:4])
-                        context += " | 方案: " + seq
-                except: pass
-            except: pass
+        try:
+            from memory.controller import get_controller
+            ctrl = get_controller(self.brain)
+            context = ctrl.context_block(user_input)
+        except Exception:
+            pass
 
         self.state.phase = "planning"
 # ── 规划阶段 ──
@@ -606,13 +574,12 @@ class Agent:
             pass
 
     def _after_learn(self, user_input: str):
-        # ★ 所有对话永久存入大脑 ★
-        if self.brain and user_input:
+        if self.brain:
             try:
-                clean = user_input.strip().replace(chr(10), " ")[:100]
-                self.brain.learn_fact("你说: " + clean,
-                    category="conversation.user_msgs", source="self", priority=2)
-            except: pass
+                from memory.controller import get_controller
+                get_controller(self.brain).memorize(user_input)
+            except Exception:
+                pass
         if not self.learner or not self.brain:
             return
         try:
