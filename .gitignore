@@ -65,3 +65,4 @@ _build_*.py
 # OS
 Thumbs.db
 .DS_Store
+server_*.txt
