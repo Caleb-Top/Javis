@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 环境
+venv/
+.env
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 数据缓存
+data/tts_cache/
+data/interrupt.flg
+data/wake.flg
+
+# 配置文件（含API Key）
+config.yaml
+
+# 上传文件 (用户数据)
+uploads/
+
+# 本地模型 (大文件)
+ollama_models/
+brain_data/
+memory/
+harness_output/
+workspace/
+
+# 外部学习资料 (非JARVIS源码)
+learn/
+
+# 工具链 (大文件/二进制)
+tools/rust/
+tools/mingw32/
+tools/nodejs/
+tools/Tesseract-OCR/
+tools/ImageMagick/
+tools/gh/
+tools/anthropic-plugins/
+
+# 插件缓存
+.codex/
+.claude/
+
+# 临时脚本
+_*.py
+start.bat
+start.ps1
+
+# 构建产物
+*.spec
+skill_*.exe
+_build_temp/
+_build_*.py
+
+# OS
+Thumbs.db
+.DS_Store

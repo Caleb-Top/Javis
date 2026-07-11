@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS Agent Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #020617;
+      min-height: 100vh;
+      padding: 2rem;
+      color: white;
+    }
+    .container { max-width: 1300px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot {
+      width: 12px; height: 12px; background: #22d3ee;
+      border-radius: 50%; animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 1rem; border: 1px solid #1e293b;
+      padding: 1.5rem; overflow-x: auto;
+    }
+    svg { width: 100%; min-width: 1100px; display: block; }
+    .cards {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem; margin-top: 2rem;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.5);
+      border-radius: 0.75rem; border: 1px solid #1e293b;
+      padding: 1.25rem;
+    }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>JARVIS Agent Architecture</h1>
+      </div>
+      <p class="subtitle">Multi-modal intelligent desktop assistant · ReAct-driven · Voice + Vision + Desktop Control</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1200 850">
+        <defs>
+          <marker id="arrow-glow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+          <linearGradient id="g-core" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="rgba(6,78,59,0.15)"/>
+            <stop offset="100%" stop-color="rgba(6,78,59,0.05)"/>
+          </linearGradient>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)"/>
+
+        <!-- ====================================================================
+             LAYER 1: USER INPUT (Top)
+             ==================================================================== -->
+
+        <!-- Layer Background -->
+        <rect x="30" y="20" width="1140" height="130" rx="12" fill="rgba(15,23,42,0.4)" stroke="#1e293b" stroke-width="1"/>
+
+        <!-- Layer Label -->
+        <rect x="30" y="20" width="80" height="24" rx="6" fill="#1e293b" stroke="#22d3ee" stroke-width="1"/>
+        <text x="70" y="35" fill="#22d3ee" font-size="9" font-weight="600" text-anchor="middle">INPUT</text>
+
+        <!-- MICROPHONE -->
+        <rect x="60" y="55" width="140" height="75" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="130" y="78" fill="white" font-size="11" font-weight="600" text-anchor="middle">🎤 麦克风</text>
+        <text x="130" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">Microphone Audio</text>
+        <text x="130" y="108" fill="#22d3ee" font-size="7" text-anchor="middle">持续监听 16kHz</text>
+        <text x="130" y="120" fill="#94a3b8" font-size="7" text-anchor="middle">环形缓冲 3秒</text>
+
+        <!-- WAKE WORD -->
+        <rect x="240" y="55" width="140" height="75" rx="8" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="310" y="78" fill="white" font-size="11" font-weight="600" text-anchor="middle">🔊 唤醒词</text>
+        <text x="310" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">Wake Word Detection</text>
+        <text x="310" y="108" fill="#fb7185" font-size="7" text-anchor="middle">"Javis" (可配置)</text>
+        <text x="310" y="120" fill="#94a3b8" font-size="7" text-anchor="middle">Porcupine 离线</text>
+
+        <!-- CAMERA -->
+        <rect x="420" y="55" width="140" height="75" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="490" y="78" fill="white" font-size="11" font-weight="600" text-anchor="middle">📷 摄像头</text>
+        <text x="490" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">Camera Capture</text>
+        <text x="490" y="108" fill="#22d3ee" font-size="7" text-anchor="middle">USB / 内置摄像头</text>
+        <text x="490" y="120" fill="#94a3b8" font-size="7" text-anchor="middle">按需帧捕获</text>
+
+        <!-- TEXT INPUT -->
+        <rect x="600" y="55" width="140" height="75" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="670" y="78" fill="white" font-size="11" font-weight="600" text-anchor="middle">⌨️ 文字输入</text>
+        <text x="670" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">Text / CLI / GUI</text>
+        <text x="670" y="108" fill="#22d3ee" font-size="7" text-anchor="middle">键盘输入</text>
+        <text x="670" y="120" fill="#94a3b8" font-size="7" text-anchor="middle">或粘贴图片</text>
+
+        <!-- SCREENSHOT -->
+        <rect x="780" y="55" width="140" height="75" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="850" y="78" fill="white" font-size="11" font-weight="600" text-anchor="middle">🖥️ 屏幕截图</text>
+        <text x="850" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">Screen Capture</text>
+        <text x="850" y="108" fill="#22d3ee" font-size="7" text-anchor="middle">mss 毫秒级</text>
+        <text x="850" y="120" fill="#94a3b8" font-size="7" text-anchor="middle">全屏/区域/窗口</text>
+
+        <!-- OCR -->
+        <rect x="960" y="55" width="140" height="75" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="1030" y="78" fill="white" font-size="11" font-weight="600" text-anchor="middle">🔍 OCR</text>
+        <text x="1030" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">文字提取</text>
+        <text x="1030" y="108" fill="#22d3ee" font-size="7" text-anchor="middle">PaddleOCR</text>
+        <text x="1030" y="120" fill="#94a3b8" font-size="7" text-anchor="middle">中英文识别</text>
+
+        <!-- Arrow from Mic to Wake -->
+        <line x1="200" y1="92" x2="238" y2="92" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+
+        <!-- ====================================================================
+             LAYER 2: PERCEPTION (Processing)
+             ==================================================================== -->
+
+        <rect x="30" y="170" width="1140" height="110" rx="12" fill="rgba(15,23,42,0.4)" stroke="#1e293b" stroke-width="1"/>
+        <rect x="30" y="170" width="100" height="24" rx="6" fill="#1e293b" stroke="#34d399" stroke-width="1"/>
+        <text x="80" y="185" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">PROCESS</text>
+
+        <!-- ASR -->
+        <rect x="60" y="205" width="260" height="55" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="190" y="228" fill="white" font-size="11" font-weight="600" text-anchor="middle">🎙️ 语音识别 ASR</text>
+        <text x="190" y="245" fill="#94a3b8" font-size="8" text-anchor="middle">faster-whisper · 中英自动 · 实时</text>
+
+        <!-- IMAGE ANALYSIS -->
+        <rect x="360" y="205" width="260" height="55" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="490" y="228" fill="white" font-size="11" font-weight="600" text-anchor="middle">🖼️ 图像分析 Pipeline</text>
+        <text x="490" y="245" fill="#94a3b8" font-size="8" text-anchor="middle">Vision LLM · 目标检测 · 场景理解</text>
+
+        <!-- COMBINED TEXT -->
+        <rect x="660" y="205" width="460" height="55" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="890" y="228" fill="white" font-size="11" font-weight="600" text-anchor="middle">📝 统一文本化 (Unified Text Input)</text>
+        <text x="890" y="245" fill="#94a3b8" font-size="8" text-anchor="middle">语音 + 视觉描述 + 桌面状态 → 纯文本消息</text>
+
+        <!-- Arrows between processing boxes -->
+        <line x1="320" y1="232" x2="358" y2="232" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+        <line x1="620" y1="232" x2="658" y2="232" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+
+        <!-- ====================================================================
+             LAYER 3: COGNITION (Core Logic)
+             ==================================================================== -->
+
+        <rect x="30" y="300" width="1140" height="220" rx="12" fill="url(#g-core)" stroke="#34d399" stroke-width="1.5"/>
+        <rect x="30" y="300" width="120" height="24" rx="6" fill="#1e293b" stroke="#34d399" stroke-width="1.5"/>
+        <text x="90" y="315" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">COGNITION</text>
+
+        <!-- System Config Box -->
+        <rect x="60" y="335" width="195" height="90" rx="8" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="157" y="355" fill="white" font-size="10" font-weight="600" text-anchor="middle">⚙️ GPT 风格配置</text>
+        <text x="157" y="374" fill="#a78bfa" font-size="7" text-anchor="middle">model: gpt-4o</text>
+        <text x="157" y="386" fill="#a78bfa" font-size="7" text-anchor="middle">temperature: 0.7</text>
+        <text x="157" y="398" fill="#a78bfa" font-size="7" text-anchor="middle">top_p: 0.9</text>
+        <text x="157" y="410" fill="#a78bfa" font-size="7" text-anchor="middle">wake_words: ["Javis"]</text>
+
+        <!-- Memory Box -->
+        <rect x="280" y="335" width="195" height="90" rx="8" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="377" y="355" fill="white" font-size="10" font-weight="600" text-anchor="middle">📦 记忆系统</text>
+        <text x="377" y="374" fill="#a78bfa" font-size="7" text-anchor="middle">短期记忆 (会话)</text>
+        <text x="377" y="386" fill="#a78bfa" font-size="7" text-anchor="middle">长期记忆 (向量DB)</text>
+        <text x="377" y="398" fill="#a78bfa" font-size="7" text-anchor="middle">用户偏好</text>
+        <text x="377" y="410" fill="#a78bfa" font-size="7" text-anchor="middle">ChromaDB + RAG</text>
+
+        <!-- Intent + Planner -->
+        <rect x="500" y="335" width="195" height="90" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="597" y="355" fill="white" font-size="10" font-weight="600" text-anchor="middle">🎯 意图 + 规划</text>
+        <text x="597" y="374" fill="#34d399" font-size="7" text-anchor="middle">Intent Classification</text>
+        <text x="597" y="386" fill="#34d399" font-size="7" text-anchor="middle">Task Decomposition</text>
+        <text x="597" y="398" fill="#34d399" font-size="7" text-anchor="middle">Dynamic Re-planning</text>
+        <text x="597" y="410" fill="#34d399" font-size="7" text-anchor="middle">Progress Tracking</text>
+
+        <!-- ReAct Engine (Center - Largest) -->
+        <rect x="60" y="440" width="1070" height="60" rx="10" fill="rgba(6,78,59,0.5)" stroke="#34d399" stroke-width="2"/>
+        <text x="595" y="462" fill="#34d399" font-size="13" font-weight="700" text-anchor="middle">🔄  ReAct 推理循环 (Reasoning Engine)</text>
+        <text x="595" y="482" fill="#94a3b8" font-size="9" text-anchor="middle">观察 (Observe)  →  思考 (Think)  →  行动 (Act)  →  观察 (Observe)  →  思考 ...</text>
+        <text x="595" y="495" fill="#64748b" font-size="7" text-anchor="middle">支持: Chain-of-Thought · Tool-Use · Multi-Step Planning · Error Recovery</text>
+
+        <!-- ====================================================================
+             ARROWS: Input Layers → Cognition
+             ==================================================================== -->
+        <!-- Input Layer 1 → Layer 2 -->
+        <line x1="130" y1="130" x2="130" y2="203" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <line x1="310" y1="130" x2="310" y2="203" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-rose)"/>
+        <line x1="490" y1="130" x2="490" y2="203" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)"/>
+        <text x="310" y="175" fill="#fb7185" font-size="7" text-anchor="middle">唤醒后触发</text>
+
+        <!-- Layer 2 → Layer 3 Cognition -->
+        <line x1="890" y1="260" x2="890" y2="335" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)"/>
+        <text x="905" y="305" fill="#34d399" font-size="7">输入到 LLM</text>
+
+        <!-- ====================================================================
+             LAYER 4: TOOLS (Bottom-Left)
+             ==================================================================== -->
+
+        <rect x="30" y="540" width="650" height="170" rx="12" fill="rgba(15,23,42,0.4)" stroke="#fbbf24" stroke-width="1"/>
+        <rect x="30" y="540" width="80" height="24" rx="6" fill="#1e293b" stroke="#fbbf24" stroke-width="1"/>
+        <text x="70" y="555" fill="#fbbf24" font-size="9" font-weight="600" text-anchor="middle">TOOLS</text>
+
+        <!-- Desktop Control -->
+        <rect x="50" y="575" width="130" height="60" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="115" y="595" fill="white" font-size="10" font-weight="600" text-anchor="middle">🖥️ 桌面控制</text>
+        <text x="115" y="612" fill="#94a3b8" font-size="7" text-anchor="middle">鼠标/键盘/窗口</text>
+        <text x="115" y="624" fill="#fbbf24" font-size="6" text-anchor="middle">uiautomation</text>
+
+        <!-- Camera Tool -->
+        <rect x="195" y="575" width="130" height="60" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="260" y="595" fill="white" font-size="10" font-weight="600" text-anchor="middle">📷 摄像头</text>
+        <text x="260" y="612" fill="#94a3b8" font-size="7" text-anchor="middle">拍照 / 分析</text>
+        <text x="260" y="624" fill="#fbbf24" font-size="6" text-anchor="middle">OpenCV</text>
+
+        <!-- File System -->
+        <rect x="340" y="575" width="130" height="60" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="405" y="595" fill="white" font-size="10" font-weight="600" text-anchor="middle">📁 文件系统</text>
+        <text x="405" y="612" fill="#94a3b8" font-size="7" text-anchor="middle">读 / 写 / 搜索</text>
+        <text x="405" y="624" fill="#fbbf24" font-size="6" text-anchor="middle">pathlib</text>
+
+        <!-- Web -->
+        <rect x="485" y="575" width="130" height="60" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="550" y="595" fill="white" font-size="10" font-weight="600" text-anchor="middle">🌐 网络</text>
+        <text x="550" y="612" fill="#94a3b8" font-size="7" text-anchor="middle">搜索 / API 调用</text>
+        <text x="550" y="624" fill="#fbbf24" font-size="6" text-anchor="middle">requests</text>
+
+        <!-- System -->
+        <rect x="50" y="645" width="130" height="55" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="115" y="665" fill="white" font-size="10" font-weight="600" text-anchor="middle">⚡ 系统命令</text>
+        <text x="115" y="682" fill="#94a3b8" font-size="7" text-anchor="middle">进程/系统状态</text>
+        <text x="115" y="693" fill="#fbbf24" font-size="6" text-anchor="middle">psutil</text>
+
+        <!-- Clipboard -->
+        <rect x="195" y="645" width="130" height="55" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="260" y="665" fill="white" font-size="10" font-weight="600" text-anchor="middle">📋 剪贴板</text>
+        <text x="260" y="682" fill="#94a3b8" font-size="7" text-anchor="middle">读 / 写</text>
+        <text x="260" y="693" fill="#fbbf24" font-size="6" text-anchor="middle">pyperclip</text>
+
+        <!-- Config -->
+        <rect x="340" y="645" width="130" height="55" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="405" y="665" fill="white" font-size="10" font-weight="600" text-anchor="middle">⚙️ 配置管理</text>
+        <text x="405" y="682" fill="#94a3b8" font-size="7" text-anchor="middle">参数热修改</text>
+        <text x="405" y="693" fill="#fbbf24" font-size="6" text-anchor="middle">动态生效</text>
+
+        <!-- ====================================================================
+             LAYER 5: OUTPUT (Bottom-Right)
+             ==================================================================== -->
+
+        <rect x="700" y="540" width="470" height="170" rx="12" fill="rgba(15,23,42,0.4)" stroke="#fb923c" stroke-width="1"/>
+        <rect x="700" y="540" width="90" height="24" rx="6" fill="#1e293b" stroke="#fb923c" stroke-width="1"/>
+        <text x="745" y="555" fill="#fb923c" font-size="9" font-weight="600" text-anchor="middle">OUTPUT</text>
+
+        <!-- TTS -->
+        <rect x="720" y="575" width="200" height="60" rx="8" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="820" y="595" fill="white" font-size="11" font-weight="600" text-anchor="middle">🔊 语音合成 TTS</text>
+        <text x="820" y="612" fill="#94a3b8" font-size="8" text-anchor="middle">Edge-TTS / OpenAI TTS</text>
+        <text x="820" y="625" fill="#fb923c" font-size="7" text-anchor="middle">多音色 · 可打断</text>
+
+        <!-- GUI Display -->
+        <rect x="940" y="575" width="210" height="60" rx="8" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="1045" y="595" fill="white" font-size="11" font-weight="600" text-anchor="middle">🖥️ 界面显示</text>
+        <text x="1045" y="612" fill="#94a3b8" font-size="8" text-anchor="middle">PyQt6 GUI / 命令行</text>
+        <text x="1045" y="625" fill="#fb923c" font-size="7" text-anchor="middle">系统托盘 · 状态栏</text>
+
+        <!-- Desktop Action (execution) -->
+        <rect x="720" y="650" width="430" height="50" rx="8" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="935" y="670" fill="white" font-size="11" font-weight="600" text-anchor="middle">🖱️ 桌面操作执行 (Desktop Action Execution)</text>
+        <text x="935" y="686" fill="#94a3b8" font-size="8" text-anchor="middle">鼠标坐标点击 · 键盘组合键 · 窗口管理 · 剪贴板</text>
+
+        <!-- ====================================================================
+             ARROWS: Cognition → Tools, Tools → Output
+             ==================================================================== -->
+
+        <!-- Cognition → Tools (downward) -->
+        <line x1="200" y1="500" x2="200" y2="573" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+        <line x1="800" y1="500" x2="800" y2="573" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+        <text x="210" y="545" fill="#fbbf24" font-size="7">工具调度</text>
+
+        <!-- Tool → Feedback Loop (Back to Cognition) -->
+        <path d="M 365 650 Q 365 680 500 680 L 800 680 Q 900 680 900 550 L 900 502" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow-amber)"/>
+        <text x="600" y="678" fill="#fbbf24" font-size="7">工具结果反馈 (再次进入 ReAct)</text>
+
+        <!-- ====================================================================
+             LEGEND (Top Right)
+             ==================================================================== -->
+        <text x="930" y="38" fill="white" font-size="10" font-weight="600">图例 Legend</text>
+
+        <rect x="930" y="46" width="16" height="10" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="952" y="54" fill="#94a3b8" font-size="8">Input / 输入</text>
+
+        <rect x="930" y="62" width="16" height="10" rx="2" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="952" y="70" fill="#94a3b8" font-size="8">Process / 处理</text>
+
+        <rect x="930" y="78" width="16" height="10" rx="2" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="952" y="86" fill="#94a3b8" font-size="8">Config / Memory</text>
+
+        <rect x="1030" y="46" width="16" height="10" rx="2" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="1052" y="54" fill="#94a3b8" font-size="8">Tool / 工具</text>
+
+        <rect x="1030" y="62" width="16" height="10" rx="2" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1"/>
+        <text x="1052" y="70" fill="#94a3b8" font-size="8">Output / 输出</text>
+
+        <line x1="1030" y1="82" x2="1046" y2="82" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="1052" y="86" fill="#94a3b8" font-size="8">Feedback Loop</text>
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>🎤 交互方式</h3>
+        </div>
+        <ul>
+          <li>• 语音唤醒 "Javis" (离线, 可配置)</li>
+          <li>• 语音识别 faster-whisper (中英)</li>
+          <li>• 语音合成 Edge-TTS (可打断)</li>
+          <li>• 键盘输入 / GUI 界面</li>
+          <li>• 语音播放中自动感知说话</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>🧠 认知能力</h3>
+        </div>
+        <ul>
+          <li>• ReAct 循环 (Observe → Think → Act)</li>
+          <li>• GPT 风格参数热配置</li>
+          <li>• 意图分类 + 多步任务规划</li>
+          <li>• 短期记忆 + 长期向量记忆</li>
+          <li>• 错误检测与自动重试</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>🛠️ 工具 & 感知</h3>
+        </div>
+        <ul>
+          <li>• 摄像头实时画面理解</li>
+          <li>• 桌面截图 + Vision 分析</li>
+          <li>• 鼠标/键盘/窗口自动化</li>
+          <li>• OCR 提取屏幕文字</li>
+          <li>• 文件操作 + 网络搜索</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <p class="footer">
+      JARVIS Agent · Architecture v2.0 · Windows Desktop · Designed for Claude Implementation
+    </p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,88 @@
+[
+  {
+    "repo": "huggingface/transformers",
+    "stars": 162453,
+    "language": "Python",
+    "description": "?? Transformers: the model-definition framework for state-of-the-art machine learning models in text, vision, audio, and multimodal models, for both inference and training. ",
+    "topics": [
+      "audio",
+      "deep-learning",
+      "deepseek",
+      "gemma",
+      "glm",
+      "hacktoberfest",
+      "llm",
+      "machine-learning",
+      "model-hub",
+      "natural-language-processing",
+      "nlp",
+      "pretrained-models",
+      "python",
+      "pytorch",
+      "pytorch-transformers",
+      "qwen",
+      "speech-recognition",
+      "transformer",
+      "vlm"
+    ]
+  },
+  {
+    "repo": "langchain-ai/langchain",
+    "stars": 141480,
+    "language": "Python",
+    "description": "The agent engineering platform.",
+    "topics": [
+      "agents",
+      "ai",
+      "ai-agents",
+      "anthropic",
+      "chatgpt",
+      "deepagents",
+      "enterprise",
+      "framework",
+      "gemini",
+      "generative-ai",
+      "langchain",
+      "langgraph",
+      "llm",
+      "multiagent",
+      "open-source",
+      "openai",
+      "pydantic",
+      "python",
+      "rag",
+      "typescript"
+    ]
+  },
+  {
+    "repo": "freeCodeCamp/freeCodeCamp",
+    "stars": 451509,
+    "language": "TypeScript",
+    "description": "freeCodeCamp.org's open-source codebase and curriculum. Learn math, programming, and computer science for free.",
+    "topics": [
+      "careers",
+      "certification",
+      "community",
+      "curriculum",
+      "d3",
+      "education",
+      "freecodecamp",
+      "javascript",
+      "learn-to-code",
+      "math",
+      "nodejs",
+      "nonprofits",
+      "programming",
+      "react",
+      "teachers"
+    ]
+  },
+  {
+    "repo": "practical-tutorials/project-based-learning",
+    "error": "Invoke-RestMethod : {\"message\":\"API rate limit exceeded for 52.221.197.10. (But here's the good news: Authenticated req\nuests get a higher rate limit. Check out the documentation for more details.)\",\""
+  },
+  {
+    "repo": "kamranahmedse/design-patterns-for-humans",
+    "error": "Invoke-RestMethod : {\"message\":\"API rate limit exceeded for 52.221.197.10. (But here's the good news: Authenticated req\nuests get a higher rate limit. Check out the documentation for more details.)\",\""
+  }
+]

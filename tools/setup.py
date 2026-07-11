@@ -1,0 +1,75 @@
+"""
+Javis 格式转换工具初始化
+将所有工具路径统一指向 D:\Javis\tools\ 下
+"""
+import os
+import sys
+
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+TESSERACT_DIR = os.path.join(TOOLS_DIR, "Tesseract-OCR")
+IMAGEMAGICK_DIR = os.path.join(TOOLS_DIR, "ImageMagick")
+NODEJS_DIR = os.path.join(TOOLS_DIR, "nodejs")
+GH_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "gh")
+MINGW_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "mingw32", "bin")
+TESSERACT_EXE = os.path.join(TESSERACT_DIR, "tesseract.exe")
+MAGICK_EXE = os.path.join(IMAGEMAGICK_DIR, "magick.exe")
+NODE_EXE = os.path.join(NODEJS_DIR, "node.exe")
+NPM_CMD = os.path.join(NODEJS_DIR, "npm.cmd")
+GCC_EXE = os.path.join(MINGW_DIR, "gcc.exe")
+GXX_EXE = os.path.join(MINGW_DIR, "g++.exe")
+
+def setup():
+    """初始化所有工具路径"""
+    results = {}
+
+    # 1. pytesseract
+    try:
+        import pytesseract
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_EXE
+        os.environ['TESSDATA_PREFIX'] = os.path.join(TESSERACT_DIR, 'tessdata')
+        results['pytesseract'] = f'OK -> {TESSERACT_EXE}'
+    except Exception as e:
+        results['pytesseract'] = f'FAIL: {e}'
+
+    # 2. Wand (ImageMagick)
+    try:
+        os.environ['MAGICK_HOME'] = IMAGEMAGICK_DIR
+        results['wand'] = f'OK -> {IMAGEMAGICK_DIR}'
+    except Exception as e:
+        results['wand'] = f'FAIL: {e}'
+
+    # 3. Node.js
+    if os.path.isfile(NODE_EXE):
+        results['nodejs'] = f'OK -> {NODE_EXE}'
+    else:
+        results['nodejs'] = 'SKIP: node.exe not found'
+
+    # 4. C/C++ (llvm-mingw)
+    if os.path.isfile(GCC_EXE):
+        results['mingw'] = f'OK -> {GCC_EXE}'
+    else:
+        results['mingw'] = 'SKIP: gcc not found'
+
+    # 5. GitHub CLI (gh)
+    GH_EXE = os.path.join(GH_DIR, "gh.exe")
+    if os.path.isfile(GH_EXE):
+        results['gh'] = f'OK -> {GH_EXE}'
+    else:
+        results['gh'] = 'SKIP: gh not found'
+
+    # 6. 添加到 PATH (进程级别)
+    os.environ['PATH'] = (
+        TESSERACT_DIR + os.pathsep +
+        IMAGEMAGICK_DIR + os.pathsep +
+        NODEJS_DIR + os.pathsep +
+        MINGW_DIR + os.pathsep +
+        GH_DIR + os.pathsep +
+        os.environ.get('PATH', '')
+    )
+    results['PATH'] = 'OK'
+
+    return results
+
+if __name__ == '__main__':
+    for k, v in setup().items():
+        print(f"  {k}: {v}")

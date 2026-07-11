@@ -1,0 +1,72 @@
+# =========================================
+# Javis 配置模板
+# 复制为 config.yaml 并填入你的 API Key
+# 或设置环境变量:
+#   export DEEPSEEK_API_KEY=sk-xxx
+#   export OPENAI_API_KEY=sk-xxx
+# =========================================
+
+agent:
+  confirm_dangerous: true
+  max_steps: 15
+camera:
+  device_id: 0
+  resolution:
+  - 1280
+  - 720
+model:
+  anthropic:
+    api_key: ''
+    name: claude-haiku-3-5
+  deepseek:
+    api_key: your_api_key_here
+    base_url: https://api.deepseek.com/v1
+    name: deepseek-v4-pro
+  glm:
+    api_key: ''
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    name: glm-4-flash
+  kimi:
+    api_key: ''
+    base_url: https://api.moonshot.cn/v1
+    name: moonshot-v1-8k
+  local:
+    api_key: ollama
+    base_url: http://localhost:11434/v1
+    name: deepseek-r1:8b
+  max_tokens: 32768
+  name: deepseek-v4-pro
+  openai:
+    api_key: ''
+    base_url: ''
+    name: gpt-4o-mini
+  provider: deepseek
+  qwen:
+    api_key: ''
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    name: qwen-plus
+  stream: true
+  temperature: 0.3
+  effort: max
+  max_steps: 50
+  max_retries: 8
+server:
+  host: 127.0.0.1
+  port: 8087
+user:
+  language: zh-CN
+  name: ''
+  timezone: Asia/Shanghai
+voice:
+  stt:
+    language: zh
+    model: base
+    provider: whisper
+  tts:
+    provider: edge-tts
+    rate: +0%
+    voice: zh-CN-XiaoxiaoNeural
+wake_word:
+  sensitivity: 0.5
+  words:
+  - Javis
