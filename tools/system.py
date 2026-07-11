@@ -125,3 +125,29 @@ def brain_status(**kwargs) -> ToolResult:
         return ToolResult.success("\n".join(lines))
     except Exception as e:
         return ToolResult.failure(f"检视失败: {e}")
+
+
+def memory_status(**kwargs) -> ToolResult:
+    """检视四层记忆系统的完整状态"""
+    try:
+        import main as _main
+        b = getattr(_main, 'brain', None)
+        lines = ["记忆系统状态"]
+        if b:
+            s = b.get_stats()
+            lines.append(f"事实:{s['facts_count']} 经验:{s['experiences_count']}")
+        try:
+            from memory.semantic import get_stats
+            sm = get_stats()
+            lines.append(f"语义规则:{sm.get('total_rules',0)}条 高风险:{sm.get('high_risk',0)}")
+        except:
+            lines.append("语义记忆:未启动")
+        try:
+            from memory.procedural import get_stats
+            pm = get_stats()
+            lines.append(f"程序记忆:{pm.get('total',0)}条链 成功率:{pm.get('avg_success_rate',0):.0%}")
+        except:
+            lines.append("程序记忆:未启动")
+        return ToolResult.success("\n".join(lines))
+    except Exception as e:
+        return ToolResult.failure(f"检视失败: {e}")

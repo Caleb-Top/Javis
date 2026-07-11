@@ -125,6 +125,7 @@ class Agent:
         self.engine = engine
         self.planner = Planner()
         self.reflector = Reflector(brain=brain)
+        self._current_episode = None
         try:
             from utils.config_api import load_config
             _cfg = load_config().get("model", {})
@@ -243,7 +244,14 @@ class Agent:
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
         window = list(self.state.messages[-40:])
 
-        # ── 上下文构建 ──
+        # ── 情景记忆: 创建 Episode 记录 ──
+        try:
+            from memory.episodic import Episode, extract_fingerprint
+            self._current_episode = Episode(user_input, session_id=str(time.time()))
+        except Exception:
+            self._current_episode = None
+
+        # ── 上下文构建（含语义记忆检索 + 程序记忆检索） ──
         context = ""
         if self.brain:
             facts = self.brain.recall(user_input, max_results=3)
@@ -252,6 +260,19 @@ class Agent:
             exps = self.brain.get_experiences(user_input, max_results=2)
             if exps:
                 context += "\n[相关经验]:\n" + "\n".join(f"- {e.intent[:40]}: {e.lesson[:60]}" for e in exps)
+            try:
+                fp = extract_fingerprint(user_input)
+                from memory.semantic import find_relevant_rules
+                rules = find_relevant_rules(fp)
+                if rules:
+                    context += "\n[记忆规则]:\n" + "\n".join(f"! {r.get('conclusion','')[:80]}" for r in rules[:2])
+                from memory.procedural import find_procedural
+                pm = find_procedural(fp.get("domain", ""), fp.get("task_type", ""))
+                if pm and pm.get("success_rate", 0) > 0.8:
+                    seq = " -> ".join(pm.get("tool_sequence", [])[:4])
+                    context += f"\n[经验方案]: {seq} (成功率{pm.get('success_rate',0):.0%})"
+            except Exception:
+                pass
 
         # ── 规划阶段 ──
         self.state.phase = "planning"
@@ -392,6 +413,11 @@ class Agent:
 
                     act = {"tool": tn, "params": tp, "result": "success" if result.success else "failure", "error": result.error or ""}
                     self._action_history.append(act)
+                    try:
+                        if self._current_episode:
+                            self._current_episode.record_tool_call(tn, tp, "success" if result.success else "failure", result.error or "", latency_ms=0)
+                    except Exception:
+                        pass
 
                     if not result.success and self.learner:
                         self.learner.learn_from_error(result.error, {"tool": tn, "params": tp})
@@ -536,6 +562,14 @@ class Agent:
             pass
 
     def _after_learn(self, user_input: str):
+        # 情景记忆: 完成当前 Episode
+        try:
+            if self._current_episode:
+                outcome = "failure" if any(a.get("result") == "failure" for a in getattr(self, '_action_history', [])) else "success"
+                self._current_episode.finish(outcome=outcome)
+                self._current_episode = None
+        except Exception:
+            pass
         if not self.learner or not self.brain:
             return
         try:

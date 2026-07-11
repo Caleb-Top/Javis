@@ -66,6 +66,13 @@ try:
 except Exception as _ct_e:
     logger.warning(f"Catch2 注入跳过: {_ct_e}")
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
+try:
+    from memory.consolidator import get_consolidator
+    c = get_consolidator(brain)
+    c.start()
+    logger.info("记忆整合器已启动 (情景→语义→程序)")
+except Exception as e:
+    logger.warning(f"记忆整合器启动跳过: {e}")
 engine=InferenceEngine(llm)
 import importlib,pkgutil;import skills as skills_pkg
 SKILL_LIST=[];CURRENT_SKILL="全功能"
