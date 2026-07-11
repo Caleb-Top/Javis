@@ -38,10 +38,13 @@ def extract_fingerprint(user_input: str, tools_involved: list[str] = None) -> di
         "code": ["写代码", "编程", "python", "c++", "rust", "脚本", "编译"],
         "communication": ["邮件", "微信", "钉钉", "消息", "通知", "聊天"],
     }
+    domain_scores = {}
     for domain, keywords in domains.items():
-        if any(k in t for k in keywords):
-            fp["domain"] = domain
-            break
+        score = sum(2 if k in t[:len(k)+5] else 1 for k in keywords if k in t)
+        if score > 0:
+            domain_scores[domain] = score
+    if domain_scores:
+        fp["domain"] = max(domain_scores, key=domain_scores.get)
 
     # 平台判断
     platforms = {
@@ -64,10 +67,13 @@ def extract_fingerprint(user_input: str, tools_involved: list[str] = None) -> di
         "explore": ["看看", "浏览", "查看", "检查", "状态", "信息"],
         "install": ["安装", "下载", "配置", "部署"],
     }
+    task_scores = {}
     for tt, keywords in task_types.items():
-        if any(k in t for k in keywords):
-            fp["task_type"] = tt
-            break
+        score = sum(1 for k in keywords if k in t)
+        if score > 0:
+            task_scores[tt] = score
+    if task_scores:
+        fp["task_type"] = max(task_scores, key=task_scores.get)
 
     return fp
 

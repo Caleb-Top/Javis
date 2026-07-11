@@ -497,7 +497,7 @@ if __name__=="__main__":
     try:cfg=yaml.safe_load(open(ROOT/"config.yaml",encoding="utf-8"))
     except yaml.YAMLError as e:logger.warning(f"config.yaml 解析异常: {e}");cfg={}
     except FileNotFoundError:cfg={};logger.info("使用默认配置")
-    sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(os.environ.get("PORT", sc.get("port", 8080)))
+    sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(sc.get("port", os.environ.get("PORT", 8087)))
     print(f"JARVIS http://{h}:{p}  {llm.model}  {registry.count}工具")
     try:__import__('asyncio').run(__import__('voice.tts',fromlist=['']).preload_phrases())
     except ImportError:logger.debug("TTS 模块未安装，跳过语音预加载")

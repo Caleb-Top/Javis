@@ -403,17 +403,15 @@ def _persist_language_registration(name, handler_source, compiler_path, version)
         reg_dir = Path(__file__).parent.parent / "tools_lib" / "_languages"
         reg_dir.mkdir(parents=True, exist_ok=True)
         reg_file = reg_dir / f"{name}.py"
-        content = f'''# Auto-registered language: {name}
-# compiler: {compiler_path}, version: {version}
-
-{handler_source}
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-'''
-        reg_file.write_text(content, encoding="utf-8")
+        # Always overwrite — never append.
+        source = "# Auto-registered language: " + name + chr(10)
+        source += "# compiler: " + str(compiler_path) + ", version: " + str(version) + chr(10) + chr(10)
+        source += handler_source + chr(10) + chr(10)
+        source += 'if __name__ == "__main__":' + chr(10)
+        source += '    import sys' + chr(10)
+        source += '    r = handler(sys.stdin.read())' + chr(10)
+        source += '    print(r)' + chr(10)
+        reg_file.write_text(source, encoding="utf-8")
     except Exception as e:
         logger.warning(f"持久化语言 {name} 失败: {e}")
 
