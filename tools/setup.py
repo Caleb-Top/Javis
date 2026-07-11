@@ -61,6 +61,8 @@ def setup():
     CATCH2_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "catch2")
     os.environ['CATCH2_INCLUDE'] = CATCH2_DIR
     results['catch2'] = f'OK -> {CATCH2_DIR}'
+    os.environ['GH_TOKEN'] = open(os.path.join(os.path.dirname(TOOLS_DIR), 'tools', 'gh', '.token'), encoding='utf-8').read().strip()
+    results['gh_token'] = 'OK'
 
     # 7. 添加到 PATH (进程级别)
     os.environ['PATH'] = (
