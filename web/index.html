@@ -4,8 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JAVIS · 智能助手</title>
-<link rel="stylesheet" href="/static/css/style.css?v=96">
-<script src="/static/js/app.js?v=110"></script>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<link rel="stylesheet" href="/static/css/style.v2.css">
+<script src="/static/js/app.v2.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <!-- ═══ Apple SF Symbols 风格 SVG 图标集 ═══ -->
@@ -136,11 +139,6 @@
 
   <!-- 中间 ─ 对话区 -->
   <main class="chat" id="chat-area">
-    <!-- 状态条 (processing only) -->
-    <div class="status-bar" id="status-bar" style="display:none">
-      <div class="status-bar-dot" id="status-bar-dot"></div>
-      <span class="status-bar-text" id="status-bar-text">就绪</span>
-      <span class="status-bar-tool" id="status-bar-tool"></span>
     </div>
 
     <!-- 消息列表 -->
@@ -149,11 +147,11 @@
     </div>
 
     <!-- 语音指示器 -->
-    <div class="voice-indicator" id="voice-indicator">
+    <div class="voice-indicator" id="voice-indicator" style="display:none">
       <div class="voice-wave">
         <span></span><span></span><span></span><span></span><span></span>
       </div>
-      <span id="voice-text">正在录音...</span>
+      <span id="voice-text"></span>
     </div>
 
     <!-- ═══ 模型 + 推理深度 + 快速模式 ═══ -->

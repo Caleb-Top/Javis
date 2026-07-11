@@ -10,6 +10,7 @@ TESSERACT_DIR = os.path.join(TOOLS_DIR, "Tesseract-OCR")
 IMAGEMAGICK_DIR = os.path.join(TOOLS_DIR, "ImageMagick")
 NODEJS_DIR = os.path.join(TOOLS_DIR, "nodejs")
 GH_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "gh")
+PANDOC_DIR = os.path.join(os.environ.get("LOCALAPPDATA", "C:/Users/34247/AppData/Local"), "Pandoc")
 MINGW_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "mingw32", "bin")
 TESSERACT_EXE = os.path.join(TESSERACT_DIR, "tesseract.exe")
 MAGICK_EXE = os.path.join(IMAGEMAGICK_DIR, "magick.exe")
@@ -61,6 +62,8 @@ def setup():
     CATCH2_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "catch2")
     os.environ['CATCH2_INCLUDE'] = CATCH2_DIR
     results['catch2'] = f'OK -> {CATCH2_DIR}'
+    if os.path.isdir(PANDOC_DIR) and os.path.isfile(os.path.join(PANDOC_DIR, 'pandoc.exe')):
+        results['pandoc'] = f'OK -> {os.path.join(PANDOC_DIR, "pandoc.exe")}'
     os.environ['GH_TOKEN'] = open(os.path.join(os.path.dirname(TOOLS_DIR), 'tools', 'gh', '.token'), encoding='utf-8').read().strip()
     results['gh_token'] = 'OK'
 
@@ -71,6 +74,7 @@ def setup():
         NODEJS_DIR + os.pathsep +
         MINGW_DIR + os.pathsep +
         GH_DIR + os.pathsep +
+        PANDOC_DIR + os.pathsep +
         os.environ.get('PATH', '')
     )
     results['PATH'] = 'OK'

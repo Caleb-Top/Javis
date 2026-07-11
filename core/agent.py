@@ -259,8 +259,25 @@ class Agent:
         except Exception:
             self._current_episode = None
 
+        # ── 加载上次会话摘要 ──
+        if self.brain and not hasattr(self, '_session_memory_loaded'):
+            try:
+                summaries = sorted([f for f in self.brain._facts if f.category == "session.topic" and f.priority >= 2], key=lambda x: x.created_at, reverse=True)[:3]
+                if summaries:
+                    recent = sorted(summaries, key=lambda x: x.created_at, reverse=True)[:3]
+                    for s in recent:
+                        if hasattr(self, '_last_session_summary'):
+                            self._last_session_summary += chr(10) + s.content[:100]
+                        else:
+                            self._last_session_summary = "上次: " + s.content[:100]
+            except Exception:
+                pass
+            self._session_memory_loaded = True
+
         # ── 上下文构建（含语义记忆检索 + 程序记忆检索） ──
         context = ""
+        if hasattr(self, '_last_session_summary'):
+            context = chr(10) + "[上次]: " + self._last_session_summary[:200]
         if self.brain:
             facts = self.brain.recall(user_input, max_results=3)
             if facts:
@@ -466,6 +483,9 @@ class Agent:
             if self._current_episode:
                 self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
                 self._current_episode = None
+            if self.brain:
+                topic = user_input[:80]
+                self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
             yield {"type": "done"}
             return
 
@@ -475,6 +495,9 @@ class Agent:
         if self._current_episode:
             self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
             self._current_episode = None
+        if self.brain:
+            topic = user_input[:80]
+            self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
         yield {"type": "done"}
 
     def _parse_plan_from_text(self, text: str):
