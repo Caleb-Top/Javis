@@ -1,4 +1,4 @@
-"""系统工具"""
+﻿"""系统工具"""
 import subprocess, os, logging, glob
 from core.tool_result import ToolResult
 from utils.error_messages import friendly_error
@@ -13,7 +13,7 @@ def system_info(**kwargs) -> ToolResult:
         return ToolResult.failure("psutil 未安装")
     except Exception as e:
         logger.warning(f"system_info 异常: {e}")
-        return ToolResult.failure(f"获取系统信息失败: {e}")
+        return ToolResult.failure("获取系统信息失败: {e}")
 
 def system_execute(command: str, timeout: int = 30) -> ToolResult:
     try:
@@ -95,3 +95,101 @@ def open_app(name: str = "", app: str = "", **kwargs) -> ToolResult:
         paths=[p.strip() for p in result.data.split("\n") if p.strip() and "卸载" not in p]
         if paths: return open_file(paths[0])
     return ToolResult.failure(f"未找到 {target}，请确认已安装")
+
+
+def brain_status(**kwargs) -> ToolResult:
+    """检视自身的 Brain（知识库/记忆/经验）状态"""
+    try:
+        import main as _main
+        b = getattr(_main, 'brain', None)
+        if not b:
+            return ToolResult.success("大脑实例未加载")
+        stats = b.get_stats()
+        high_pri = [f for f in b._facts if f.priority >= 4]
+        recent = b._facts[-10:] if len(b._facts) >= 10 else b._facts[:]
+        lines = [
+            f"大脑: {stats['facts_count']} 事实, {stats['experiences_count']} 经验",
+            f"分类 ({len(stats.get('categories', {}))}):",
+        ]
+        for cat, cnt in sorted(stats.get('categories', {}).items(), key=lambda x: -x[1])[:8]:
+            lines.append(f"  {cat}: {cnt}")
+        lines.append("")
+        lines.append(f"高优先级(>=4★): {len(high_pri)} 条")
+        for f in high_pri[-5:]:
+            lines.append(f"  [{f.priority}★] {f.content[:70]}")
+        lines.append("")
+        lines.append(f"最近学习:")
+        for f in recent[-5:]:
+            lines.append(f"  [{f.category}] {f.content[:60]}")
+        return ToolResult.success("\n".join(lines))
+    except Exception as e:
+        return ToolResult.failure(f"检视失败: {e}")
+
+
+def memory_status(**kwargs) -> ToolResult:
+    """检视四层记忆系统的完整状态"""
+    try:
+        import main as _main
+        b = getattr(_main, 'brain', None)
+        lines = ["记忆系统状态"]
+        if b:
+            s = b.get_stats()
+            lines.append(f"事实:{s['facts_count']} 经验:{s['experiences_count']}")
+        try:
+            from memory.semantic import get_stats
+            sm = get_stats()
+            lines.append(f"语义规则:{sm.get('total_rules',0)}条 高风险:{sm.get('high_risk',0)}")
+        except:
+            lines.append("语义记忆:未启动")
+        try:
+            from memory.procedural import get_stats
+            pm = get_stats()
+            lines.append(f"程序记忆:{pm.get('total',0)}条链 成功率:{pm.get('avg_success_rate',0):.0%}")
+        except:
+            lines.append("程序记忆:未启动")
+        return ToolResult.success("\n".join(lines))
+    except Exception as e:
+        return ToolResult.failure(f"检视失败: {e}")
+
+
+
+def github_search(**kwargs) -> ToolResult:
+    """搜索 GitHub 仓库，支持 Bearer token 认证"""
+    query = kwargs.get("query", "").strip()
+    sort = kwargs.get("sort", "stars")
+    order = kwargs.get("order", "desc")
+    per_page = min(kwargs.get("per_page", 10), 20)
+    if not query:
+        return ToolResult.failure("搜索关键词不能为空")
+    try:
+        import requests
+        token = os.environ.get("GH_TOKEN", "")
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        r = requests.get(
+            "https://api.github.com/search/repositories",
+            params={"q": query, "sort": sort, "order": order, "per_page": per_page},
+            headers=headers, timeout=15
+        )
+        if r.status_code == 403:
+            return ToolResult.failure("GitHub API 限流，请在 tools/gh/.token 配置 token")
+        if r.status_code != 200:
+            return ToolResult.failure(f"GitHub API 错误: {r.status_code}")
+        data = r.json()
+        items = data.get("items", [])
+        if not items:
+            return ToolResult.success(f"搜索 '{query}' 无结果")
+        lines = [f"GitHub 搜索: {query} ({data.get('total_count', 0)} 结果)"]
+        for item in items[:per_page]:
+            name = item.get("full_name", "?")
+            stars = item.get("stargazers_count", 0)
+            desc = (item.get("description") or "无描述")[:80]
+            lang = item.get("language") or "?"
+            url = item.get("html_url", "")
+            lines.append(f"  [{stars}★] {name} ({lang})")
+            lines.append(f"    {desc}")
+            lines.append(f"    {url}")
+        return ToolResult.success(chr(10).join(lines))
+    except Exception as e:
+        return ToolResult.failure(f"搜索失败: {e}")

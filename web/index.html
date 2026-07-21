@@ -4,8 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JAVIS · 智能助手</title>
-<link rel="stylesheet" href="/static/css/style.css?v=96">
-<script src="/static/js/app.js?v=110"></script>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<link rel="stylesheet" href="/static/css/style.css">
+<script src="/static/js/app.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <!-- ═══ Apple SF Symbols 风格 SVG 图标集 ═══ -->
@@ -93,7 +96,7 @@
     </button>
     <div class="brand">
       <div class="brand-orb" id="brand-orb">
-        <div class="brand-orb-core"></div>
+        
       </div>
       <span class="brand-name">JAVIS</span>
     </div>
@@ -121,6 +124,7 @@
 <div class="layout">
 
   <!-- 左侧 ─ 对话历史 -->
+  <div class="sidebar-wrap">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <span>对话历史</span>
@@ -135,25 +139,32 @@
   </aside>
 
   <!-- 中间 ─ 对话区 -->
-  <main class="chat" id="chat-area">
-    <!-- 状态条 (processing only) -->
+<main class="chat" id="chat-area">
+
+    <!-- 状态栏 -->
     <div class="status-bar" id="status-bar" style="display:none">
-      <div class="status-bar-dot" id="status-bar-dot"></div>
-      <span class="status-bar-text" id="status-bar-text">就绪</span>
-      <span class="status-bar-tool" id="status-bar-tool"></span>
+      <span id="chat-step" style="display:none"></span>
+      <span id="status-bar-text"></span>
+      <span id="status-bar-tool" style="display:none"></span>
     </div>
 
     <!-- 消息列表 -->
     <div class="messages" id="transcript-layer">
+      <!-- ????? -->
+      <div class="drop-overlay" id="drop-overlay">
+        <div class="drop-icon">??</div>
+        <div class="drop-text">?????????</div>
+        <div class="drop-hint">????????</div>
+      </div>
       <!-- 空状态由 JS 动态生成 -->
     </div>
 
     <!-- 语音指示器 -->
-    <div class="voice-indicator" id="voice-indicator">
+    <div class="voice-indicator" id="voice-indicator" style="display:none">
       <div class="voice-wave">
         <span></span><span></span><span></span><span></span><span></span>
       </div>
-      <span id="voice-text">正在录音...</span>
+      <span id="voice-text"></span>
     </div>
 
     <!-- ═══ 模型 + 推理深度 + 快速模式 ═══ -->
@@ -211,6 +222,7 @@
       <div class="input-row">
         <input type="file" id="file-input" style="display:none" multiple onchange="handleFileUpload(event)">
         <input type="file" id="folder-input" style="display:none" webkitdirectory multiple onchange="handleFolderUpload(event)">
+        <span class="voice-status" id="voice-status" style="display:none">??</span>
         <button class="input-btn voice-btn" id="voice-btn" onclick="toggleVoice()" title="语音">
           <svg width="18" height="18"><use href="#i-mic"/></svg>
         </button>
@@ -221,7 +233,7 @@
           <svg width="18" height="18"><use href="#i-folder"/></svg>
         </button>
         <div class="input-field">
-          <textarea id="user-input" class="text-input" placeholder="输入消息，Enter 发送" rows="1"
+          <textarea id="user-input" class="text-input" placeholder="?????Enter ??  |  Shift+Enter ??" rows="1"
             onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"
             oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';"></textarea>
         </div>
@@ -229,6 +241,11 @@
           <svg width="18" height="18"><use href="#i-send"/></svg>
         </button>
       </div>
+    </div>
+    <div class="kbd-hints" id="kbd-hints">
+      <span class="kbd-hint-item"><kbd>Enter</kbd> ??</span>
+      <span class="kbd-hint-item"><kbd>Shift</kbd>+<kbd>Enter</kbd> ??</span>
+      <span class="kbd-hint-item"><kbd>F2</kbd> ??</span>
     </div>
   </main>
 

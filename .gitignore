@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -17,11 +17,6 @@ venv/
 *.swp
 *.swo
 
-# 数据缓存
-data/tts_cache/
-data/interrupt.flg
-data/wake.flg
-
 # 配置文件（含API Key）
 config.yaml
 
@@ -31,7 +26,7 @@ uploads/
 # 本地模型 (大文件)
 ollama_models/
 brain_data/
-memory/
+memory/index.json
 harness_output/
 workspace/
 
@@ -66,3 +61,33 @@ _build_*.py
 Thumbs.db
 .DS_Store
 server_*.txt
+memory/__pycache__/
+memory/conversations/
+
+# 嵌入运行时 (大文件)
+Lib/
+python-embed/
+tools/rust/
+*.dll
+*.exe
+*.pt
+
+# 运行时数据
+data/
+logs/
+output/
+train_output/
+tmp/
+thoughts/
+
+# 生成图片
+*.png
+
+# 一次性诊断/清理脚本
+check_*.py
+clean_*.py
+convert_screenparse.py
+start.py
+start.vbs
+train_ui.py
+javis_ui_preview.html
