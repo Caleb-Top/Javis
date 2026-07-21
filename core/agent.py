@@ -28,6 +28,25 @@ SAFE_TOOLS = {
     "focus_window", "open_app", "end_turn",
 }
 
+# ── 优化: 轻量请求 — 快速工具直接跳过规划阶段 ──
+QUICK_TOOLS = {
+    "system_info", "file_list", "file_read", "brain_status",
+    "memory_status", "github_search", "find_app", "list_windows",
+    "screenshot", "camera_snapshot", "open_app", "focus_window",
+    "camera_list", "set_volume",
+}
+
+def _is_quick_request(user_input: str) -> bool:
+    """判断是否是轻量请求 — 不需要规划"""
+    quick_keywords = [
+        "硬盘", "磁盘", "cpu", "内存", "显卡", "gpu", "空间",
+        "github", "git push", "git pull", "git status", "git clone",
+        "状态", "版本", "谁", "版本号", "今天", "时间", "日期",
+        "打开", "截图", "截屏", "心跳", "报告",
+    ]
+    text = user_input.lower()
+    return any(kw in text for kw in quick_keywords)
+
 def _log(t, d):
     action_log.append({"time": time.strftime("%H:%M:%S"), "type": t, "detail": d})
     if len(action_log) > 500: action_log.pop(0)
@@ -141,6 +160,9 @@ class Agent:
         self.planner = Planner()
         self.reflector = Reflector(brain=brain)
         self._current_episode = None
+        # ── 优化: System Prompt 缓存 ──
+        self._cached_prompt = ""
+        self._cached_prompt_step = -1
         try:
             from utils.config_api import load_config
             _cfg = load_config().get("model", {})
@@ -246,7 +268,10 @@ class Agent:
         self._action_history = []
 
     def _build_system_prompt(self) -> str:
-        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引 + 风格指导）"""
+        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引 + 缓存）"""
+        # ── 优化: 缓存 — 每 5 轮重建一次 ──
+        if self._cached_prompt and self.state.step - self._cached_prompt_step < 5:
+            return self._cached_prompt
         prompt = build_dynamic_prompt(brain=self.brain)
         phase_guide = {
             "planning": "\n\n【当前阶段: 规划】先分析需求, 输出完整计划后再执行工具.",
@@ -254,6 +279,8 @@ class Agent:
             "verifying": "\n\n【当前阶段: 验证】检查上一步是否正确, 如失败则重试.",
         }
         prompt += phase_guide.get(self.state.phase, "")
+        self._cached_prompt = prompt
+        self._cached_prompt_step = self.state.step
         return prompt
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
@@ -273,13 +300,16 @@ class Agent:
         except Exception:
             pass
 
-        self.state.phase = "planning"
-# ── 规划阶段 ──
-        self.state.phase = "planning"
-        self.planner.create_plan(user_input)
-        plan_snapshot = self.planner.get_plan_snapshot()
-        if plan_snapshot:
-            context = plan_snapshot + "\n" + context if context else plan_snapshot
+        # 优化: 轻量请求跳过规划
+        if _is_quick_request(user_input):
+            self.state.phase = "executing"
+            _log("quick_path", f"轻量: {user_input[:40]}")
+        else:
+            self.state.phase = "planning"
+            self.planner.create_plan(user_input)
+            plan_snapshot = self.planner.get_plan_snapshot()
+            if plan_snapshot:
+                context = plan_snapshot + "\n" + context if context else plan_snapshot
 
         msg_content = user_input + context if context else user_input
         messages = window + [{"role": "user", "content": msg_content}]
