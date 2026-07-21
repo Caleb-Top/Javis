@@ -1,87 +1,60 @@
-# Javis vs Hermes Agent — 逐项对比报告
+# Javis vs Codex Computer Use — 完整对比表
 
-> Hermes Agent: 153,392行 · 3,139 Python文件 · 156 agent模块 · 947 TypeScript桌面端
-> Javis:        6,360行  ·    13 Python文件 ·   1 agent模块 ·   3 Web文件(纯HTML)
+## 一、工具 API 面
 
----
+| 功能 | Codex 工具 | 参数 | Javis 工具 | 状态 |
+|------|-----------|------|-----------|------|
+| **截图** | `screenshot` | window_id | `screenshot` | ✅ |
+| **截图+UI+边界** | `get_window_state` | window_id, include_text, include_screenshot | `get_window_state` | ✅ |
+| **鼠标点击** | `click` | x, y, click_count, mouse_button | `mouse_click` | ✅ |
+| **按控件点击** | `click_element` | element_index | `click_element` | ✅ |
+| **拖拽** | `drag` | from_x, from_y, to_x, to_y | `mouse_drag` | ✅ |
+| **滚动** | `scroll` | scrollX, scrollY | `mouse_scroll` | ✅ |
+| **控件内滚动** | `scroll_element` | element_index, direction | `scroll_element` | ✅ |
+| **键盘输入** | `type_text` | text | `keyboard_type` | ✅ |
+| **按键** | `press_key` | keys (数组) | `keyboard_press` + KEY_MAP | ✅ |
+| **填值** | `set_value` | element_index, value | `set_value` | ✅ |
+| **等待** | `wait` | ms (毫秒) | `wait` | ✅ |
+| **打开应用** | `launch_app` | app_id / app | `open_app`, `launch_app` (新增) | ✅ |
+| **聚焦窗口** | `activate_window` | window_id | `focus_window` | ✅ |
+| **列窗口** | `list_windows` | — | `list_windows` | ✅ |
+| **列应用** | `list_apps` | — | `find_app` | ✅ |
+| **读 UI** | `get_window_state` → accessibility | — | `read_ui_window` | ✅ |
+| **前台窗口** | 内部 | — | `get_foreground_window` | ✅ |
+| **次级操作** | `perform_secondary_action` | element_index, action | `perform_secondary_action` | ✅ |
+| **终止** | `end_turn` | — | ❌ 无 | **缺失** |
 
-## 一、架构对比
+## 二、Codex 有且 Javis 已补齐的 3 项 ✅
 
-| 维度 | Hermes Agent | Javis |
-|------|-------------|-------|
-| 语言 | Python + TypeScript(桌面端) | Python + HTML/CSS/JS |
-| 桌面端 | Electron + React (947 TS文件) | 无 (Web-First策略, 未打包) |
-| 代理循环 | `agent_runtime_helpers.py` 3473行 | `agent.py` 617行 |
-| 状态管理 | `hermes_state.py` 7781行 | `AgentState` dataclass 40行 |
-| CLI | `cli.py` 16089行 | `启动Javis.bat` 8行 |
-| 插件系统 | 19个插件目录 | 无 |
-| 浏览器引擎 | browser_use + firecrawl + browserbase | 无 |
+| # | 工具 | 状态 | 版本 |
+|---|------|------|------|
+| 1 | `scroll_element(element_index, direction)` | ✅ 已实现 | v47 |
+| 2 | `set_value(element_index, value)` | ✅ 已实现 | v47 |
+| 3 | `perform_secondary_action(element_index, action)` | ✅ 已实现 | v47 |
 
-## 二、功能矩阵 (✅有 / ⚠️半成品 / ❌无)
+## 三、Javis 有但 Codex 没有的
 
-| 功能 | Hermes | Javis |
-|------|--------|-------|
-| **LLM调用** | | |
-| Native Function Calling | ✅ | ✅ |
-| 多Provider切换 | ✅ 30+ | ✅ 7 |
-| 流式输出 | ✅ | ✅ |
-| **记忆系统** | | |
-| 对话记忆 | ✅ memory插件 | ❌ |
-| 上下文压缩 | ✅ context_compressor | ❌ |
-| Session搜索 | ✅ session_search工具 | ❌ |
-| **工具系统** | | |
-| 工具数量 | 60+ | 17 |
-| 浏览器操控 | ✅ browser_use | ❌ |
-| 网页搜索 | ✅ web_search | ❌ |
-| 桌面控制 | ❌ (服务端无GUI) | ✅ 截图/键鼠/窗口 |
-| 文件管理 | ✅ | ✅ |
-| 语音输入 | ✅ whisper | ✅ faster-whisper |
-| 语音输出 | ✅ TTS providers | ✅ edge-tts |
-| 摄像头 | ❌ | ✅ |
-| **开发体验** | | |
-| 单元测试 | ✅ 大量 | ❌ 0 |
-| CLI工具 | ✅ 完整 | ❌ |
-| Docker部署 | ✅ | ❌ |
-| CRON定时任务 | ✅ | ❌ |
-| 插件热加载 | ✅ | ❌ |
-| API Key加密 | ✅ secret_sources | ❌ 明文 |
-| **部署** | | |
-| 云端部署 | ✅ Docker/SSH | ❌ |
-| 本地部署 | ✅ | ✅ |
-| 桌面应用 | ✅ Electron | ❌ |
-| 自动启动 | ✅ | ✅ .bat |
-
-## 三、你比 Hermes 强的地方
-
-| 优势 | 说明 |
+| 功能 | 说明 |
 |------|------|
-| 🖥️ **桌面控制** | Hermes跑服务器端, 没有桌面GUI操控。你能截图/键鼠/窗口控制 |
-| 📷 **摄像头** | Hermes没有camera工具 |
-| 🗂️ **open_app/find_app** | 独创, 扫描开始菜单打开应用, Hermes做不到 |
-| 🎯 **定位清晰** | 你就是Windows桌面助手, 不试图做一切 |
-| 📦 **体积小** | 274KB vs Hermes的数百MB, 启动快 |
-| 💰 **成本低** | DeepSeek API 1元/百万token, 本地模型零成本 |
+| **技能系统** | 6 大类技能可切换 |
+| **LLM 接入** | DeepSeek/GLM/Kimi/千问/OAI/Claude/本地 |
+| **对话持久化** | 文件系统记忆，重启不丢 |
+| **拖拽** | `mouse_drag`（Codex 也有） |
+| **窗口缓存验证** | 操作前自动检查窗口边界 |
+| **循环检测** | 同一工具调用 3 次以上自动中断 |
+| **action 计数器** | 30 次上限防死循环 |
+| **语音 TTS/STT** | 语音合成+识别 |
+| **前端 UI** | 浏览器 Web 界面 |
+| **.exe 技能编译** | 每个技能可单独打包为独立 exe |
 
-## 四、Hermes 碾压你的地方
+## 四、质量/流程差距
 
-| 劣势 | 说明 |
-|------|------|
-| 🧠 **记忆系统** | 完全缺失, 刷新就失忆 |
-| 🧪 **测试** | 0个测试, 全靠我手工测 |
-| 🔌 **插件系统** | 无, 加功能要改核心代码 |
-| 🌐 **浏览器** | 无, 不能上网搜东西 |
-| 💬 **多渠道** | 无, 只能网页端用 |
-| 🔒 **安全** | API Key明文存config.yaml |
-| 📱 **跨设备** | 无, 只能本机访问 |
-
-## 五、优先补课清单
-
-```
-🔴 1. 对话记忆 (ChromaDB或localStorage) — 最重要
-🔴 2. API Key加密 (哪怕简单base64)
-🟡 3. 拆分app.js为chat/voice/settings
-🟡 4. 写3-5个核心工具单测
-🟡 5. 添加浏览器工具 (打开网页/搜索)
-🟢 6. 插件系统基础框架
-🟢 7. 打包Electron桌面版
-```
+| 维度 | Codex | Javis | 差距 |
+|------|-------|-------|------|
+| **截图引擎** | Direct3D GPU | mss CPU | 速度 |
+| **UI 自动化** | UIA (原生) | Win32 EnumChildWindows | 深度 |
+| **操作验证** | 每次操作前 verify window | 提示词建议但无强制 | 可靠性 |
+| **用户打断** | Escape 键检测 | ❌ 无 | 安全性 |
+| **应用风险** | low/high 分级 | ❌ 无 | 安全 |
+| **拾取精确** | UIA → HWND → GetWindowRect | Win32 GetWindowRect | 精度一致 |
+| **进程名匹配** | EnumProcessModules | GetWindowModuleFileNameW | 一致 |

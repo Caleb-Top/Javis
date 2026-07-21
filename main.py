@@ -1,4 +1,4 @@
-﻿"""JARVIS Web 版入口"""
+"""JARVIS Web 版入口"""
 import os,sys,json,logging,asyncio
 sys.excepthook=lambda t,v,tb:print(f"FATAL: {t.__name__}: {v}",file=sys.stderr,flush=True)
 from pathlib import Path
@@ -18,8 +18,8 @@ from core.llm_client import LLMClient;from core.tool_registry import ToolRegistr
 from core.engine import InferenceEngine,LOCAL_MODEL
 from knowledge.brain import Brain;from knowledge.learner import Learner
 from knowledge.papers_db import ingest_to_brain;from knowledge.human_knowledge import inject_to_brain as inject_human
-brain=Brain();learner=Learner(brain=brain)
-try:brain.compress()
+brain=Brain();learner=Learner()
+try:brain.cleanup()
 except:pass
 try:ingest_to_brain(brain);logger.info("论文知识已注入大脑")
 except Exception as e:logger.warning(f"论文注入跳过:{e}")
@@ -33,14 +33,6 @@ try:
     logger.info("🔗 执行引擎已连接大脑和注册中心")
 except Exception as e:
     logger.warning(f"执行引擎初始化跳过: {e}")
-try:
-    brain.learn_fact("用户风格: 自然口语，先结论后数据，不读原始数据行，短句优先",
-                     category="user_style.base", source="user_feedback", priority=5)
-    brain.learn_fact("规则: 工具原始数据不能复读，用自己的话重新组织",
-                     category="user_style.rule.no_repeat_data", source="user_feedback", priority=5)
-    logger.info("用户风格初始化完成")
-except Exception as e:
-    logger.warning(f"用户风格初始化跳过: {e}")
 try:
     from tools_lib.tool_superpowers import inject_to_brain as _sp_inj
     _sp_inj(brain)
@@ -66,12 +58,6 @@ try:
 except Exception as _ct_e:
     logger.warning(f"Catch2 注入跳过: {_ct_e}")
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
-try:
-    from memory.controller import get_controller
-    get_controller(brain).start_cycles()
-    logger.info("记忆控制器已启动 (循环: 语义5m/压缩10m/摘要30m)")
-except Exception as e:
-    logger.warning(f"记忆控制器启动跳过: {e}")
 engine=InferenceEngine(llm)
 import importlib,pkgutil;import skills as skills_pkg
 SKILL_LIST=[];CURRENT_SKILL="全功能"
@@ -338,17 +324,8 @@ async def api_terminal_exec(data: dict = Body(...)):
                 capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         else:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                timeout=timeout, encoding="utf-8", errors="replace")
-        out = r.stdout.strip()
-        err = r.stderr.strip()
-        if out and err:
-            out = out + "
-[stderr]
-" + err
-        elif err:
-            out = err
-        if not out:
-            out = f"(exit code: {r.returncode})"
+                timeout=timeout, encoding="gbk", errors="replace")
+        out = r.stdout.strip() or r.stderr.strip() or f"(exit:{r.returncode})"
         return {"ok": True, "output": out[:5000], "exit_code": r.returncode}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": "命令超时", "exit_code": -1}
@@ -505,7 +482,7 @@ if __name__=="__main__":
     try:cfg=yaml.safe_load(open(ROOT/"config.yaml",encoding="utf-8"))
     except yaml.YAMLError as e:logger.warning(f"config.yaml 解析异常: {e}");cfg={}
     except FileNotFoundError:cfg={};logger.info("使用默认配置")
-    sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(sc.get("port", os.environ.get("PORT", 8087)))
+    sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(os.environ.get("PORT", sc.get("port", 8080)))
     print(f"JARVIS http://{h}:{p}  {llm.model}  {registry.count}工具")
     try:__import__('asyncio').run(__import__('voice.tts',fromlist=['']).preload_phrases())
     except ImportError:logger.debug("TTS 模块未安装，跳过语音预加载")

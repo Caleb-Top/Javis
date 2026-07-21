@@ -95,7 +95,6 @@ class ReflectionResult:
     priority: int = 1               # 优先级 1-5
     domain: str = "general"         # 所属领域
     created_at: float = 0.0
-    style_lessons: list[str] = field(default_factory=list)  # 风格层面教训
 
 
 class Reflector:
@@ -139,17 +138,6 @@ class Reflector:
         # 判断目标是否达成（有成功步骤且无致命失败）
         goal_achieved = len(successes) > 0 and len(failures) == 0
 
-        # Style assessment (brain-native)
-        style_lessons = []
-        if self.brain and user_input:
-            try:
-                from knowledge.brain import Brain
-                ud = Brain.extract_style(user_input)
-                if ud.get("复读数据", 0) > 0:
-                    style_lessons.append("user msg contains raw data format - assistant likely repeated tool output before")
-            except Exception:
-                pass
-
         result = ReflectionResult(
             id=hashlib.md5(f"ref{user_input}{now}".encode()).hexdigest()[:12],
             goal_achieved=goal_achieved,
@@ -161,7 +149,6 @@ class Reflector:
             priority=priority,
             domain=", ".join(sorted(domains_affected)) if domains_affected else "general",
             created_at=now,
-            style_lessons=style_lessons,
         )
         self._last_reflection = result
         logger.info(f"🔍 反思完成: {'✅成功' if goal_achieved else '❌部分失败'} "

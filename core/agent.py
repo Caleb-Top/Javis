@@ -39,33 +39,7 @@ try:
     _PERM_LEVELS_AVAILABLE = True
 except Exception:
     _PERM_LEVELS_AVAILABLE = False
-BASE_SYSTEM_PROMPT = """你是 Javis — 一个真正能思考、能编程、能控制电脑的 AI 智能体。
-
-## 你的说话方式（比功能更重要）
-
-你的风格模板参考了 Claude Fable 5（你的搭档）——自然、不装、有温度。
-
-**说人话，别念报告。**
-- 不要上来就抛 "CPU:10.9% 内存:60.6%" 这种冷冰冰的数据行
-- 先来一句自然的结论："还行，挺轻快的，CPU才跑了10%"
-- 数据是支撑，不是开头
-
-**交代背景，不要只扔结论。**
-- 坏："✅ system_info — CPU:10.9% 内存:60.6%"
-- 好："看了一眼系统，资源吃得不重，CPU 才 10%，内存占了六成，磁盘还有将近三分之二的空间。"
-
-**你是助手，不是说明书。**
-- 用"咱"、"我们"拉近距离没关系
-- 复杂操作前简单说一句要干什么："我先看看你的文件结构"
-- 做完后说一句结果，不用反复确认"要继续吗"
-
-**语感上：**
-- 短句优先，偶尔来点语气词（嗯、对了、不过）
-- 不用每句话都感叹号
-- 不用每段都加 emoji
-- 数据和结论之间自然过渡，不要让用户感觉在读 log
-- 遇到问题直说，不用铺垫
-- 绝对不要复读工具返回的原始数据。工具返回了 "CPU:10% 内存:61%" 你看到了就行，换成你自己的话说
+BASE_SYSTEM_PROMPT = """你是 Javis — 一个真正能思考、能编程、能控制电脑的 AI 智能体.
 
 ## 你的核心能力
 当用户提出需求时, 按阶段推进:
@@ -85,43 +59,21 @@ read_ui_window, get_window_state
 1. 先分析再行动, 复杂任务必须输出计划
 2. 能用 run_code 解决的, 就写代码
 3. 执行后自己验证结果
-4. 用中文回复，用上面的风格
-5. 你有跨会话持久记忆。每次对话开始时，系统提示里的「经验规则」和「风格守则」
-   是从你硬盘上的 brain_data/ 加载的——你的用户偏好、对话教训都写在那里。
-   所以不要说自己"记不住"或"关窗就忘"。你记着呢，只是每次需要重新加载到上下文而已。
-6. 如果忘记之前说过什么，用 brain_status 或 memory_status 查自己的记忆库"""
+4. 你是中文 AI, 用中文回复"""
 
 
 def build_dynamic_prompt(brain=None) -> str:
-    """构建动态 System Prompt：基础提示 + 经验 + 风格 + 上次话题 + 你说"""
+    """构建动态 System Prompt：基础提示 + 高优先级经验规则"""
     rules = []
     if brain:
-        seen_exp = set()
         for exp in brain.get_priority_experiences(min_priority=3):
-            if exp.lesson and len(exp.lesson) > 10 and exp.lesson[:100] not in seen_exp:
-                seen_exp.add(exp.lesson[:100])
+            if exp.lesson and len(exp.lesson) > 10:
                 rules.append(exp.lesson[:120])
         rules = rules[:5]
-        style_rules = []
-        seen = set()
-        for f in sorted(brain._facts, key=lambda x: -x.priority):
-            if f.category.startswith("user_style") and f.priority >= 4 and f.content[:60] not in seen:
-                seen.add(f.content[:60])
-                style_rules.append(f.content[:100])
-        if style_rules:
-            rules.append("风格: " + "; ".join(style_rules[:5]))
-        tops = sorted([f for f in brain._facts if f.category == "session.topic"],
-                      key=lambda x: x.created_at, reverse=True)[:3]
-        if tops:
-            rules.append("上次: " + "; ".join(t.content[:60] for t in tops))
-        msgs = sorted([f for f in brain._facts if f.category == "conversation.user_msgs"],
-                      key=lambda x: x.created_at, reverse=True)[:3]
-        if msgs:
-            rules.append("你说: " + "; ".join(f.content[:50] for f in msgs))
     if rules:
         return (BASE_SYSTEM_PROMPT +
-                "\n\n## 📋 记忆\n" +
-                "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules[:8])))
+                "\n\n## 📋 经验规则（从过去错误中学习）\n" +
+                "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules)))
     return BASE_SYSTEM_PROMPT
 
 
@@ -140,7 +92,6 @@ class Agent:
         self.engine = engine
         self.planner = Planner()
         self.reflector = Reflector(brain=brain)
-        self._current_episode = None
         try:
             from utils.config_api import load_config
             _cfg = load_config().get("model", {})
@@ -246,35 +197,29 @@ class Agent:
         self._action_history = []
 
     def _build_system_prompt(self) -> str:
-        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引 + 风格指导）"""
+        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引）"""
         prompt = build_dynamic_prompt(brain=self.brain)
         phase_guide = {
             "planning": "\n\n【当前阶段: 规划】先分析需求, 输出完整计划后再执行工具.",
             "executing": "\n\n【当前阶段: 执行】按计划逐步执行, 每步汇报结果.",
             "verifying": "\n\n【当前阶段: 验证】检查上一步是否正确, 如失败则重试.",
         }
-        prompt += phase_guide.get(self.state.phase, "")
-        return prompt
+        return prompt + phase_guide.get(self.state.phase, "")
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
         window = list(self.state.messages[-40:])
-        try:
-            from memory.episodic import Episode, extract_fingerprint
-            self._current_episode = Episode(user_input, session_id=str(time.time()))
-        except Exception:
-            self._current_episode = None
 
-        # 跨会话记忆: 使用统一控制器多通道检索
+        # ── 上下文构建 ──
         context = ""
-        try:
-            from memory.controller import get_controller
-            ctrl = get_controller(self.brain)
-            context = ctrl.context_block(user_input)
-        except Exception:
-            pass
+        if self.brain:
+            facts = self.brain.recall(user_input, max_results=3)
+            if facts:
+                context = "\n[相关知识]:\n" + "\n".join(f"- {f.content[:80]}" for f in facts)
+            exps = self.brain.get_experiences(user_input, max_results=2)
+            if exps:
+                context += "\n[相关经验]:\n" + "\n".join(f"- {e.intent[:40]}: {e.lesson[:60]}" for e in exps)
 
-        self.state.phase = "planning"
-# ── 规划阶段 ──
+        # ── 规划阶段 ──
         self.state.phase = "planning"
         self.planner.create_plan(user_input)
         plan_snapshot = self.planner.get_plan_snapshot()
@@ -413,27 +358,15 @@ class Agent:
 
                     act = {"tool": tn, "params": tp, "result": "success" if result.success else "failure", "error": result.error or ""}
                     self._action_history.append(act)
-                    try:
-                        if self._current_episode:
-                            self._current_episode.record_tool_call(tn, tp, "success" if result.success else "failure", result.error or "", latency_ms=0)
-                    except Exception:
-                        pass
 
                     if not result.success and self.learner:
                         self.learner.learn_from_error(result.error, {"tool": tn, "params": tp})
 
                     yield {"type": "tool_result", "tool": tn, "success": result.success,
                            "data": (result.data or result.error or "")[:800]}
-                    raw = (result.data or result.error or "")[:2000]
-                    # system_info: 不让LLM看到原始数据, 防止复读
-                    if tn == "system_info" and result.success and result.data:
-                        import re
-                        m = re.search(r"CPU:([\d.]+)%.*?内存:([\d.]+)%.*?磁盘:([\d.]+)%", result.data)
-                        if m:
-                            raw = f"[system] CPU {m.group(1)}%, memory {m.group(2)}%, disk {m.group(3)}%"
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
-                                     "content": raw})
-                    self.state.messages.append({"role": "assistant", "content": f"[{tn}: {'ok' if result.success else 'fail'}]"})
+                                     "content": (result.data or result.error or "")[:2000]})
+                    self.state.messages.append({"role": "assistant", "content": f"[{tn}: {'✅' if result.success else '❌'}]"})
                 continue
 
             text = resp.text or ""
@@ -452,24 +385,12 @@ class Agent:
                 self.state.messages.append({"role": "assistant", "content": "[工具执行完成]"})
 
             self._after_learn(user_input)
-            if self._current_episode:
-                self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
-                self._current_episode = None
-            if self.brain:
-                topic = user_input[:80]
-                self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
             yield {"type": "done"}
             return
 
         if not any(m.get("role") == "assistant" and m.get("content") for m in self.state.messages[-5:]):
             self.state.messages.append({"role": "assistant", "content": "[任务执行超出步数上限]"})
         self._after_learn(user_input)
-        if self._current_episode:
-            self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
-            self._current_episode = None
-        if self.brain:
-            topic = user_input[:80]
-            self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
         yield {"type": "done"}
 
     def _parse_plan_from_text(self, text: str):
@@ -574,16 +495,15 @@ class Agent:
             pass
 
     def _after_learn(self, user_input: str):
-        if self.brain:
-            try:
-                from memory.controller import get_controller
-                get_controller(self.brain).memorize(user_input)
-            except Exception:
-                pass
         if not self.learner or not self.brain:
             return
         try:
             self.state.phase = "verifying"
+            for word in ["喜欢", "习惯", "不要", "请"]:
+                if word in user_input:
+                    self.brain.learn_fact(f"用户偏好: {user_input[:60]}", category="user_pref", priority=2)
+                    break
+
             if self._action_history:
                 result = self.reflector.reflect(user_input, self._action_history)
                 for act in self._action_history:
@@ -602,16 +522,45 @@ class Agent:
                     self.brain.learn_fact(f"[经验] {result.reusable_lesson}",
                         category=f"experience.{result.domain}", source="self_reflection",
                         priority=result.priority)
+
             if self._action_history:
                 reply = ""
                 for m in reversed(self.state.messages):
-                    if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) > 10:
-                        reply = m["content"][:500]
-                        break
+                    if m.get("role") == "assistant" and m.get("content"):
+                        c = m["content"]
+                        if isinstance(c, str) and len(c) > 10:
+                            reply = c[:500]
+                            break
                 if reply:
                     self.learner.learn_from_conversation(user_input, reply, self._action_history)
-                    self.brain.learn_style(user_input, reply)
-            self._auto_learn_from_actions()
-        except Exception:
-            pass
 
+            # ★ 自主知识学习：从工具执行结果中自动提取知识
+            self._auto_learn_from_actions()
+
+            try:
+                from core.workspace_manager import WorkspaceManager
+                wm = WorkspaceManager()
+                if wm.get_temp_files():
+                    wm.record_as_fact(self.brain)
+            except: pass
+
+            try:
+                from utils.memory import save_conversation
+                sid = uuid.uuid4().hex[:12]
+                cards = []
+                for m in self.state.messages[-50:]:
+                    role = m.get("role","")
+                    content = m.get("content","")
+                    if isinstance(content, str) and content:
+                        cards.append({"role":role,"text":content[:500]})
+                if cards:
+                    save_conversation(f"auto_{sid}", cards)
+            except: pass
+
+            try:
+                self.brain.cleanup()
+            except: pass
+
+            logger.info(f"自学习完成: {len(self._action_history)} 次操作 phase={self.state.phase}")
+        except Exception as e:
+            logger.debug(f"自学习跳过: {e}")
