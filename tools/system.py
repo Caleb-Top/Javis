@@ -1,4 +1,4 @@
-"""系统工具"""
+﻿"""系统工具"""
 import subprocess, os, logging, glob
 from core.tool_result import ToolResult
 from utils.error_messages import friendly_error
@@ -13,8 +13,7 @@ def system_info(**kwargs) -> ToolResult:
         return ToolResult.failure("psutil 未安装")
     except Exception as e:
         logger.warning(f"system_info 异常: {e}")
-        return ToolResult.failure(f"获取系统信息失败: {e}")
-        return ToolResult.failure(f"获取系统信息失败: {e}")
+        return ToolResult.failure("获取系统信息失败: {e}")
 
 def system_execute(command: str, timeout: int = 30) -> ToolResult:
     try:

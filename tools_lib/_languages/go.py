@@ -81,3 +81,39 @@ if __name__ == "__main__":
     import sys
     r = handler(sys.stdin.read())
     print(r)
+
+
+if __name__ == "__main__":
+    import sys
+    r = handler(sys.stdin.read())
+    print(r)
+
+
+if __name__ == "__main__":
+    import sys
+    r = handler(sys.stdin.read())
+    print(r)
+
+
+if __name__ == "__main__":
+    import sys
+    r = handler(sys.stdin.read())
+    print(r)
+
+
+if __name__ == "__main__":
+    import sys
+    r = handler(sys.stdin.read())
+    print(r)
+
+
+if __name__ == "__main__":
+    import sys
+    r = handler(sys.stdin.read())
+    print(r)
+
+
+if __name__ == "__main__":
+    import sys
+    r = handler(sys.stdin.read())
+    print(r)

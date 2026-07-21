@@ -297,7 +297,7 @@ def _exec_cmd(code: str) -> str:
         lines = [l.strip() for l in code.split("\n")]
         flat = " && ".join(l for l in lines if l and not l.startswith("@"))
         if not flat: flat = " ".join(l for l in lines if l)
-        r = subprocess.run(flat, shell=True, capture_output=True, timeout=30, encoding="gbk", errors="replace")
+        r = subprocess.run(flat, shell=True, capture_output=True, timeout=30, encoding="utf-8", errors="replace")
         out = r.stdout.strip(); err = r.stderr.strip()
         if out: return out[:2000]
         if err: return f"[stderr] {err[:1900]}"

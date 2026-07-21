@@ -1,4 +1,4 @@
-"""自学习引擎 — 每次对话后自我进化"""
+﻿"""自学习引擎 — 每次对话后自我进化"""
 
 import json, time, logging, traceback
 from pathlib import Path
@@ -10,8 +10,8 @@ logger = logging.getLogger("learner")
 class Learner:
     """自学习引擎 — 从每次对话中提取知识并自我完善"""
 
-    def __init__(self):
-        self.brain = Brain()
+    def __init__(self, brain=None):
+        self.brain = brain if brain is not None else Brain()
 
     def learn_from_conversation(self, user_input: str, reply: str, actions: list[dict]):
         """从一次完整对话中学习"""

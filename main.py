@@ -1,4 +1,4 @@
-"""JARVIS Web 版入口"""
+﻿"""JARVIS Web 版入口"""
 import os,sys,json,logging,asyncio
 sys.excepthook=lambda t,v,tb:print(f"FATAL: {t.__name__}: {v}",file=sys.stderr,flush=True)
 from pathlib import Path
@@ -18,7 +18,7 @@ from core.llm_client import LLMClient;from core.tool_registry import ToolRegistr
 from core.engine import InferenceEngine,LOCAL_MODEL
 from knowledge.brain import Brain;from knowledge.learner import Learner
 from knowledge.papers_db import ingest_to_brain;from knowledge.human_knowledge import inject_to_brain as inject_human
-brain=Brain();learner=Learner()
+brain=Brain();learner=Learner(brain=brain)
 try:brain.compress()
 except:pass
 try:ingest_to_brain(brain);logger.info("论文知识已注入大脑")
@@ -338,8 +338,17 @@ async def api_terminal_exec(data: dict = Body(...)):
                 capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         else:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                timeout=timeout, encoding="gbk", errors="replace")
-        out = r.stdout.strip() or r.stderr.strip() or f"(exit:{r.returncode})"
+                timeout=timeout, encoding="utf-8", errors="replace")
+        out = r.stdout.strip()
+        err = r.stderr.strip()
+        if out and err:
+            out = out + "
+[stderr]
+" + err
+        elif err:
+            out = err
+        if not out:
+            out = f"(exit code: {r.returncode})"
         return {"ok": True, "output": out[:5000], "exit_code": r.returncode}
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": "命令超时", "exit_code": -1}
