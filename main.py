@@ -146,6 +146,9 @@ try:
     from core.skill_creator import get_skill_creator
     _skill_creator = get_skill_creator(str(ROOT))
     logger.info(f'Skill creator initialized: {len(_skill_creator.list_skills())} skills')
+    from core.skill_creator import register_in_manifest as _reg_skill_creator
+    _reg_skill_creator(registry)
+    logger.info('Skill creator tools registered')
 except Exception as e:
     logger.warning(f'Skill creator: {e}')
 try:
