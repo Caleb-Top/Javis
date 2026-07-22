@@ -59,6 +59,15 @@ def register_code_exec(reg, ce):
     reg.register(ToolDef("run_code","★执行代码,AI自己编程控制电脑",{"type":"object","properties":{"code":{"type":"string"},"language":{"type":"string","enum":["python","powershell","cmd"],"default":"python"}},"required":["code"]},ce.run_code,"system"))
 
 
+def register_search_tools(reg):
+    """注册搜索三件套 (P0-2) — grep/glob_search/file_edit"""
+    from tools.search import grep, glob_search, file_edit
+    reg.register_many([
+        ToolDef("grep","内容搜索: 正则匹配文件内容,支持上下文/多行/文件名过滤",{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"glob":{"type":"string","default":""},"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"content"},"head_limit":{"type":"integer","default":50},"case_insensitive":{"type":"boolean","default":False},"context":{"type":"integer","default":0},"multiline":{"type":"boolean","default":False}},"required":["pattern"]},grep,"search"),
+        ToolDef("glob_search","文件名搜索: 支持通配符(**/*.py, src/*.ts等)",{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"max_results":{"type":"integer","default":100}},"required":["pattern"]},glob_search,"search"),
+        ToolDef("file_edit","精确字符串替换编辑: 查找old_string替换为new_string",{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":False}},"required":["file_path","old_string","new_string"]},file_edit,"search"),
+    ])
+
 def register_git_tools(reg):
     """注册 Git 工具集 (P0-1) — 9 个函数"""
     from tools.git_tools import (

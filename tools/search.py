@@ -1,12 +1,7 @@
-"""搜索三件套 — grep / glob / file_edit
-
-基于 subprocess 调用 ripgrep (rg) 和 Python glob 实现文件搜索和编辑。
-所有函数返回 ToolResult。
-"""
+"""搜索三件套 — grep/glob/file_edit，返回 ToolResult"""
 
 import os
 import re
-import subprocess
 import fnmatch
 import logging
 from typing import Optional
@@ -16,245 +11,200 @@ from core.tool_result import ToolResult
 logger = logging.getLogger("search_tools")
 
 # ---------------------------------------------------------------------------
-# 公共辅助
+# P0-2-1  grep — 内容搜索（仿 ripgrep）
 # ---------------------------------------------------------------------------
-
-_TIMEOUT = 30  # 本地搜索操作超时
-
-RG_PATH = None  # 缓存的 rg 路径
-
-def _find_rg() -> Optional[str]:
-    """查找 ripgrep 可执行文件"""
-    global RG_PATH
-    if RG_PATH is not None:
-        return RG_PATH
-    # 优先使用 tools 目录下自带的
-    candidates = []
-    tools_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates.append(os.path.join(tools_dir, "rg", "rg.exe"))
-    candidates.append(os.path.join(tools_dir, "rg", "rg"))
-    # 系统 PATH
-    for name in ("rg", "rg.exe"):
-        r = subprocess.run(["where", name] if os.name == "nt" else ["which", name],
-                          capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            candidates.append(r.stdout.strip().split("\n")[0])
-    # 验证
-    for c in candidates:
-        if os.path.isfile(c):
-            RG_PATH = c
-            return c
-    return None
-
-def _run_rg(args: list, cwd: str, timeout: int = _TIMEOUT) -> ToolResult:
-    """统一执行 rg 命令"""
-    rg = _find_rg()
-    if not rg:
-        return ToolResult.failure("未找到 rg (ripgrep) 命令。请确认 rg 已安装或在 tools/rg/ 目录中。")
-    try:
-        r = subprocess.run(
-            [rg] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-        )
-        if r.returncode == 0:
-            output = r.stdout.strip()
-            if not output:
-                return ToolResult.success("(无匹配结果)")
-            return ToolResult.success(output)
-        if r.returncode == 1:
-            # rg returns 1 for "no matches"
-            return ToolResult.success("(无匹配结果)")
-        return ToolResult.failure(r.stderr.strip() or f"rg 返回码: {r.returncode}")
-    except subprocess.TimeoutExpired:
-        return ToolResult.failure("搜索超时，请缩小搜索范围")
-    except Exception as e:
-        return ToolResult.failure(f"rg 执行异常: {e}")
-
-
-# ===================================================================
-# P0-2-1  grep
-# ===================================================================
 
 def grep(
     pattern: str,
     path: str = ".",
     glob: str = "",
     output_mode: str = "content",
-    max_count: int = 200,
+    head_limit: int = 50,
+    case_insensitive: bool = False,
     context: int = 0,
-    ignore_case: bool = False,
     multiline: bool = False,
-    include_hidden: bool = False,
 ) -> ToolResult:
-    """在文件中搜索正则表达式模式（基于 ripgrep）。
+    """内容搜索 — 正则匹配文件内容
 
     Args:
-        pattern: 正则表达式模式
-        path: 搜索目录或文件路径
-        glob: 文件名过滤 glob (如 "*.py" "*.{ts,tsx}")
-        output_mode: "content" 显示匹配行, "files_with_matches" 仅文件路径, "count" 匹配计数
-        max_count: 最大输出行数 (默认200)
-        context: 匹配前后的上下文行数
-        ignore_case: 忽略大小写
-        multiline: 多行模式 (. 匹配换行符, 模式可跨行)
-        include_hidden: 是否搜索隐藏文件/目录
+        pattern: 正则表达式
+        path: 搜索目录
+        glob: 文件名过滤（如 "*.py"）
+        output_mode: content(显示匹配行), files_with_matches(仅文件路径), count(匹配计数)
+        head_limit: 最大输出行数
+        case_insensitive: 忽略大小写
+        context: 上下文行数（仅 content 模式生效）
+        multiline: 多行匹配模式
     """
-    cwd = os.path.abspath(path) if os.path.isdir(path) else os.path.dirname(os.path.abspath(path)) or "."
+    if not os.path.isdir(path):
+        return ToolResult.failure(f"搜索目录不存在: {path}")
 
-    args = []
+    flags = re.MULTILINE | re.DOTALL if multiline else 0
+    if case_insensitive:
+        flags |= re.IGNORECASE
 
-    # 输出模式
-    if output_mode == "files_with_matches":
-        args.append("-l")
-    elif output_mode == "count":
-        args.append("-c")
-    else:
-        args.append("--heading")
-        if context > 0:
-            args.extend(["-C", str(context)])
+    try:
+        compiled = re.compile(pattern, flags)
+    except re.error as e:
+        return ToolResult.failure(f"正则表达式无效: {e}")
 
-    # 选项
-    if ignore_case:
-        args.append("-i")
-    if not include_hidden:
-        args.extend(["--glob", "!.*"])
-    else:
-        args.append("--hidden")
+    results = []
+    file_count = 0
+    total_matches = 0
+    limit_reached = False
 
-    if multiline:
-        args.extend(["--multiline", "--multiline-dotall"])
+    for root, dirs, files in os.walk(path):
+        # 跳过隐藏目录和常见的无关目录
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in (
+            "node_modules", "__pycache__", ".git", "venv", ".venv", "dist", "build"
+        )]
 
-    # max count
-    args.extend(["-m", str(max_count)])
+        for fname in files:
+            if limit_reached:
+                break
 
-    # glob 过滤
-    if glob:
-        args.extend(["-g", glob])
+            if glob and not fnmatch.fnmatch(fname, glob):
+                continue
 
-    # pattern 和 path
-    args.append(pattern)
-    if os.path.isfile(path):
-        args.append(path)
-    elif path != ".":
-        args.append(path)
+            full = os.path.join(root, fname)
+            try:
+                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            except (PermissionError, OSError):
+                continue
 
-    r = _run_rg(args, cwd)
+            matches = list(compiled.finditer(content))
+            if not matches:
+                continue
 
-    if r.success and len(r.data) > 8000:
-        lines = r.data.split("\n")
-        return ToolResult.success(
-            f"[输出较长，已截断至前 {max_count} 行]\n\n" + "\n".join(lines[:max_count])
-        )
-    return r
+            file_count += 1
+            total_matches += len(matches)
+
+            if output_mode == "files_with_matches":
+                results.append(full)
+                if len(results) >= head_limit:
+                    limit_reached = True
+                    break
+                continue
+
+            if output_mode == "count":
+                results.append(f"{full}: {len(matches)}")
+                if len(results) >= head_limit:
+                    limit_reached = True
+                    break
+                continue
+
+            # output_mode == "content"
+            if multiline:
+                # 多行模式：只显示匹配的完整块
+                for m in matches:
+                    if len(results) >= head_limit:
+                        limit_reached = True
+                        break
+                    snippet = m.group(0)
+                    if len(snippet) > 500:
+                        snippet = snippet[:500] + "...(已截断)"
+                    line_no = content[:m.start()].count("\n") + 1
+                    results.append(f"{full}:{line_no}: {snippet}")
+                continue
+
+            # 单行模式
+            lines = content.split("\n")
+            matched_lines = set()
+            for m in matches:
+                line_no = content[:m.start()].count("\n")
+                matched_lines.add(line_no)
+
+            for line_no in sorted(matched_lines):
+                if len(results) >= head_limit:
+                    limit_reached = True
+                    break
+                start = max(0, line_no - context)
+                end = min(len(lines), line_no + context + 1)
+                for ln in range(start, end):
+                    marker = ">" if ln == line_no else " "
+                    results.append(f"{full}:{ln+1}:{marker} {lines[ln]}")
+                if context > 0 and line_no != sorted(matched_lines)[-1]:
+                    results.append("---")
+
+        if limit_reached:
+            break
+
+    if not results:
+        return ToolResult.success(f"未找到匹配 '{pattern}' 的内容")
+
+    suffix = f"\n\n... 已达到输出上限 ({head_limit} 条)" if limit_reached else ""
+    prefix = f"搜索结果: 模式 '{pattern}' | {file_count} 个文件 | {total_matches} 处匹配\n\n"
+    return ToolResult.success(prefix + "\n".join(results) + suffix)
 
 
-# ===================================================================
-# P0-2-2  glob
-# ===================================================================
+# ---------------------------------------------------------------------------
+# P0-2-2  glob_search — 文件名匹配搜索
+# ---------------------------------------------------------------------------
 
-def glob_find(
+def glob_search(
     pattern: str,
     path: str = ".",
     max_results: int = 100,
-    include_hidden: bool = False,
 ) -> ToolResult:
-    """按 glob 模式查找文件（使用 Python 原生 fnmatch + os.walk）。
+    """文件名搜索 — 支持通配符（**/*.py, src/*.ts 等）
 
     Args:
-        pattern: glob 模式 (如 "**/*.py", "src/**/*.tsx")
-        path: 起始搜索目录
-        max_results: 最大返回结果数
-        include_hidden: 是否包含隐藏文件和目录
+        pattern: glob 模式
+        path: 搜索根目录
+        max_results: 最大结果数
     """
-    cwd = os.path.abspath(path)
-    if not os.path.isdir(cwd):
-        return ToolResult.failure(f"路径不存在或不是目录: {path}")
+    if not os.path.isdir(path):
+        return ToolResult.failure(f"搜索目录不存在: {path}")
 
     results = []
-    scanned = 0
 
-    try:
-        recursive = "**" in pattern
+    # 判断是否包含 ** 递归模式
+    recursive = "**" in pattern
 
-        if recursive:
-            parts = pattern.split("**")
-            root_dir = cwd
-            if parts[0].rstrip("/"):
-                root_dir = os.path.join(cwd, parts[0].rstrip("/"))
-            file_pattern = parts[-1].lstrip("/") or "*"
+    if recursive:
+        # 递归搜索
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in (
+                "node_modules", "__pycache__", ".git", "venv", ".venv", "dist", "build"
+            )]
+            for fname in files:
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, path)
+                rel_normalized = rel.replace("\\", "/")
+                if fnmatch.fnmatch(rel_normalized, pattern):
+                    results.append(rel)
+                    if len(results) >= max_results:
+                        break
+            if len(results) >= max_results:
+                break
+    else:
+        # 仅搜索当前层级
+        try:
+            entries = os.listdir(path)
+        except PermissionError:
+            return ToolResult.failure(f"无法访问目录: {path}")
 
-            for dirpath, dirnames, filenames in os.walk(root_dir):
-                if not include_hidden:
-                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-                    filenames = [f for f in filenames if not f.startswith(".")]
-                for fn in filenames:
-                    if fnmatch.fnmatch(fn, file_pattern):
-                        rel = os.path.relpath(os.path.join(dirpath, fn), cwd)
-                        results.append(rel)
-                        if len(results) >= max_results:
-                            break
+        for entry in entries:
+            if fnmatch.fnmatch(entry, pattern):
+                full = os.path.join(path, entry)
+                if os.path.isfile(full):
+                    results.append(entry)
                 if len(results) >= max_results:
                     break
-                scanned += 1
-                if scanned > 10000:
-                    break
-        else:
-            pattern_dir = os.path.dirname(pattern)
-            pattern_name = os.path.basename(pattern)
-            search_dir = os.path.join(cwd, pattern_dir) if pattern_dir else cwd
-
-            if not os.path.isdir(search_dir):
-                return ToolResult.failure(f"目录不存在: {pattern_dir}")
-
-            try:
-                entries = os.listdir(search_dir)
-                if not include_hidden:
-                    entries = [e for e in entries if not e.startswith(".")]
-                for entry in entries:
-                    full = os.path.join(search_dir, entry)
-                    if os.path.isfile(full) and fnmatch.fnmatch(entry, pattern_name):
-                        rel = os.path.relpath(full, cwd)
-                        results.append(rel)
-                        if len(results) >= max_results:
-                            break
-            except PermissionError:
-                return ToolResult.failure(f"无权限访问目录: {pattern_dir}")
-
-    except PermissionError:
-        return ToolResult.failure(f"无权限访问: {path}")
-    except Exception as e:
-        return ToolResult.failure(f"glob 执行异常: {e}")
 
     if not results:
-        return ToolResult.success(f"(无匹配文件) pattern={pattern}")
+        return ToolResult.success(f"未找到匹配 '{pattern}' 的文件")
 
-    # 按修改时间排序
-    results_with_mtime = []
-    for f in results:
-        full = os.path.join(cwd, f)
-        try:
-            mtime = os.path.getmtime(full)
-            results_with_mtime.append((f, mtime))
-        except OSError:
-            results_with_mtime.append((f, 0))
-    results_with_mtime.sort(key=lambda x: x[1], reverse=True)
-
-    lines = [f"找到 {len(results)} 个匹配文件:"]
-    for f, _ in results_with_mtime[:max_results]:
-        lines.append(f"  {f}")
-    if len(results) > max_results:
-        lines.append(f"  ... 还有 {len(results) - max_results} 个结果")
-
-    return ToolResult.success("\n".join(lines))
+    suffix = f"\n\n... 已达到输出上限 ({max_results} 条)" if len(results) >= max_results else ""
+    return ToolResult.success(
+        f"Glob 结果: 模式 '{pattern}' | {len(results)} 个文件\n\n" + "\n".join(results) + suffix
+    )
 
 
-# ===================================================================
-# P0-2-3  file_edit
-# ===================================================================
+# ---------------------------------------------------------------------------
+# P0-2-3  file_edit — 精确字符串替换编辑
+# ---------------------------------------------------------------------------
 
 def file_edit(
     file_path: str,
@@ -262,56 +212,65 @@ def file_edit(
     new_string: str,
     replace_all: bool = False,
 ) -> ToolResult:
-    """精确字符串替换编辑文件。
+    """精确字符串替换编辑
 
-    与 Claude Code 的 Edit 工具行为一致:
-    - old_string 必须在文件中恰好出现一次 (replace_all=False)
-    - 制表符、缩进等必须完全匹配
+    在文件中查找 old_string 并替换为 new_string。
+    要求 old_string 在文件中唯一匹配（除非 replace_all=True）。
 
     Args:
-        file_path: 要编辑的文件绝对路径
-        old_string: 要替换的字符串（必须完全匹配，包括缩进）
-        new_string: 替换后的字符串
-        replace_all: True 时替换所有出现的位置
+        file_path: 要编辑的文件路径
+        old_string: 要替换的原字符串
+        new_string: 替换后的新字符串
+        replace_all: 是否替换所有匹配（默认 False，仅替换唯一匹配）
     """
+    if not os.path.exists(file_path):
+        return ToolResult.failure(f"文件不存在: {file_path}")
+
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
-    except FileNotFoundError:
-        return ToolResult.failure(f"文件不存在: {file_path}")
-    except PermissionError:
-        return ToolResult.failure(f"无权限读取文件: {file_path}")
-    except Exception as e:
-        return ToolResult.failure(f"读取文件失败: {e}")
+    except (PermissionError, OSError) as e:
+        return ToolResult.failure(f"无法读取文件: {e}")
+
+    if old_string == new_string:
+        return ToolResult.failure("old_string 和 new_string 相同，无需编辑")
 
     count = content.count(old_string)
+
     if count == 0:
-        lines_preview = []
-        for i, line in enumerate(old_string.split("\n")[:3], 1):
-            lines_preview.append(f"  L{i}: {repr(line)}")
         return ToolResult.failure(
-            f"未找到要替换的字符串。文件: {file_path}\n"
-            f"查找内容的前几行:\n" + "\n".join(lines_preview)
+            f"未找到匹配的字符串。old_string 在文件中不存在。\n"
+            f"提示: 确保字符串完全匹配（包括缩进和空白字符）"
         )
 
-    if not replace_all and count > 1:
+    if count > 1 and not replace_all:
+        # 显示上下文帮助定位
+        lines = content.split("\n")
+        occurrences = []
+        for i, line in enumerate(lines):
+            if old_string in line:
+                context_start = max(0, i - 2)
+                context_end = min(len(lines), i + 3)
+                ctx = "\n".join(
+                    f"  {j+1}: {lines[j]}" for j in range(context_start, context_end)
+                )
+                occurrences.append(f"--- 第 {i+1} 行 ---\n{ctx}")
+                if len(occurrences) >= 5:
+                    break
+
         return ToolResult.failure(
-            f"old_string 在文件中出现了 {count} 次。"
-            f"请提供更精确的上下文使匹配唯一，或设置 replace_all=True 替换所有出现。"
+            f"old_string 在文件中出现了 {count} 次，不是唯一的。\n"
+            f"请提供更多上下文使匹配唯一，或设置 replace_all=True。\n\n"
+            + "\n".join(occurrences)
         )
 
-    new_content = content.replace(old_string, new_string)
+    new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
 
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
-    except PermissionError:
-        return ToolResult.failure(f"无权限写入文件: {file_path}")
-    except Exception as e:
-        return ToolResult.failure(f"写入文件失败: {e}")
+    except (PermissionError, OSError) as e:
+        return ToolResult.failure(f"无法写入文件: {e}")
 
-    replaced_count = count if replace_all else 1
-    return ToolResult.success(
-        f"文件已编辑: {file_path}\n"
-        f"替换了 {replaced_count} 处匹配。"
-    )
+    replaced = count if replace_all else 1
+    return ToolResult.success(f"文件已编辑: {file_path}\n替换了 {replaced} 处")
