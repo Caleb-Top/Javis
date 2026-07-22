@@ -136,3 +136,22 @@ def register_agent_tools(reg):
         _end_turn,
         "agent",
     ))
+
+def register_task_tools(reg):
+    """注册任务管理工具集 (P0-3) — TaskCreate / TaskGet / TaskList / TaskUpdate / TaskStop"""
+    from tools.task_tools import task_create, task_get, task_list, task_update, task_stop
+    reg.register_many([
+        ToolDef("task_create","创建结构化任务，支持依赖关系。状态: pending→in_progress→completed",{"type":"object","properties":{"subject":{"type":"string","description":"任务标题"},"description":{"type":"string","default":"","description":"任务详情"},"active_form":{"type":"string","default":"","description":"执行中的显示文案"},"status":{"type":"string","enum":["pending","in_progress","completed"],"default":"pending"},"blocks":{"type":"array","items":{"type":"string"},"default":[],"description":"被此任务阻塞的其他任务ID"},"blocked_by":{"type":"array","items":{"type":"string"},"default":[],"description":"阻塞此任务的前置任务ID"},"owner":{"type":"string","default":"","description":"任务负责人"},"metadata":{"type":"object","default":{},"description":"自定义元数据"}},"required":["subject"]},task_create,"task"),
+        ToolDef("task_get","根据ID获取任务详情（含依赖和元数据）",{"type":"object","properties":{"task_id":{"type":"string","description":"任务ID"}},"required":["task_id"]},task_get,"task"),
+        ToolDef("task_list","列出所有非删除状态的任务，按ID排序。支持按status/owner过滤",{"type":"object","properties":{"status":{"type":"string","enum":["pending","in_progress","completed"],"default":""},"owner":{"type":"string","default":""}},"required":[]},task_list,"task"),
+        ToolDef("task_update","更新任务: 状态流转/修改字段/管理依赖(增删blocks和blockedBy)",{"type":"object","properties":{"task_id":{"type":"string","description":"任务ID"},"status":{"type":"string","enum":["pending","in_progress","completed","deleted"],"default":""},"subject":{"type":"string","default":""},"description":{"type":"string","default":""},"active_form":{"type":"string","default":""},"owner":{"type":"string","default":""},"metadata":{"type":"object","default":{}},"add_blocks":{"type":"array","items":{"type":"string"},"default":[]},"add_blocked_by":{"type":"array","items":{"type":"string"},"default":[]},"remove_blocks":{"type":"array","items":{"type":"string"},"default":[]},"remove_blocked_by":{"type":"array","items":{"type":"string"},"default":[]}},"required":["task_id"]},task_update,"task"),
+        ToolDef("task_stop","停止/取消任务 — 标记为deleted并清理所有依赖引用",{"type":"object","properties":{"task_id":{"type":"string","description":"任务ID"}},"required":["task_id"]},task_stop,"task"),
+    ])
+
+def register_web_tools(reg):
+    """注册 Web 搜索工具集 (P0-4) — web_search / web_fetch"""
+    from tools.web_search import web_search, web_fetch
+    reg.register_many([
+        ToolDef("web_search","搜索互联网 (DuckDuckGo)，返回标题+URL+摘要",{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"},"count":{"type":"integer","default":10,"description":"返回结果数量"},"allowed_domains":{"type":"array","items":{"type":"string"},"default":[],"description":"只保留这些域名"},"blocked_domains":{"type":"array","items":{"type":"string"},"default":[],"description":"排除这些域名"}},"required":["query"]},web_search,"web"),
+        ToolDef("web_fetch","抓取指定URL的网页内容，解析为纯文本返回",{"type":"object","properties":{"url":{"type":"string","description":"网页URL (http/https)"},"max_chars":{"type":"integer","default":8000,"description":"最大返回字符数"},"timeout":{"type":"integer","default":15,"description":"请求超时(秒)"},"raw_html":{"type":"boolean","default":False,"description":"返回原始HTML"}},"required":["url"]},web_fetch,"web"),
+    ])

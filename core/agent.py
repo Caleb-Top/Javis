@@ -9,6 +9,8 @@ from core.tool_registry import ToolRegistry
 from core.tool_result import ToolResult
 from core.planner import Planner
 from core.reflector import Reflector, classify_error, map_tool_to_domain
+from core.prompt_builder import PromptBuilder, build_dynamic_prompt
+from core.hook_system import HookEvent, get_hook_manager
 
 logger = logging.getLogger("agent")
 action_log = []
@@ -58,6 +60,14 @@ try:
     _PERM_LEVELS_AVAILABLE = True
 except Exception:
     _PERM_LEVELS_AVAILABLE = False
+
+# ════════════════════════════════════════════════════════════
+# P0-8: 三层 Prompt 架构
+# Tier 1 — 身份 + 工具: 你是谁，你能用什么工具
+# Tier 2 — 经验 + 风格: 从 brain/Memory 动态加载
+# Tier 3 — 阶段指引: 当前 plan-execute-verify 阶段
+# ════════════════════════════════════════════════════════════
+
 BASE_SYSTEM_PROMPT = """你是 Javis — 一个真正能思考、能编程、能控制电脑的 AI 智能体。
 
 ## 你的说话方式（比功能更重要）
@@ -112,7 +122,13 @@ read_ui_window, get_window_state
 
 
 def build_dynamic_prompt(brain=None) -> str:
-    """构建动态 System Prompt：基础提示 + 经验 + 风格 + 上次话题 + 你说"""
+    """三层 Prompt 构建: Tier 1(身份+工具) + Tier 2(经验+记忆+风格) + Tier 3(阶段指引)
+
+    三层架构:
+      Tier 1 — 身份 + 工具Schema（固定，~6KB）
+      Tier 2 — 经验 + 风格 + 记忆（动态加载）
+      Tier 3 — 当前阶段指引（运行时注入）
+    """
     rules = []
     if brain:
         seen_exp = set()
@@ -175,6 +191,8 @@ class Agent:
         self._action_history = []
         self.brain = brain
         self.learner = learner
+        # ── P0-8: 三层 Prompt 架构 ──
+        self.prompt_builder = PromptBuilder(brain=brain)
 
         self._confirm_event: asyncio.Event | None = None
         self._confirm_result: bool | None = None
@@ -186,6 +204,9 @@ class Agent:
         except Exception:
             self._confirm_dangerous = True
             self._permission_level = "quick_auth"
+
+        # ── P1-3: Hooks 系统集成 ──
+        self.hook_manager = get_hook_manager()
 
         # 启动时扫描已有工作区知识，自动吸收
         try:
@@ -266,21 +287,30 @@ class Agent:
     def reset(self):
         self.state = AgentState()
         self._action_history = []
+        if hasattr(self, 'prompt_builder'):
+            self.prompt_builder.invalidate_cache()
 
-    def _build_system_prompt(self) -> str:
-        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引 + 缓存）"""
-        # ── 优化: 缓存 — 每 5 轮重建一次 ──
-        if self._cached_prompt and self.state.step - self._cached_prompt_step < 5:
-            return self._cached_prompt
-        prompt = build_dynamic_prompt(brain=self.brain)
-        phase_guide = {
-            "planning": "\n\n【当前阶段: 规划】先分析需求, 输出完整计划后再执行工具.",
-            "executing": "\n\n【当前阶段: 执行】按计划逐步执行, 每步汇报结果.",
-            "verifying": "\n\n【当前阶段: 验证】检查上一步是否正确, 如失败则重试.",
-        }
-        prompt += phase_guide.get(self.state.phase, "")
+    def _build_system_prompt(self, force: bool = False) -> str:
+        """构建完整 System Prompt（三层架构: 身份 + 记忆 + 阶段）
+
+        P0-8: 使用 PromptBuilder 组装三层 Prompt:
+          Layer 1 — 基础身份层（静态）: 个性、语气、核心能力
+          Layer 2 — 动态记忆层: 脑数据注入、经验规则、最近话题
+          Layer 3 — 阶段指引层: 当前阶段指引 + 护栏摘要 + 安全规则
+
+        Args:
+            force: 强制重建所有层（跳过缓存）
+        """
+        prompt = self.prompt_builder.build(
+            phase=self.state.phase,
+            step=self.state.step,
+            force_rebuild=force,
+        )
+
+        # 保持旧缓存的兼容性
         self._cached_prompt = prompt
         self._cached_prompt_step = self.state.step
+
         return prompt
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
@@ -318,6 +348,15 @@ class Agent:
         self._action_count = 0
         self._action_history = []
         _log("user_input", user_input[:100])
+
+        # ── P1-3: UserPromptSubmit Hook ──
+        try:
+            await self.hook_manager.trigger(HookEvent.USER_PROMPT_SUBMIT, {
+                "user_input": user_input, "step": self.state.step})
+        except Exception:
+            pass
+        # ── End UserPromptSubmit Hook ──
+
         yield {"type": "thinking", "content": "思考中..."}
 
         recent_calls = []
@@ -436,10 +475,41 @@ class Agent:
                                              "content": "用户取消了该操作"})
                             continue
 
+                    # ── P1-3: PreToolUse Hook ──
+                    try:
+                        pre_hook = await self.hook_manager.trigger(HookEvent.PRE_TOOL_USE, {
+                            "tool_name": tn, "tool_params": tp, "user_input": user_input})
+                        if not pre_hook.allowed:
+                            yield {"type": "tool_result", "tool": tn, "success": False,
+                                   "data": f"Hook blocked: {pre_hook.message}"}
+                            messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
+                                             "content": f"Blocked: {pre_hook.message}"})
+                            continue
+                    except Exception:
+                        pass
+                    # ── End PreToolUse Hook ──
+
+                    t0 = time.time()
                     try:
                         result = await self.tools.execute(tn, tp)
                     except Exception as e:
                         result = ToolResult.failure(str(e))
+                    elapsed_ms = (time.time() - t0) * 1000
+
+                    # ── P1-3: PostToolUse / PostToolUseFailure Hooks ──
+                    try:
+                        if result.success:
+                            await self.hook_manager.trigger(HookEvent.POST_TOOL_USE, {
+                                "tool_name": tn, "tool_params": tp, "success": True,
+                                "result_data": (result.data or "")[:500],
+                                "duration_ms": elapsed_ms})
+                        else:
+                            await self.hook_manager.trigger(HookEvent.POST_TOOL_USE_FAILURE, {
+                                "tool_name": tn, "tool_params": tp, "error": result.error or "unknown",
+                                "duration_ms": elapsed_ms})
+                    except Exception:
+                        pass
+                    # ── End PostToolUse Hooks ──
 
                     act = {"tool": tn, "params": tp, "result": "success" if result.success else "failure", "error": result.error or ""}
                     self._action_history.append(act)
@@ -610,6 +680,9 @@ class Agent:
                 get_controller(self.brain).memorize(user_input)
             except Exception:
                 pass
+        # ── P0-8: 记忆写入后失效 PromptBuilder 缓存 ──
+        if hasattr(self, 'prompt_builder') and self.brain:
+            self.prompt_builder.invalidate_cache()
         if not self.learner or not self.brain:
             return
         try:

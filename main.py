@@ -66,6 +66,91 @@ try:
 except Exception as _ct_e:
     logger.warning(f"Catch2 注入跳过: {_ct_e}")
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
+from tools.manifest import register_task_tools;register_task_tools(registry)
+from tools.manifest import register_web_tools;register_web_tools(registry)
+
+# ═══════════════════════════════════════════════════════════════
+# P1-1: Provider 插件化 — 7个Provider的加载、健康检查、自动降级
+# ═══════════════════════════════════════════════════════════════
+try:
+    from tools.provider_loader import register_in_manifest as _reg_provider
+    _reg_provider(registry)
+    logger.info('Provider loader registered')
+except Exception as e:
+    logger.warning(f'Provider loader: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-2: 子代理系统 — 隔离上下文、白名单工具、并行执行
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.subagent import register_in_manifest as _reg_subagent
+    _reg_subagent(registry)
+    logger.info('Subagent system registered')
+except Exception as e:
+    logger.warning(f'Subagent system: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-3: Hooks 系统 — 10种事件钩子 (在 agent.py 中已集成触发点)
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.hook_system import register_in_manifest as _reg_hooks
+    _reg_hooks(registry)
+    logger.info('Hook system registered')
+except Exception as e:
+    logger.warning(f'Hook system: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-4: Cron 定时任务 — 用户可配置, 文件锁防重复
+# ═══════════════════════════════════════════════════════════════
+try:
+    from tools.cron_scheduler import register_in_manifest as _reg_cron
+    _reg_cron(registry)
+    logger.info('Cron scheduler registered')
+except Exception as e:
+    logger.warning(f'Cron scheduler: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-5: 自动更新 — GitHub API 版本检查 + Git 拉取 + 回滚
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.auto_updater import register_in_manifest as _reg_updater
+    _reg_updater(registry)
+    logger.info('Auto updater registered')
+except Exception as e:
+    logger.warning(f'Auto updater: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P3-1: 沙箱系统 — Docker/Hyper-V/Process 三种后端
+# ═══════════════════════════════════════════════════════════════
+try:
+    from tools.sandbox import register_in_manifest as _reg_sandbox
+    _reg_sandbox(registry)
+    logger.info('Sandbox system registered')
+except Exception as e:
+    logger.warning(f'Sandbox system: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P3-2: Gateway 多平台 — Telegram/微信/Slack + WebSocket 中继
+# ═══════════════════════════════════════════════════════════════
+try:
+    from gateway.gateway_manager import register_in_manifest as _reg_gateway
+    _reg_gateway(registry)
+    logger.info('Gateway manager registered')
+except Exception as e:
+    logger.warning(f'Gateway manager: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P3-3: /learn 技能闭环 — AI 自创技能 + 审查 + 市场
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.skill_creator import get_skill_creator
+    _skill_creator = get_skill_creator(str(ROOT))
+    logger.info(f'Skill creator initialized: {len(_skill_creator.list_skills())} skills')
+    from core.skill_creator import register_in_manifest as _reg_skill_creator
+    _reg_skill_creator(registry)
+    logger.info('Skill creator tools registered')
+except Exception as e:
+    logger.warning(f'Skill creator: {e}')
 try:
     from memory.controller import get_controller
     get_controller(brain).start_cycles()
@@ -234,6 +319,82 @@ async def api_mem_rename(sid:str,data:dict):
 @app.delete("/api/memory/conversations/{sid}")
 async def api_mem_del(sid:str):delete_conversation(sid);return {"ok":True}
 
+# ═══════════════════════════════════════════════════════════════
+# P0-10: FTS5 全文搜索 + 索引管理 API
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/memory/search")
+async def api_memory_search(q: str = "", type: str = "facts", limit: int = 20):
+    """FTS5 全文搜索记忆库: facts | episodes | all"""
+    if not q or len(q) < 2:
+        return {"ok": False, "results": [], "error": "搜索词至少2个字符"}
+    try:
+        from memory.indexer import search_facts, search_episodes, ensure_index, index_status
+        ensure_index()
+        results = []
+        if type in ("facts", "all"):
+            r = search_facts(q, limit=limit)
+            for row in r:
+                results.append({
+                    "type": "fact",
+                    "content": row.get("content", "")[:200],
+                    "category": row.get("category", ""),
+                    "confidence": row.get("confidence", 0),
+                    "priority": row.get("priority", 1),
+                })
+        if type in ("episodes", "all"):
+            r = search_episodes(q, limit=limit)
+            for row in r:
+                results.append({
+                    "type": "episode",
+                    "content": row.get("user_input", "")[:200],
+                    "domain": row.get("fingerprint_domain", ""),
+                    "outcome": row.get("outcome", ""),
+                    "tool_count": row.get("tool_count", 0),
+                })
+        return {"ok": True, "results": results[:limit], "count": len(results[:limit])}
+    except Exception as e:
+        logger.warning(f"FTS5 搜索失败: {e}")
+        return {"ok": False, "results": [], "error": str(e)[:200]}
+
+@app.get("/api/memory/index/status")
+async def api_memory_index_status():
+    """记忆索引状态"""
+    try:
+        from memory.indexer import index_status
+        return {"ok": True, "status": index_status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.post("/api/memory/index/rebuild")
+async def api_memory_index_rebuild():
+    """重建记忆索引"""
+    try:
+        from memory.indexer import rebuild_index
+        rebuild_index()
+        from memory.indexer import index_status
+        return {"ok": True, "status": index_status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.get("/api/memory/search/ui")
+async def api_memory_search_ui():
+    """记忆搜索 UI 配置"""
+    try:
+        from memory.indexer import index_status
+        status = index_status()
+    except:
+        status = {"error": "索引不可用"}
+    return {
+        "ok": True,
+        "index_status": status,
+        "search_types": [
+            {"id": "facts", "label": "知识事实", "desc": "搜索学习到的知识和事实"},
+            {"id": "episodes", "label": "执行记录", "desc": "搜索历史执行任务"},
+            {"id": "all", "label": "全部", "desc": "搜索所有记忆类型"},
+        ],
+    }
+
 @app.get("/api/skills")
 async def api_skills():_discover();return {"skills":SKILL_LIST,"current":CURRENT_SKILL,"count":registry.count}
 
@@ -342,9 +503,7 @@ async def api_terminal_exec(data: dict = Body(...)):
         out = r.stdout.strip()
         err = r.stderr.strip()
         if out and err:
-            out = out + "
-[stderr]
-" + err
+            out = out + "\n[stderr]\n" + err
         elif err:
             out = err
         if not out:
