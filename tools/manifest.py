@@ -147,3 +147,11 @@ def register_task_tools(reg):
         ToolDef("task_update","更新任务: 状态流转/修改字段/管理依赖(增删blocks和blockedBy)",{"type":"object","properties":{"task_id":{"type":"string","description":"任务ID"},"status":{"type":"string","enum":["pending","in_progress","completed","deleted"],"default":""},"subject":{"type":"string","default":""},"description":{"type":"string","default":""},"active_form":{"type":"string","default":""},"owner":{"type":"string","default":""},"metadata":{"type":"object","default":{}},"add_blocks":{"type":"array","items":{"type":"string"},"default":[]},"add_blocked_by":{"type":"array","items":{"type":"string"},"default":[]},"remove_blocks":{"type":"array","items":{"type":"string"},"default":[]},"remove_blocked_by":{"type":"array","items":{"type":"string"},"default":[]}},"required":["task_id"]},task_update,"task"),
         ToolDef("task_stop","停止/取消任务 — 标记为deleted并清理所有依赖引用",{"type":"object","properties":{"task_id":{"type":"string","description":"任务ID"}},"required":["task_id"]},task_stop,"task"),
     ])
+
+def register_web_tools(reg):
+    """注册 Web 搜索工具集 (P0-4) — web_search / web_fetch"""
+    from tools.web_search import web_search, web_fetch
+    reg.register_many([
+        ToolDef("web_search","搜索互联网 (DuckDuckGo)，返回标题+URL+摘要",{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"},"count":{"type":"integer","default":10,"description":"返回结果数量"},"allowed_domains":{"type":"array","items":{"type":"string"},"default":[],"description":"只保留这些域名"},"blocked_domains":{"type":"array","items":{"type":"string"},"default":[],"description":"排除这些域名"}},"required":["query"]},web_search,"web"),
+        ToolDef("web_fetch","抓取指定URL的网页内容，解析为纯文本返回",{"type":"object","properties":{"url":{"type":"string","description":"网页URL (http/https)"},"max_chars":{"type":"integer","default":8000,"description":"最大返回字符数"},"timeout":{"type":"integer","default":15,"description":"请求超时(秒)"},"raw_html":{"type":"boolean","default":False,"description":"返回原始HTML"}},"required":["url"]},web_fetch,"web"),
+    ])

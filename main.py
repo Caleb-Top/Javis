@@ -67,6 +67,7 @@ except Exception as _ct_e:
     logger.warning(f"Catch2 注入跳过: {_ct_e}")
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
 from tools.manifest import register_task_tools;register_task_tools(registry)
+from tools.manifest import register_web_tools;register_web_tools(registry)
 try:
     from memory.controller import get_controller
     get_controller(brain).start_cycles()
