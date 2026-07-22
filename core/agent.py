@@ -58,6 +58,14 @@ try:
     _PERM_LEVELS_AVAILABLE = True
 except Exception:
     _PERM_LEVELS_AVAILABLE = False
+
+# ════════════════════════════════════════════════════════════
+# P0-8: 三层 Prompt 架构
+# Tier 1 — 身份 + 工具: 你是谁，你能用什么工具
+# Tier 2 — 经验 + 风格: 从 brain/Memory 动态加载
+# Tier 3 — 阶段指引: 当前 plan-execute-verify 阶段
+# ════════════════════════════════════════════════════════════
+
 BASE_SYSTEM_PROMPT = """你是 Javis — 一个真正能思考、能编程、能控制电脑的 AI 智能体。
 
 ## 你的说话方式（比功能更重要）
@@ -112,7 +120,13 @@ read_ui_window, get_window_state
 
 
 def build_dynamic_prompt(brain=None) -> str:
-    """构建动态 System Prompt：基础提示 + 经验 + 风格 + 上次话题 + 你说"""
+    """三层 Prompt 构建: Tier 1(身份+工具) + Tier 2(经验+记忆+风格) + Tier 3(阶段指引)
+
+    三层架构:
+      Tier 1 — 身份 + 工具Schema（固定，~6KB）
+      Tier 2 — 经验 + 风格 + 记忆（动态加载）
+      Tier 3 — 当前阶段指引（运行时注入）
+    """
     rules = []
     if brain:
         seen_exp = set()
@@ -268,7 +282,7 @@ class Agent:
         self._action_history = []
 
     def _build_system_prompt(self) -> str:
-        """构建完整 System Prompt（静态 + 经验注入 + 阶段指引 + 缓存）"""
+        """三层 Prompt 构建: Tier1(身份+工具) + Tier2(经验+记忆) + Tier3(阶段指引) + 缓存"""
         # ── 优化: 缓存 — 每 5 轮重建一次 ──
         if self._cached_prompt and self.state.step - self._cached_prompt_step < 5:
             return self._cached_prompt
