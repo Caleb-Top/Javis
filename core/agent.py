@@ -9,6 +9,7 @@ from core.tool_registry import ToolRegistry
 from core.tool_result import ToolResult
 from core.planner import Planner
 from core.reflector import Reflector, classify_error, map_tool_to_domain
+from core.prompt_builder import PromptBuilder, build_dynamic_prompt
 
 logger = logging.getLogger("agent")
 action_log = []
@@ -189,6 +190,8 @@ class Agent:
         self._action_history = []
         self.brain = brain
         self.learner = learner
+        # ── P0-8: 三层 Prompt 架构 ──
+        self.prompt_builder = PromptBuilder(brain=brain)
 
         self._confirm_event: asyncio.Event | None = None
         self._confirm_result: bool | None = None
@@ -280,21 +283,30 @@ class Agent:
     def reset(self):
         self.state = AgentState()
         self._action_history = []
+        if hasattr(self, 'prompt_builder'):
+            self.prompt_builder.invalidate_cache()
 
-    def _build_system_prompt(self) -> str:
-        """三层 Prompt 构建: Tier1(身份+工具) + Tier2(经验+记忆) + Tier3(阶段指引) + 缓存"""
-        # ── 优化: 缓存 — 每 5 轮重建一次 ──
-        if self._cached_prompt and self.state.step - self._cached_prompt_step < 5:
-            return self._cached_prompt
-        prompt = build_dynamic_prompt(brain=self.brain)
-        phase_guide = {
-            "planning": "\n\n【当前阶段: 规划】先分析需求, 输出完整计划后再执行工具.",
-            "executing": "\n\n【当前阶段: 执行】按计划逐步执行, 每步汇报结果.",
-            "verifying": "\n\n【当前阶段: 验证】检查上一步是否正确, 如失败则重试.",
-        }
-        prompt += phase_guide.get(self.state.phase, "")
+    def _build_system_prompt(self, force: bool = False) -> str:
+        """构建完整 System Prompt（三层架构: 身份 + 记忆 + 阶段）
+
+        P0-8: 使用 PromptBuilder 组装三层 Prompt:
+          Layer 1 — 基础身份层（静态）: 个性、语气、核心能力
+          Layer 2 — 动态记忆层: 脑数据注入、经验规则、最近话题
+          Layer 3 — 阶段指引层: 当前阶段指引 + 护栏摘要 + 安全规则
+
+        Args:
+            force: 强制重建所有层（跳过缓存）
+        """
+        prompt = self.prompt_builder.build(
+            phase=self.state.phase,
+            step=self.state.step,
+            force_rebuild=force,
+        )
+
+        # 保持旧缓存的兼容性
         self._cached_prompt = prompt
         self._cached_prompt_step = self.state.step
+
         return prompt
 
     async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
@@ -624,6 +636,9 @@ class Agent:
                 get_controller(self.brain).memorize(user_input)
             except Exception:
                 pass
+        # ── P0-8: 记忆写入后失效 PromptBuilder 缓存 ──
+        if hasattr(self, 'prompt_builder') and self.brain:
+            self.prompt_builder.invalidate_cache()
         if not self.learner or not self.brain:
             return
         try:
