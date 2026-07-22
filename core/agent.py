@@ -10,6 +10,7 @@ from core.tool_result import ToolResult
 from core.planner import Planner
 from core.reflector import Reflector, classify_error, map_tool_to_domain
 from core.prompt_builder import PromptBuilder, build_dynamic_prompt
+from core.hook_system import HookEvent, get_hook_manager
 
 logger = logging.getLogger("agent")
 action_log = []
@@ -204,6 +205,9 @@ class Agent:
             self._confirm_dangerous = True
             self._permission_level = "quick_auth"
 
+        # ── P1-3: Hooks 系统集成 ──
+        self.hook_manager = get_hook_manager()
+
         # 启动时扫描已有工作区知识，自动吸收
         try:
             from core.workspace_manager import WORKSPACE_ROOT
@@ -344,6 +348,15 @@ class Agent:
         self._action_count = 0
         self._action_history = []
         _log("user_input", user_input[:100])
+
+        # ── P1-3: UserPromptSubmit Hook ──
+        try:
+            await self.hook_manager.trigger(HookEvent.USER_PROMPT_SUBMIT, {
+                "user_input": user_input, "step": self.state.step})
+        except Exception:
+            pass
+        # ── End UserPromptSubmit Hook ──
+
         yield {"type": "thinking", "content": "思考中..."}
 
         recent_calls = []
@@ -462,10 +475,41 @@ class Agent:
                                              "content": "用户取消了该操作"})
                             continue
 
+                    # ── P1-3: PreToolUse Hook ──
+                    try:
+                        pre_hook = await self.hook_manager.trigger(HookEvent.PRE_TOOL_USE, {
+                            "tool_name": tn, "tool_params": tp, "user_input": user_input})
+                        if not pre_hook.allowed:
+                            yield {"type": "tool_result", "tool": tn, "success": False,
+                                   "data": f"Hook blocked: {pre_hook.message}"}
+                            messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
+                                             "content": f"Blocked: {pre_hook.message}"})
+                            continue
+                    except Exception:
+                        pass
+                    # ── End PreToolUse Hook ──
+
+                    t0 = time.time()
                     try:
                         result = await self.tools.execute(tn, tp)
                     except Exception as e:
                         result = ToolResult.failure(str(e))
+                    elapsed_ms = (time.time() - t0) * 1000
+
+                    # ── P1-3: PostToolUse / PostToolUseFailure Hooks ──
+                    try:
+                        if result.success:
+                            await self.hook_manager.trigger(HookEvent.POST_TOOL_USE, {
+                                "tool_name": tn, "tool_params": tp, "success": True,
+                                "result_data": (result.data or "")[:500],
+                                "duration_ms": elapsed_ms})
+                        else:
+                            await self.hook_manager.trigger(HookEvent.POST_TOOL_USE_FAILURE, {
+                                "tool_name": tn, "tool_params": tp, "error": result.error or "unknown",
+                                "duration_ms": elapsed_ms})
+                    except Exception:
+                        pass
+                    # ── End PostToolUse Hooks ──
 
                     act = {"tool": tn, "params": tp, "result": "success" if result.success else "failure", "error": result.error or ""}
                     self._action_history.append(act)

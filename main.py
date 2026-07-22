@@ -68,6 +68,86 @@ except Exception as _ct_e:
 from tools.manifest import register_agent_tools;register_agent_tools(registry)
 from tools.manifest import register_task_tools;register_task_tools(registry)
 from tools.manifest import register_web_tools;register_web_tools(registry)
+
+# ═══════════════════════════════════════════════════════════════
+# P1-1: Provider 插件化 — 7个Provider的加载、健康检查、自动降级
+# ═══════════════════════════════════════════════════════════════
+try:
+    from tools.provider_loader import register_in_manifest as _reg_provider
+    _reg_provider(registry)
+    logger.info('Provider loader registered')
+except Exception as e:
+    logger.warning(f'Provider loader: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-2: 子代理系统 — 隔离上下文、白名单工具、并行执行
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.subagent import register_in_manifest as _reg_subagent
+    _reg_subagent(registry)
+    logger.info('Subagent system registered')
+except Exception as e:
+    logger.warning(f'Subagent system: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-3: Hooks 系统 — 10种事件钩子 (在 agent.py 中已集成触发点)
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.hook_system import register_in_manifest as _reg_hooks
+    _reg_hooks(registry)
+    logger.info('Hook system registered')
+except Exception as e:
+    logger.warning(f'Hook system: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-4: Cron 定时任务 — 用户可配置, 文件锁防重复
+# ═══════════════════════════════════════════════════════════════
+try:
+    from tools.cron_scheduler import register_in_manifest as _reg_cron
+    _reg_cron(registry)
+    logger.info('Cron scheduler registered')
+except Exception as e:
+    logger.warning(f'Cron scheduler: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P1-5: 自动更新 — GitHub API 版本检查 + Git 拉取 + 回滚
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.auto_updater import register_in_manifest as _reg_updater
+    _reg_updater(registry)
+    logger.info('Auto updater registered')
+except Exception as e:
+    logger.warning(f'Auto updater: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P3-1: 沙箱系统 — Docker/Hyper-V/Process 三种后端
+# ═══════════════════════════════════════════════════════════════
+try:
+    from tools.sandbox import register_in_manifest as _reg_sandbox
+    _reg_sandbox(registry)
+    logger.info('Sandbox system registered')
+except Exception as e:
+    logger.warning(f'Sandbox system: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P3-2: Gateway 多平台 — Telegram/微信/Slack + WebSocket 中继
+# ═══════════════════════════════════════════════════════════════
+try:
+    from gateway.gateway_manager import register_in_manifest as _reg_gateway
+    _reg_gateway(registry)
+    logger.info('Gateway manager registered')
+except Exception as e:
+    logger.warning(f'Gateway manager: {e}')
+
+# ═══════════════════════════════════════════════════════════════
+# P3-3: /learn 技能闭环 — AI 自创技能 + 审查 + 市场
+# ═══════════════════════════════════════════════════════════════
+try:
+    from core.skill_creator import get_skill_creator
+    _skill_creator = get_skill_creator(str(ROOT))
+    logger.info(f'Skill creator initialized: {len(_skill_creator.list_skills())} skills')
+except Exception as e:
+    logger.warning(f'Skill creator: {e}')
 try:
     from memory.controller import get_controller
     get_controller(brain).start_cycles()
