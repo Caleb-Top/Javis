@@ -59,6 +59,24 @@ def register_code_exec(reg, ce):
     reg.register(ToolDef("run_code","★执行代码,AI自己编程控制电脑",{"type":"object","properties":{"code":{"type":"string"},"language":{"type":"string","enum":["python","powershell","cmd"],"default":"python"}},"required":["code"]},ce.run_code,"system"))
 
 
+def register_git_tools(reg):
+    """注册 Git 工具集 (P0-1) — 9 个函数"""
+    from tools.git_tools import (
+        git_status, git_log, git_diff, git_push, git_pull,
+        git_save, git_clone, git_branch, git_init,
+    )
+    reg.register_many([
+        ToolDef("git_status","查看仓库状态: 分支、分类文件、远程",{"type":"object","properties":{"repo_path":{"type":"string","default":"."}},"required":[]},git_status,"git"),
+        ToolDef("git_log","查看最近N条提交记录",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"count":{"type":"integer","default":10}},"required":[]},git_log,"git"),
+        ToolDef("git_diff","查看差异，超3000字符自动切--stat",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"staged":{"type":"boolean","default":False}},"required":[]},git_diff,"git"),
+        ToolDef("git_push","推送: 前置检查+推送+友好错误翻译",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"remote":{"type":"string","default":"origin"},"branch":{"type":"string","default":""},"force":{"type":"boolean","default":False}},"required":[]},git_push,"git"),
+        ToolDef("git_pull","拉取远程更新",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"remote":{"type":"string","default":"origin"},"branch":{"type":"string","default":""},"rebase":{"type":"boolean","default":False}},"required":[]},git_pull,"git"),
+        ToolDef("git_save","保存变更: add+commit原子操作",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"message":{"type":"string","default":""},"files":{"type":"array","items":{"type":"string"}},"add_all":{"type":"boolean","default":False}},"required":[]},git_save,"git"),
+        ToolDef("git_clone","克隆仓库",{"type":"object","properties":{"url":{"type":"string"},"target_dir":{"type":"string","default":""},"shallow":{"type":"boolean","default":False}},"required":["url"]},git_clone,"git"),
+        ToolDef("git_branch","分支管理: list/create/switch/merge",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"action":{"type":"string","enum":["list","create","switch","merge"],"default":"list"},"name":{"type":"string","default":""}},"required":[]},git_branch,"git"),
+        ToolDef("git_init","初始化仓库+远程关联",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"remote_url":{"type":"string","default":""},"branch":{"type":"string","default":"main"}},"required":[]},git_init,"git"),
+    ])
+
 def register_workspace(reg, w):
     """注册工作区自我管理工具"""
     reg.register_many([
