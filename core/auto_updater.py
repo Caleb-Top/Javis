@@ -43,3 +43,47 @@ def _version_gt(a: str, b: str) -> bool:
         return ap > bp
     except:
         return False
+
+
+def register_in_manifest(reg):
+    """Register auto updater tools in manifest"""
+    from core.tool_registry import ToolDef
+    import asyncio
+
+    async def check_update(args):
+        result = check_for_updates()
+        if result is None:
+            return {"success": False, "error": "无法检查更新"}
+        return {"success": True, **result}
+
+    async def update_version(args):
+        result = check_for_updates()
+        if result is None or not result.get("has_update"):
+            return {"success": False, "error": "没有可用更新"}
+        try:
+            # Git pull approach for auto update
+            import subprocess
+            project_root = Path(__file__).parent.parent
+            r = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                cwd=str(project_root), capture_output=True, text=True, timeout=30
+            )
+            return {
+                "success": r.returncode == 0,
+                "output": (r.stdout + r.stderr)[:500],
+                "current": get_current_version(),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def current_version(args):
+        return {"success": True, "version": get_current_version()}
+
+    reg.register_many([
+        ToolDef("check_update", "Check GitHub releases for new versions",
+                {"type":"object","properties":{},"required":[]}, check_update, "update"),
+        ToolDef("update_version", "Pull latest release from GitHub",
+                {"type":"object","properties":{},"required":[]}, update_version, "update"),
+        ToolDef("current_version", "Show current Javis version",
+                {"type":"object","properties":{},"required":[]}, current_version, "update"),
+    ])

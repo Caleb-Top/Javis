@@ -56,3 +56,71 @@ class SandboxManager:
             return r.returncode, r.stdout + r.stderr
         except subprocess.TimeoutExpired:
             return -1, "执行超时"
+
+
+_sandbox: SandboxManager | None = None
+
+def get_sandbox() -> SandboxManager:
+    global _sandbox
+    if _sandbox is None:
+        _sandbox = SandboxManager()
+    return _sandbox
+
+
+def register_in_manifest(reg):
+    """Register sandbox tools in manifest"""
+    from core.tool_registry import ToolDef
+    sb = get_sandbox()
+
+    async def sandbox_exec(args):
+        code = args["code"]
+        language = args.get("language", "python")
+        returncode, output = sb.execute(code, language)
+        return {
+            "success": returncode == 0,
+            "exit_code": returncode,
+            "output": output[:4000],
+            "backend": sb.config.backend.value,
+        }
+
+    async def sandbox_config(args):
+        backend = args.get("backend", "")
+        if backend:
+            try:
+                sb.config.backend = SandboxBackend(backend)
+            except ValueError:
+                return {"success": False, "error": f"Unknown backend: {backend}"}
+        timeout = args.get("timeout", 0)
+        if timeout > 0:
+            sb.config.timeout = timeout
+        memory = args.get("memory_mb", 0)
+        if memory > 0:
+            sb.config.memory_mb = memory
+        return {
+            "success": True,
+            "config": {
+                "backend": sb.config.backend.value,
+                "timeout": sb.config.timeout,
+                "memory_mb": sb.config.memory_mb,
+                "cpus": sb.config.cpus,
+            }
+        }
+
+    async def sandbox_status(args):
+        return {
+            "success": True,
+            "backend": sb.config.backend.value,
+            "timeout": sb.config.timeout,
+            "memory_mb": sb.config.memory_mb,
+            "cpus": sb.config.cpus,
+            "available_backends": [b.value for b in SandboxBackend],
+        }
+
+    reg.register_many([
+        ToolDef("sandbox_exec", "Execute code in sandboxed environment",
+                {"type":"object","properties":{"code":{"type":"string"},"language":{"type":"string","default":"python","enum":["python","bash","cmd"]}},"required":["code"]}, sandbox_exec, "sandbox"),
+        ToolDef("sandbox_config", "Configure sandbox settings",
+                {"type":"object","properties":{"backend":{"type":"string","enum":["docker","hyperv","windows_sandbox"]},"timeout":{"type":"integer"},"memory_mb":{"type":"integer"}},"required":[]}, sandbox_config, "sandbox"),
+        ToolDef("sandbox_status", "Get sandbox system status",
+                {"type":"object","properties":{},"required":[]}, sandbox_status, "sandbox"),
+    ])

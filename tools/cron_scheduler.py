@@ -71,3 +71,50 @@ def get_scheduler() -> CronScheduler:
     if _scheduler is None:
         _scheduler = CronScheduler()
     return _scheduler
+
+
+def register_in_manifest(reg):
+    """Register cron scheduler tools in manifest"""
+    from core.tool_registry import ToolDef
+    sched = get_scheduler()
+
+    async def cron_list(args):
+        jobs = sched.list_jobs()
+        return {
+            "success": True,
+            "jobs": [{
+                "job_id": j.job_id, "prompt": j.prompt,
+                "schedule": j.schedule, "enabled": j.enabled,
+                "last_run": j.last_run, "run_count": j.run_count,
+            } for j in jobs],
+            "count": len(jobs),
+        }
+
+    async def cron_add(args):
+        job = sched.add(
+            job_id=args["job_id"],
+            prompt=args["prompt"],
+            schedule=args.get("schedule", "0 9 * * *"),
+        )
+        return {"success": True, "job_id": job.job_id, "schedule": job.schedule}
+
+    async def cron_remove(args):
+        ok = sched.remove(args["job_id"])
+        return {"success": ok}
+
+    async def cron_history(args):
+        history = []
+        if HISTORY_FILE.exists():
+            history = json.loads(HISTORY_FILE.read_text())
+        return {"success": True, "history": history[-50:], "count": len(history)}
+
+    reg.register_many([
+        ToolDef("cron_list", "List all scheduled cron jobs",
+                {"type":"object","properties":{},"required":[]}, cron_list, "cron"),
+        ToolDef("cron_add", "Add a new cron job",
+                {"type":"object","properties":{"job_id":{"type":"string"},"prompt":{"type":"string"},"schedule":{"type":"string","default":"0 9 * * *"}},"required":["job_id","prompt"]}, cron_add, "cron"),
+        ToolDef("cron_remove", "Remove a cron job",
+                {"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}, cron_remove, "cron"),
+        ToolDef("cron_history", "View cron execution history",
+                {"type":"object","properties":{},"required":[]}, cron_history, "cron"),
+    ])
