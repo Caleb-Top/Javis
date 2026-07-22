@@ -236,6 +236,82 @@ async def api_mem_rename(sid:str,data:dict):
 @app.delete("/api/memory/conversations/{sid}")
 async def api_mem_del(sid:str):delete_conversation(sid);return {"ok":True}
 
+# ═══════════════════════════════════════════════════════════════
+# P0-10: FTS5 全文搜索 + 索引管理 API
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/memory/search")
+async def api_memory_search(q: str = "", type: str = "facts", limit: int = 20):
+    """FTS5 全文搜索记忆库: facts | episodes | all"""
+    if not q or len(q) < 2:
+        return {"ok": False, "results": [], "error": "搜索词至少2个字符"}
+    try:
+        from memory.indexer import search_facts, search_episodes, ensure_index, index_status
+        ensure_index()
+        results = []
+        if type in ("facts", "all"):
+            r = search_facts(q, limit=limit)
+            for row in r:
+                results.append({
+                    "type": "fact",
+                    "content": row.get("content", "")[:200],
+                    "category": row.get("category", ""),
+                    "confidence": row.get("confidence", 0),
+                    "priority": row.get("priority", 1),
+                })
+        if type in ("episodes", "all"):
+            r = search_episodes(q, limit=limit)
+            for row in r:
+                results.append({
+                    "type": "episode",
+                    "content": row.get("user_input", "")[:200],
+                    "domain": row.get("fingerprint_domain", ""),
+                    "outcome": row.get("outcome", ""),
+                    "tool_count": row.get("tool_count", 0),
+                })
+        return {"ok": True, "results": results[:limit], "count": len(results[:limit])}
+    except Exception as e:
+        logger.warning(f"FTS5 搜索失败: {e}")
+        return {"ok": False, "results": [], "error": str(e)[:200]}
+
+@app.get("/api/memory/index/status")
+async def api_memory_index_status():
+    """记忆索引状态"""
+    try:
+        from memory.indexer import index_status
+        return {"ok": True, "status": index_status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.post("/api/memory/index/rebuild")
+async def api_memory_index_rebuild():
+    """重建记忆索引"""
+    try:
+        from memory.indexer import rebuild_index
+        rebuild_index()
+        from memory.indexer import index_status
+        return {"ok": True, "status": index_status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.get("/api/memory/search/ui")
+async def api_memory_search_ui():
+    """记忆搜索 UI 配置"""
+    try:
+        from memory.indexer import index_status
+        status = index_status()
+    except:
+        status = {"error": "索引不可用"}
+    return {
+        "ok": True,
+        "index_status": status,
+        "search_types": [
+            {"id": "facts", "label": "知识事实", "desc": "搜索学习到的知识和事实"},
+            {"id": "episodes", "label": "执行记录", "desc": "搜索历史执行任务"},
+            {"id": "all", "label": "全部", "desc": "搜索所有记忆类型"},
+        ],
+    }
+
 @app.get("/api/skills")
 async def api_skills():_discover();return {"skills":SKILL_LIST,"current":CURRENT_SKILL,"count":registry.count}
 
@@ -344,9 +420,7 @@ async def api_terminal_exec(data: dict = Body(...)):
         out = r.stdout.strip()
         err = r.stderr.strip()
         if out and err:
-            out = out + "
-[stderr]
-" + err
+            out = out + "\n[stderr]\n" + err
         elif err:
             out = err
         if not out:
