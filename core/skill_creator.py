@@ -301,6 +301,10 @@ class SkillCreator:
                     deprecated.append(skill.skill_id)
         return deprecated
 
+    def list_skills(self, category: str = "") -> List[Dict]:
+        """便捷方法: 列出技能 (main.py 兼容)"""
+        return self.store.list_all(category=category)
+
     def get_stats(self) -> Dict:
         """获取技能系统统计"""
         skills = list(self.store._index.values())
@@ -317,10 +321,11 @@ class SkillCreator:
 _creator: Optional[SkillCreator] = None
 
 
-def get_skill_creator() -> SkillCreator:
+def get_skill_creator(skills_dir: str = "") -> SkillCreator:
     global _creator
     if _creator is None:
-        _creator = SkillCreator()
+        store = SkillStore(skills_dir) if skills_dir else SkillStore()
+        _creator = SkillCreator(store=store)
     return _creator
 
 
