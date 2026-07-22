@@ -77,6 +77,17 @@ def register_git_tools(reg):
         ToolDef("git_init","初始化仓库+远程关联",{"type":"object","properties":{"repo_path":{"type":"string","default":"."},"remote_url":{"type":"string","default":""},"branch":{"type":"string","default":"main"}},"required":[]},git_init,"git"),
     ])
 
+
+def register_search_tools(reg):
+    """注册搜索工具集 (P0-2) — grep / glob_find / file_edit"""
+    from tools.search import grep, glob_find, file_edit
+    reg.register_many([
+        ToolDef("grep","在文件中搜索正则表达式（基于 ripgrep）。支持 output_mode: content/files_with_matches/count",{"type":"object","properties":{"pattern":{"type":"string","description":"正则表达式模式"},"path":{"type":"string","default":"."},"glob":{"type":"string","default":"","description":"文件名 glob 过滤"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"content"},"max_count":{"type":"integer","default":200},"context":{"type":"integer","default":0},"ignore_case":{"type":"boolean","default":False},"multiline":{"type":"boolean","default":False},"include_hidden":{"type":"boolean","default":False}},"required":["pattern"]},grep,"search"),
+        ToolDef("glob","按 glob 模式查找文件（如 **/*.py, src/**/*.tsx）",{"type":"object","properties":{"pattern":{"type":"string","description":"glob 模式"},"path":{"type":"string","default":"."},"max_results":{"type":"integer","default":100},"include_hidden":{"type":"boolean","default":False}},"required":["pattern"]},glob_find,"search"),
+        ToolDef("file_edit","精确字符串替换编辑文件（与 Claude Code Edit 工具行为一致）",{"type":"object","properties":{"file_path":{"type":"string","description":"文件绝对路径"},"old_string":{"type":"string","description":"要替换的字符串（必须完全匹配，包括缩进）"},"new_string":{"type":"string","description":"替换后的字符串"},"replace_all":{"type":"boolean","default":False}},"required":["file_path","old_string","new_string"]},file_edit,"search"),
+    ])
+
+
 def register_workspace(reg, w):
     """注册工作区自我管理工具"""
     reg.register_many([
