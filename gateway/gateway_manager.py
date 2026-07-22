@@ -1,14 +1,14 @@
 """
 P3-2: Javis Gateway Manager — 多平台消息网关核心
-统一管理多个消息平台的连接、消息收发、会话映射
+统一管理 Telegram/WeChat/Slack + WebSocket 中继，从 HOOK.yaml 读取配置
 """
-import json
-import asyncio
-import time
+import json, asyncio, time, logging, os, yaml
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from enum import Enum
-from abc import ABC, abstractmethod
+from pathlib import Path
+
+logger = logging.getLogger("javis.gateway")
 
 
 class Platform(Enum):
@@ -16,11 +16,7 @@ class Platform(Enum):
     WECHAT = "wechat"
     SLACK = "slack"
     DISCORD = "discord"
-    QQ = "qq"
-    SIGNAL = "signal"
-    MATRIX = "matrix"
-    FEISHU = "feishu"
-    DINGTALK = "dingtalk"
+    WEBSOCKET = "websocket"
 
 
 @dataclass
@@ -32,213 +28,293 @@ class Message:
     sender_name: str = ""
     text: str = ""
     attachments: List[Dict] = field(default_factory=list)
-    timestamp: float = 0
+    timestamp: float = field(default_factory=time.time)
     reply_to: Optional[str] = None
     metadata: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
-            "platform": self.platform,
-            "chat_id": self.chat_id,
-            "sender_id": self.sender_id,
-            "sender_name": self.sender_name,
-            "text": self.text,
-            "attachments": self.attachments,
-            "timestamp": self.timestamp,
-            "reply_to": self.reply_to,
+            "platform": self.platform, "chat_id": self.chat_id,
+            "sender_id": self.sender_id, "sender_name": self.sender_name,
+            "text": self.text, "attachments": self.attachments,
+            "timestamp": self.timestamp, "reply_to": self.reply_to,
         }
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "Message":
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
-class Reply:
-    """统一回复格式"""
-    text: str = ""
-    attachments: List[Dict] = field(default_factory=list)
-    markdown: bool = False
-    reply_to: Optional[str] = None
-
-
-class PlatformAdapter(ABC):
-    """平台适配器基类"""
-
-    @property
-    @abstractmethod
-    def platform(self) -> Platform:
-        pass
-
-    @abstractmethod
-    async def connect(self) -> bool:
-        """连接平台"""
-        pass
-
-    @abstractmethod
-    async def disconnect(self):
-        """断开连接"""
-        pass
-
-    @abstractmethod
-    async def send_message(self, chat_id: str, reply: Reply) -> bool:
-        """发送消息"""
-        pass
-
-    @abstractmethod
-    async def listen(self, callback: Callable[[Message], Awaitable[None]]):
-        """开始监听消息"""
-        pass
-
-    @abstractmethod
-    async def get_chats(self) -> List[Dict]:
-        """获取会话列表"""
-        pass
-
-    @abstractmethod
-    async def get_chat_history(self, chat_id: str, limit: int = 50) -> List[Message]:
-        """获取聊天历史"""
-        pass
-
-    @abstractmethod
-    async def is_connected(self) -> bool:
-        """是否已连接"""
-        pass
+class PlatformState:
+    enabled: bool
+    connected: bool = False
+    last_activity: float = 0
+    message_count: int = 0
+    error_count: int = 0
 
 
 class GatewayManager:
-    """多平台消息网关管理器"""
+    """多平台消息网关"""
 
-    def __init__(self, config_path: str = ""):
-        self._adapters: Dict[str, PlatformAdapter] = {}
-        self._message_handlers: List[Callable[[Message], Awaitable[Any]]] = []
-        self._session_map: Dict[str, str] = {}  # chat_id → session_id
-        self._stats: Dict[str, Dict] = {}
-        if config_path:
-            self._load_config(config_path)
+    def __init__(self, config_path: str = None):
+        self._config_path = config_path or str(
+            Path(__file__).parent.parent / "HOOK.yaml"
+        )
+        self._platforms: dict[str, PlatformState] = {}
+        self._handlers: list[Callable] = []
+        self._message_queue: asyncio.Queue = asyncio.Queue()
+        self._running = False
+        self._bots: dict[str, Any] = {}
+        self._relay = None
+        self.config: dict = {}
+        self._load_config()
 
-    def _load_config(self, config_path: str):
-        """加载网关配置"""
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        for platform_config in config.get("platforms", []):
-            self.enable_platform(platform_config)
+    def _load_config(self) -> dict:
+        """从 HOOK.yaml 加载 gateway 配置"""
+        try:
+            if os.path.exists(self._config_path):
+                with open(self._config_path, "r", encoding="utf-8") as f:
+                    full_config = yaml.safe_load(f) or {}
+                self.config = full_config.get("gateway", {})
+            else:
+                self.config = {}
+        except Exception as e:
+            logger.warning(f"HOOK.yaml 加载失败: {e}")
+            self.config = {}
 
-    def register_adapter(self, adapter: PlatformAdapter):
-        """注册平台适配器"""
-        platform_name = adapter.platform.value
-        self._adapters[platform_name] = adapter
-        self._stats[platform_name] = {
-            "messages_received": 0,
-            "messages_sent": 0,
-            "errors": 0,
-            "connected": False,
-        }
+        return self.config
 
-    def enable_platform(self, config: Dict):
-        """启用并配置平台"""
-        platform = config.get("platform", "")
-        if platform == "telegram":
-            from .telegram_adapter import TelegramAdapter
-            adapter = TelegramAdapter(config.get("token", ""))
-        elif platform == "wechat":
-            from .wechat_adapter import WeChatAdapter
-            adapter = WeChatAdapter(config)
-        elif platform == "slack":
-            from .slack_adapter import SlackAdapter
-            adapter = SlackAdapter(config.get("token", ""), config.get("app_token", ""))
-        else:
-            return
+    def _get_platforms_config(self) -> dict:
+        return self.config.get("platforms", {})
 
-        self.register_adapter(adapter)
+    def _get_routing_config(self) -> dict:
+        return self.config.get("routing", {})
+
+    def _get_ws_config(self) -> dict:
+        return self.config.get("ws_relay", {})
 
     async def start_all(self):
-        """启动所有已配置的平台"""
-        for name, adapter in self._adapters.items():
-            try:
-                connected = await adapter.connect()
-                self._stats[name]["connected"] = connected
-                if connected:
-                    await adapter.listen(self._on_message)
-            except Exception as e:
-                self._stats[name]["errors"] += 1
+        """启动所有已启用的平台"""
+        self._running = True
+        self._load_config()
+        platforms = self._get_platforms_config()
+
+        for name, pconfig in platforms.items():
+            if not pconfig.get("enabled", False):
+                continue
+
+            self._platforms[name] = PlatformState(enabled=True)
+            logger.info(f"Gateway 启动平台: {name}")
+
+            if name == "telegram":
+                await self._start_telegram(pconfig)
+            elif name == "wechat":
+                await self._start_wechat(pconfig)
+            elif name == "slack":
+                await self._start_slack(pconfig)
+
+        # WebSocket 中继
+        ws_config = self._get_ws_config()
+        if ws_config.get("enabled", False):
+            await self._start_ws_relay(ws_config)
+
+        # 消息处理循环
+        asyncio.create_task(self._message_loop())
+        logger.info(f"Gateway 启动完成: {len(self._platforms)} 个平台")
 
     async def stop_all(self):
-        """停止所有平台连接"""
-        for adapter in self._adapters.values():
-            try:
-                await adapter.disconnect()
-            except Exception:
-                pass
+        """停止所有平台"""
+        self._running = False
+        for name, bot in self._bots.items():
+            if hasattr(bot, "stop"):
+                try:
+                    await bot.stop()
+                except Exception:
+                    pass
+        self._bots.clear()
+        self._platforms.clear()
 
-    async def _on_message(self, message: Message):
-        """内部消息处理 — 分发给所有注册的处理器"""
-        platform = message.platform
-        self._stats[platform]["messages_received"] += 1
+    async def _start_telegram(self, config: dict):
+        """启动 Telegram Bot"""
+        try:
+            from gateway.telegram_bot import TelegramBot, TelegramConfig
 
-        for handler in self._message_handlers:
+            bot = TelegramBot(
+                config=TelegramConfig(
+                    token=os.path.expandvars(config.get("token", "")),
+                    parse_mode="Markdown",
+                ),
+                on_message=self._handle_message,
+            )
+            self._bots["telegram"] = bot
+            await bot.start(mode="polling")
+            self._platforms["telegram"].connected = True
+        except Exception as e:
+            logger.error(f"Telegram 启动失败: {e}")
+            self._platforms["telegram"] = PlatformState(enabled=True, error_count=1)
+
+    async def _start_wechat(self, config: dict):
+        """启动微信 Bot"""
+        try:
+            from gateway.wechat_bot import WeChatBot, WeChatConfig
+
+            bot = WeChatBot(
+                config=WeChatConfig(
+                    webhook_url=os.path.expandvars(config.get("webhook_url", "")),
+                ),
+                on_message=self._handle_message,
+            )
+            self._bots["wechat"] = bot
+            await bot.start()
+            self._platforms["wechat"].connected = True
+        except Exception as e:
+            logger.error(f"微信 启动失败: {e}")
+            self._platforms["wechat"] = PlatformState(enabled=True, error_count=1)
+
+    async def _start_slack(self, config: dict):
+        """启动 Slack 适配器"""
+        try:
+            from gateway.slack_adapter import SlackAdapter
+            adapter = SlackAdapter(config)
+            self._bots["slack"] = adapter
+            await adapter.connect()
+            self._platforms["slack"].connected = True
+        except Exception as e:
+            logger.error(f"Slack 启动失败: {e}")
+
+    async def _start_ws_relay(self, config: dict):
+        """启动 WebSocket 中继"""
+        try:
+            from gateway.relay import WebSocketRelay
+            relay = WebSocketRelay(
+                port=config.get("port", 9090),
+                auth_token=os.path.expandvars(config.get("auth_token", "")),
+            )
+            self._relay = relay
+            asyncio.create_task(relay.start())
+            self._platforms["websocket"] = PlatformState(
+                enabled=True, connected=True
+            )
+        except Exception as e:
+            logger.error(f"WS 中继启动失败: {e}")
+
+    async def _handle_message(self, msg_data: dict):
+        """统一消息处理入口"""
+        await self._message_queue.put(msg_data)
+
+    async def _message_loop(self):
+        """消息处理循环"""
+        while self._running:
             try:
-                await handler(message)
+                msg_data = await asyncio.wait_for(
+                    self._message_queue.get(), timeout=1.0
+                )
+                platform = msg_data.get("platform", "unknown")
+
+                # 更新状态
+                if platform in self._platforms:
+                    self._platforms[platform].message_count += 1
+                    self._platforms[platform].last_activity = time.time()
+
+                # 调用所有处理程序
+                for handler in self._handlers:
+                    try:
+                        result = handler(msg_data)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as e:
+                        logger.error(f"Handler 执行失败: {e}")
+
+                # 自动回复（如果启用）
+                routing = self._get_routing_config()
+                if routing.get("forward_to_agent", False):
+                    await self._auto_reply(msg_data)
+
+            except asyncio.TimeoutError:
+                continue
             except Exception as e:
-                self._stats[platform]["errors"] += 1
+                logger.error(f"消息循环异常: {e}")
 
-    def on_message(self, handler: Callable[[Message], Awaitable[Any]]):
-        """注册消息处理器"""
-        self._message_handlers.append(handler)
-        return handler  # 可用作装饰器
+    async def _auto_reply(self, msg_data: dict):
+        """自动回复消息"""
+        text = msg_data.get("text", "")
+        if not text or not text.strip():
+            return
 
-    async def send(self, platform: str, chat_id: str, text: str,
-                   markdown: bool = False, attachments: List = None,
-                   reply_to: str = None) -> bool:
+        platform = msg_data.get("platform", "")
+        chat_id = msg_data.get("chat_id", "")
+
+        bot = self._bots.get(platform)
+        if not bot:
+            return
+
+        routing = self._get_routing_config()
+        max_len = routing.get("max_response_length", 4000)
+
+        # 简单的 echo 回复（实际应由 agent 处理）
+        reply = f"收到消息: {text[:100]}..."
+        if hasattr(bot, "send_message"):
+            await bot.send_message(chat_id, reply[:max_len])
+
+    def register_handler(self, handler: Callable):
+        """注册消息处理回调"""
+        self._handlers.append(handler)
+
+    def remove_handler(self, handler: Callable):
+        """移除消息处理回调"""
+        if handler in self._handlers:
+            self._handlers.remove(handler)
+
+    async def send_to_platform(self, platform: str, chat_id: str,
+                              text: str) -> bool:
         """发送消息到指定平台"""
-        adapter = self._adapters.get(platform)
-        if not adapter:
+        bot = self._bots.get(platform)
+        if not bot:
             return False
 
-        reply = Reply(text=text, attachments=attachments or [],
-                      markdown=markdown, reply_to=reply_to)
+        routing = self._get_routing_config()
+        max_len = routing.get("max_response_length", 4000)
 
         try:
-            ok = await adapter.send_message(chat_id, reply)
-            if ok:
-                self._stats[platform]["messages_sent"] += 1
-            return ok
-        except Exception:
-            self._stats[platform]["errors"] += 1
+            if hasattr(bot, "send_message"):
+                await bot.send_message(chat_id, text[:max_len])
+            elif hasattr(bot, "send_webhook"):
+                await bot.send_webhook(text[:max_len])
+            return True
+        except Exception as e:
+            logger.error(f"发送消息失败 [{platform}]: {e}")
             return False
 
-    async def broadcast(self, text: str, platforms: List[str] = None,
-                        chat_ids: Dict[str, str] = None) -> Dict[str, bool]:
-        """广播消息到多个平台"""
-        results = {}
-        for name, adapter in self._adapters.items():
-            if platforms and name not in platforms:
-                continue
-            chat_id = chat_ids.get(name) if chat_ids else "default"
-            try:
-                results[name] = await adapter.send_message(chat_id, Reply(text=text))
-            except Exception:
-                results[name] = False
-        return results
-
-    def map_session(self, chat_id: str, session_id: str):
-        """会话映射: 将平台会话映射到 Javis 会话"""
-        self._session_map[chat_id] = session_id
-
-    def get_session(self, chat_id: str) -> Optional[str]:
-        """反向查找: chat_id → session_id"""
-        return self._session_map.get(chat_id)
-
-    def get_status(self) -> Dict:
+    def get_status(self) -> dict:
         """获取网关状态"""
-        connected = [name for name, a in self._adapters.items() if a.is_connected()]
+        platforms_status = {}
+        for name, state in self._platforms.items():
+            platforms_status[name] = {
+                "enabled": state.enabled,
+                "connected": state.connected,
+                "messages": state.message_count,
+                "errors": state.error_count,
+                "last_activity": state.last_activity,
+            }
+
+        # 检查配置中的平台但未启动的
+        config_platforms = self._get_platforms_config()
+        for name, pconfig in config_platforms.items():
+            if name not in platforms_status:
+                platforms_status[name] = {
+                    "enabled": pconfig.get("enabled", False),
+                    "connected": False,
+                    "configured": True,
+                }
+
         return {
-            "adapters": list(self._adapters.keys()),
-            "connected": connected,
-            "stats": self._stats.copy(),
-            "session_mappings": len(self._session_map),
-            "message_handlers": len(self._message_handlers),
+            "running": self._running,
+            "platforms": platforms_status,
+            "handlers": len(self._handlers),
+            "relay": self._relay.get_stats() if self._relay else None,
         }
+
+    def reload_config(self) -> dict:
+        """重新加载配置"""
+        self._load_config()
+        return self.config
 
 
 # 全局单例
@@ -252,63 +328,69 @@ def get_gateway() -> GatewayManager:
     return _gateway
 
 
+# ── 注册到 manifest ──
+
 def register_in_manifest(reg):
-    """Register gateway tools"""
+    """注册 Gateway 工具到 manifest"""
     from core.tool_registry import ToolDef
     gw = get_gateway()
 
     async def gateway_status(args):
         return {"success": True, **gw.get_status()}
 
+    async def gateway_start(args):
+        await gw.start_all()
+        return {"success": True, "message": "Gateway 已启动",
+                **gw.get_status()}
+
+    async def gateway_stop(args):
+        await gw.stop_all()
+        return {"success": True, "message": "Gateway 已停止"}
+
     async def gateway_send(args):
-        ok = await gw.send(
+        ok = await gw.send_to_platform(
             platform=args["platform"],
-            chat_id=args.get("chat_id", "default"),
+            chat_id=args["chat_id"],
             text=args["text"],
-            markdown=args.get("markdown", False)
         )
         return {"success": ok}
 
-    async def gateway_broadcast(args):
-        results = await gw.broadcast(
-            text=args["text"],
-            platforms=args.get("platforms")
-        )
-        return {"success": True, "results": results}
+    async def gateway_reload(args):
+        config = gw.reload_config()
+        return {"success": True, "config": config}
 
-    async def gateway_map_session(args):
-        gw.map_session(args["chat_id"], args["session_id"])
-        return {"success": True}
-
-    async def gateway_chats(args):
-        platform = args.get("platform", "")
-        adapter = gw._adapters.get(platform)
-        if adapter:
-            chats = await adapter.get_chats()
-            return {"success": True, "chats": chats}
-        return {"success": False, "error": f"Platform {platform} not connected"}
-
-    async def gateway_history(args):
-        adapter = gw._adapters.get(args.get("platform", ""))
-        if adapter:
-            messages = await adapter.get_chat_history(
-                args.get("chat_id", "default"),
-                args.get("limit", 50)
-            )
-            return {"success": True, "messages": [m.to_dict() for m in messages]}
-        return {"success": False, "error": "Platform not connected"}
+    async def gateway_list_platforms(args):
+        config_platforms = gw._get_platforms_config()
+        platforms = []
+        for name, pconfig in config_platforms.items():
+            platforms.append({
+                "name": name,
+                "enabled": pconfig.get("enabled", False),
+                "connected": gw._platforms.get(name, PlatformState(False)).connected,
+            })
+        return {"success": True, "platforms": platforms}
 
     reg.register_many([
-        ToolDef("gateway_status", "Get gateway status for all platforms",
-                {"type":"object","properties":{},"required":[]}, gateway_status, "gateway"),
-        ToolDef("gateway_send", "Send a message to a platform",
-                {"type":"object","properties":{"platform":{"type":"string"},"chat_id":{"type":"string","default":"default"},"text":{"type":"string"},"markdown":{"type":"boolean","default":false}},"required":["platform","text"]}, gateway_send, "gateway"),
-        ToolDef("gateway_broadcast", "Broadcast message to multiple platforms",
-                {"type":"object","properties":{"text":{"type":"string"},"platforms":{"type":"array","items":{"type":"string"}}},"required":["text"]}, gateway_broadcast, "gateway"),
-        ToolDef("gateway_map_session", "Map a chat to a Javis session",
-                {"type":"object","properties":{"chat_id":{"type":"string"},"session_id":{"type":"string"}},"required":["chat_id","session_id"]}, gateway_map_session, "gateway"),
-        ToolDef("gateway_chats", "List chats for a platform",
-                {"type":"object","properties":{"platform":{"type":"string"}},"required":["platform"]}, gateway_chats, "gateway"),
-        ToolDef("gateway_history", "Get chat history from a platform",
-                {"type":"object","properties":{"platform":{"type":"string"},"chat_id":{"type":"string","default":"default"},"limit":{"type":"integer","default":50}},"required":["platform"]}, gateway_history, "gateway"),
+        ToolDef("gateway_status", "查看多平台网关状态",
+                {"type":"object","properties":{},"required":[]},
+                gateway_status, "gateway"),
+        ToolDef("gateway_start", "启动所有已启用的平台网关",
+                {"type":"object","properties":{},"required":[]},
+                gateway_start, "gateway"),
+        ToolDef("gateway_stop", "停止所有平台网关",
+                {"type":"object","properties":{},"required":[]},
+                gateway_stop, "gateway"),
+        ToolDef("gateway_send", "向指定平台发送消息",
+                {"type":"object","properties":{
+                    "platform":{"type":"string","enum":["telegram","wechat","slack","websocket"]},
+                    "chat_id":{"type":"string"},
+                    "text":{"type":"string"},
+                },"required":["platform","chat_id","text"]},
+                gateway_send, "gateway"),
+        ToolDef("gateway_reload", "重新加载 HOOK.yaml 配置",
+                {"type":"object","properties":{},"required":[]},
+                gateway_reload, "gateway"),
+        ToolDef("gateway_platforms", "列出所有配置的平台",
+                {"type":"object","properties":{},"required":[]},
+                gateway_list_platforms, "gateway"),
     ])

@@ -1,23 +1,18 @@
 """
-P3-2: 消息中继 (Relay) — 借鉴 Hermes Gateway Relay
-消息路由、过滤、转换的统一中继层
+P3-2: 消息中继 (Relay) — 多平台消息路由、过滤、转换
+WebSocket relay for real-time bidirectional message forwarding
 """
-import json
-import time
-import asyncio
-import logging
+import json, time, asyncio, logging, os, yaml
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Awaitable
 from enum import Enum
-
-from .adapters import PlatformType, IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger("javis.gateway.relay")
 
 
 class MessageDirection(Enum):
-    INCOMING = "incoming"   # 平台 → Javis
-    OUTGOING = "outgoing"   # Javis → 平台
+    INCOMING = "incoming"
+    OUTGOING = "outgoing"
 
 
 class MessagePriority(Enum):
@@ -32,20 +27,26 @@ class RelayMessage:
     """中继消息 — 内部统一格式"""
     id: str
     direction: MessageDirection
-    platform: PlatformType
+    platform: str
     chat_id: str
     user_id: str
     content: str
     priority: MessagePriority = MessagePriority.NORMAL
-    role: str = "user"  # user/assistant/system
+    role: str = "user"
     timestamp: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    raw: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id, "direction": self.direction.value,
+            "platform": self.platform, "chat_id": self.chat_id,
+            "user_id": self.user_id, "content": self.content,
+            "priority": self.priority.value, "role": self.role,
+            "timestamp": self.timestamp, "metadata": self.metadata,
+        }
 
 
 class FilterRule:
-    """消息过滤规则"""
-
     def __init__(self, name: str, condition: Callable[[RelayMessage], bool]):
         self.name = name
         self.condition = condition
@@ -58,8 +59,6 @@ class FilterRule:
 
 
 class TransformRule:
-    """消息转换规则"""
-
     def __init__(self, name: str, transform: Callable[[RelayMessage], RelayMessage]):
         self.name = name
         self.transform = transform
@@ -73,151 +72,174 @@ class TransformRule:
 
 
 class MessageRelay:
-    """
-    消息中继 — 借鉴 Hermes Gateway Relay
+    """消息中继 — 多平台路由核心"""
 
-    功能:
-    - 多平台消息统一路由
-    - 消息过滤 (敏感词/垃圾信息)
-    - 消息转换 (格式统一/内容增强)
-    - 优先级队列
-    - 速率限制
-    """
+    def __init__(self, config: dict = None):
+        self.config = config or {}
+        self._filters: list[FilterRule] = []
+        self._transforms: list[TransformRule] = []
+        self._ws_clients: dict[str, list] = {}  # chat_id -> [websockets]
+        self._message_log: list[RelayMessage] = []
+        self._stats = {"in": 0, "out": 0, "dropped": 0}
 
-    def __init__(self):
-        self._filters: List[FilterRule] = []
-        self._transforms: List[TransformRule] = []
-        self._handlers: Dict[PlatformType, List[Callable[[RelayMessage], Awaitable[None]]]] = {}
-        self._queue: asyncio.PriorityQueue = None
-        self._running: bool = False
-        self._message_count: Dict[str, int] = {}  # 速率限制
-        self._rate_limit: int = 30  # 每用户每分钟最大消息数
-        self._rate_window: int = 60  # 速率窗口(秒)
+    def add_filter(self, rule: FilterRule):
+        self._filters.append(rule)
 
-    def add_filter(self, name: str, condition: Callable[[RelayMessage], bool]):
-        """添加过滤规则"""
-        self._filters.append(FilterRule(name, condition))
-        logger.info(f"Added filter: {name}")
+    def add_transform(self, rule: TransformRule):
+        self._transforms.append(rule)
 
-    def add_transform(self, name: str, transform: Callable[[RelayMessage], RelayMessage]):
-        """添加转换规则"""
-        self._transforms.append(TransformRule(name, transform))
-        logger.info(f"Added transform: {name}")
+    def add_ws_client(self, chat_id: str, ws):
+        if chat_id not in self._ws_clients:
+            self._ws_clients[chat_id] = []
+        self._ws_clients[chat_id].append(ws)
+        logger.info(f"WS 客户端连接: {chat_id} ({len(self._ws_clients[chat_id])} clients)")
 
-    def on_platform_message(self, platform: PlatformType,
-                            handler: Callable[[RelayMessage], Awaitable[None]]):
-        """注册平台消息处理器"""
-        if platform not in self._handlers:
-            self._handlers[platform] = []
-        self._handlers[platform].append(handler)
+    def remove_ws_client(self, chat_id: str, ws):
+        if chat_id in self._ws_clients:
+            self._ws_clients[chat_id] = [c for c in self._ws_clients[chat_id] if c != ws]
 
-    async def route_incoming(self, incoming: IncomingMessage) -> Optional[RelayMessage]:
-        """
-        处理入站消息: 过滤 → 转换 → 路由
-        Returns: 处理后的 RelayMessage (被过滤则返回 None)
-        """
-        msg_id = f"{incoming.platform.value}:{incoming.chat_id}:{int(time.time()*1000)}"
+    async def route_incoming(self, msg: RelayMessage) -> Optional[RelayMessage]:
+        """路由入站消息"""
+        self._stats["in"] += 1
 
-        msg = RelayMessage(
-            id=msg_id,
-            direction=MessageDirection.INCOMING,
-            platform=incoming.platform,
-            chat_id=incoming.chat_id,
-            user_id=incoming.user_id,
-            content=incoming.content,
-            role="user",
-            metadata={
-                "user_name": incoming.user_name,
-                "message_type": incoming.message_type,
-                "media_url": incoming.media_url,
-            },
-            raw=incoming.raw,
-        )
-
-        # 速率限制检查
-        if not self._check_rate_limit(msg.user_id):
-            logger.warning(f"Rate limit exceeded for user {msg.user_id}")
-            return None
-
-        # 过滤
+        # 应用过滤器
         for f in self._filters:
             if f.match(msg):
-                logger.info(f"Message filtered by '{f.name}'")
+                logger.debug(f"消息被过滤 [{f.name}]: {msg.id}")
+                self._stats["dropped"] += 1
                 return None
 
-        # 转换
+        # 应用转换
         for t in self._transforms:
             msg = t.apply(msg)
 
-        # 路由到处理器
-        handlers = self._handlers.get(incoming.platform, [])
-        for handler in handlers:
+        # 记录日志
+        self._message_log.append(msg)
+        if len(self._message_log) > 500:
+            self._message_log = self._message_log[-500:]
+
+        return msg
+
+    async def broadcast_outgoing(self, msg: RelayMessage):
+        """广播出站消息到 WebSocket 客户端"""
+        self._stats["out"] += 1
+        self._message_log.append(msg)
+
+        # 发送到匹配的 WS 客户端
+        clients = self._ws_clients.get(msg.chat_id, [])
+        clients += self._ws_clients.get("*", [])  # 全局广播
+
+        dead_clients = []
+        for ws in clients:
             try:
-                await handler(msg)
-            except Exception as e:
-                logger.error(f"Handler error for {incoming.platform.value}: {e}")
+                await ws.send_text(json.dumps(msg.to_dict(), ensure_ascii=False))
+            except Exception:
+                dead_clients.append((msg.chat_id, ws))
 
-        return msg
+        for chat_id, ws in dead_clients:
+            self.remove_ws_client(chat_id, ws)
 
-    async def route_outgoing(self, outgoing: OutgoingMessage, platform: PlatformType) -> RelayMessage:
-        """处理出站消息"""
-        msg_id = f"out:{platform.value}:{outgoing.chat_id}:{int(time.time()*1000)}"
+    def get_stats(self) -> dict:
+        return {**self._stats, "ws_clients": sum(len(v) for v in self._ws_clients.values())}
 
-        msg = RelayMessage(
-            id=msg_id,
-            direction=MessageDirection.OUTGOING,
-            platform=platform,
-            chat_id=outgoing.chat_id,
-            user_id="javis",
-            content=outgoing.content,
-            role="assistant",
-            metadata={
-                "parse_mode": outgoing.parse_mode,
-                "reply_to": outgoing.reply_to_id,
-            },
+    def get_recent_messages(self, limit: int = 50) -> list[dict]:
+        return [m.to_dict() for m in self._message_log[-limit:]]
+
+
+# ── HOOK.yaml 集成 ──
+
+def load_hooks_config(hook_yaml_path: str = None) -> dict:
+    """加载 HOOK.yaml 中的 gateway 配置"""
+    if hook_yaml_path is None:
+        hook_yaml_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "HOOK.yaml"
         )
+    if not os.path.exists(hook_yaml_path):
+        return {}
 
-        return msg
+    try:
+        with open(hook_yaml_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        return config.get("gateway", {})
+    except Exception as e:
+        logger.error(f"HOOK.yaml 加载失败: {e}")
+        return {}
 
-    def _check_rate_limit(self, user_id: str) -> bool:
-        """检查速率限制"""
-        now = time.time()
-        key = f"rate:{user_id}:{int(now // self._rate_window)}"
 
-        count = self._message_count.get(key, 0)
-        if count >= self._rate_limit:
-            return False
+# ── WebSocket 中继服务 ──
 
-        self._message_count[key] = count + 1
-        # 清理旧窗口
-        self._clean_rate_keys(now)
-        return True
+class WebSocketRelay:
+    """WebSocket 中继服务 — 实时双向消息转发"""
 
-    def _clean_rate_keys(self, now: float):
-        """清理过期的速率限制键"""
-        threshold = int(now // self._rate_window) - 2
-        expired = [k for k in self._message_count
-                   if k.startswith("rate:") and int(k.rsplit(":", 1)[-1]) < threshold]
-        for k in expired:
-            del self._message_count[k]
+    def __init__(self, host: str = "0.0.0.0", port: int = 9090,
+                auth_token: str = ""):
+        self.host = host
+        self.port = port
+        self.auth_token = auth_token
+        self.relay = MessageRelay()
 
-    def start_processing(self):
-        """启动消息处理循环"""
-        if not self._running:
-            self._running = True
-            logger.info("MessageRelay started")
+    async def start(self):
+        """启动 WebSocket 中继"""
+        try:
+            from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+            import uvicorn
 
-    def stop_processing(self):
-        """停止消息处理"""
-        self._running = False
-        logger.info("MessageRelay stopped")
+            app = FastAPI(title="Javis Gateway Relay")
+            relay = self.relay
 
-    def status(self) -> Dict[str, Any]:
-        """获取中继状态"""
-        return {
-            "running": self._running,
-            "filters": len(self._filters),
-            "transforms": len(self._transforms),
-            "platforms": [p.value for p in self._handlers],
-            "rate_limits_active": len(self._message_count),
-        }
+            @app.websocket("/ws/{chat_id}")
+            async def ws_endpoint(ws: WebSocket, chat_id: str):
+                # 鉴权
+                token = ws.query_params.get("token", "")
+                if self.auth_token and token != self.auth_token:
+                    await ws.close(code=4003, reason="未授权")
+                    return
+
+                await ws.accept()
+                relay.add_ws_client(chat_id, ws)
+                logger.info(f"WS 已连接: chat={chat_id}")
+
+                try:
+                    while True:
+                        data = await ws.receive_text()
+                        msg_data = json.loads(data)
+                        rmsg = RelayMessage(
+                            id=f"ws-{int(time.time()*1000)}",
+                            direction=MessageDirection.INCOMING,
+                            platform="websocket",
+                            chat_id=chat_id,
+                            user_id=msg_data.get("user_id", "ws_user"),
+                            content=msg_data.get("content", ""),
+                        )
+                        processed = await relay.route_incoming(rmsg)
+                        if processed:
+                            await relay.broadcast_outgoing(processed)
+                except WebSocketDisconnect:
+                    logger.info(f"WS 断开: chat={chat_id}")
+                except Exception as e:
+                    logger.error(f"WS 错误: {e}")
+                finally:
+                    relay.remove_ws_client(chat_id, ws)
+
+            @app.get("/health")
+            async def health():
+                return {"status": "ok", "stats": relay.get_stats()}
+
+            @app.get("/stats")
+            async def stats():
+                return relay.get_stats()
+
+            @app.get("/messages")
+            async def messages(limit: int = 50):
+                return {"messages": relay.get_recent_messages(limit)}
+
+            config = uvicorn.Config(app, host=self.host, port=self.port,
+                                   log_level="info")
+            server = uvicorn.Server(config)
+            logger.info(f"WebSocket 中继启动: ws://{self.host}:{self.port}/ws/{{chat_id}}")
+            await server.serve()
+
+        except ImportError:
+            logger.warning("FastAPI/uvicorn 未安装，跳过 WS 中继")
+        except Exception as e:
+            logger.error(f"WS 中继启动失败: {e}")
