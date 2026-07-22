@@ -73,3 +73,61 @@ class SubAgentRunner:
     async def run_parallel(self, configs: list[AgentDefinition]) -> list[SubAgentResult]:
         tasks = [self.run(c) for c in configs]
         return await asyncio.gather(*tasks)
+
+# Global singleton
+_runner: Optional[SubAgentRunner] = None
+
+def get_runner(llm_client=None, tool_registry=None) -> SubAgentRunner:
+    global _runner
+    if _runner is None:
+        _runner = SubAgentRunner(llm_client, tool_registry)
+    return _runner
+
+def register_in_manifest(reg):
+    """Register subagent tools in manifest"""
+    from core.tool_registry import ToolDef
+    runner = get_runner()
+
+    async def subagent_run(args):
+        config = AgentDefinition(
+            description=args.get("description", "Sub-agent task"),
+            prompt=args["prompt"],
+            tools=args.get("tools"),
+            model=args.get("model"),
+            max_turns=args.get("max_turns", 10),
+        )
+        result = await runner.run(config)
+        return {
+            "success": result.success,
+            "agent_id": result.agent_id,
+            "content": result.content[:2000],
+            "error": result.error,
+            "turns": result.turns,
+        }
+
+    async def subagent_parallel(args):
+        configs = []
+        for item in args.get("tasks", []):
+            configs.append(AgentDefinition(
+                description=item.get("description", ""),
+                prompt=item["prompt"],
+                tools=item.get("tools"),
+                model=item.get("model"),
+                max_turns=item.get("max_turns", 10),
+            ))
+        results = await runner.run_parallel(configs)
+        return {
+            "success": all(r.success for r in results),
+            "results": [{
+                "agent_id": r.agent_id, "description": r.description,
+                "content": r.content[:500], "success": r.success,
+                "error": r.error, "turns": r.turns,
+            } for r in results],
+        }
+
+    reg.register_many([
+        ToolDef("subagent_run", "Run a sub-agent with isolated context",
+                {"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"model":{"type":"string"},"max_turns":{"type":"integer","default":10}},"required":["prompt"]}, subagent_run, "subagent"),
+        ToolDef("subagent_parallel", "Run multiple sub-agents in parallel",
+                {"type":"object","properties":{"tasks":{"type":"array","items":{"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"tools":{"type":"array"},"max_turns":{"type":"integer"}}}}},"required":["tasks"]}, subagent_parallel, "subagent"),
+    ])

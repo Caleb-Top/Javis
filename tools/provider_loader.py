@@ -79,3 +79,42 @@ def inject_to_brain(brain=None):
             source="provider_loader",
             priority=3
         )
+
+def register_in_manifest(reg):
+    """Register provider tools in manifest"""
+    from core.tool_registry import ToolDef
+    loader = get_loader()
+
+    async def list_providers(args):
+        providers = loader.list_all()
+        return {
+            "success": True,
+            "providers": [{
+                "name": p.name, "label": p.label,
+                "api_base": p.api_base, "models": p.models,
+                "priority": p.priority, "enabled": p.enabled,
+            } for p in providers],
+            "count": len(providers),
+        }
+
+    async def get_provider(args):
+        p = loader.get(args["name"])
+        if p:
+            return {
+                "success": True, "name": p.name, "label": p.label,
+                "api_base": p.api_base, "models": p.models,
+                "priority": p.priority, "enabled": p.enabled,
+            }
+        return {"success": False, "error": f"Provider not found: {args['name']}"}
+
+    async def refresh_providers(args):
+        loader._discovered = False
+        loader._providers.clear()
+        providers = loader.discover()
+        return {"success": True, "count": len(providers)}
+
+    reg.register_many([
+        ToolDef("provider_list", "List all available AI providers", {"type":"object","properties":{},"required":[]}, list_providers, "provider"),
+        ToolDef("provider_get", "Get details of a specific provider", {"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}, get_provider, "provider"),
+        ToolDef("provider_refresh", "Re-scan and refresh provider list", {"type":"object","properties":{},"required":[]}, refresh_providers, "provider"),
+    ])
