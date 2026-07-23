@@ -2,16 +2,16 @@
 Cron 用户可配置调度器 — jobs.json + 执行历史 + 文件锁
 P1-4: Configurable cron with file locking, history, and pattern matching
 """
-import os, json, time, logging, fcntl, threading
+import os, json, time, logging, threading, sys
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger("cron")
 
-JOBS_FILE = Path("data/cron/jobs.json")
-HISTORY_FILE = Path("data/cron/history.json")
-LOCK_DIR = Path("data/cron/locks")
+JOBS_FILE = Path(__file__).parent.parent / "data" / "cron" / "jobs.json"
+HISTORY_FILE = Path(__file__).parent.parent / "data" / "cron" / "history.json"
+LOCK_DIR = Path(__file__).parent.parent / "data" / "cron" / "locks"
 
 
 @dataclass
@@ -135,20 +135,50 @@ class CronScheduler:
         return True
 
     def acquire_lock(self, job_id: str) -> bool:
-        """获取文件锁 — 防重复执行"""
+        """获取文件锁 — 防重复执行（跨平台）"""
         lock_file = LOCK_DIR / f"{job_id}.lock"
         try:
-            fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if sys.platform == "win32":
+                # Windows: 使用 msvcrt 文件锁
+                import msvcrt
+                self._lock_fds = getattr(self, '_lock_fds', {})
+                fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    self._lock_fds[job_id] = fd
+                except (IOError, OSError):
+                    os.close(fd)
+                    logger.debug(f"任务已在运行，跳过: {job_id}")
+                    return False
+            else:
+                # Unix: 使用 fcntl 文件锁
+                import fcntl
+                fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._lock_fds = getattr(self, '_lock_fds', {})
+                    self._lock_fds[job_id] = fd
+                except (IOError, BlockingIOError):
+                    os.close(fd)
+                    logger.debug(f"任务已在运行，跳过: {job_id}")
+                    return False
             self._running_jobs[job_id] = True
             return True
-        except (IOError, BlockingIOError):
-            logger.debug(f"任务已在运行，跳过: {job_id}")
+        except Exception as e:
+            logger.warning(f"获取文件锁异常: {job_id}: {e}")
             return False
 
     def release_lock(self, job_id: str):
         """释放文件锁"""
         self._running_jobs.pop(job_id, None)
+        # 关闭文件描述符以释放锁
+        lock_fds = getattr(self, '_lock_fds', {})
+        fd = lock_fds.pop(job_id, None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
         lock_file = LOCK_DIR / f"{job_id}.lock"
         try:
             if lock_file.exists():

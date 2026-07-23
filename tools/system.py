@@ -17,7 +17,8 @@ def system_info(**kwargs) -> ToolResult:
 
 def system_execute(command: str, timeout: int = 30) -> ToolResult:
     try:
-        r=subprocess.run(command,shell=True,capture_output=True,text=True,timeout=timeout,encoding="gbk",errors="ignore")
+        # 安全: 使用 cmd /c 代替 shell=True，防止命令注入
+        r=subprocess.run(["cmd","/c",command],capture_output=True,text=True,timeout=timeout,encoding="gbk",errors="ignore")
         return ToolResult.success(r.stdout.strip() or r.stderr.strip() or f"(exit:{r.returncode})")
     except subprocess.TimeoutExpired: return ToolResult.failure("超时")
     except Exception as e: return ToolResult.failure(friendly_error(e))

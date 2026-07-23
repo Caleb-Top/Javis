@@ -123,9 +123,11 @@ class WorkspaceManager:
         if category not in ("temp", "project", "thought"):
             return ToolResult.failure(f"无效分类: {category}，可选: temp/project/thought")
 
-        # 路径安全
-        safe_name = rel_path.replace("..", "").replace("~", "").replace("/", "_").replace("\\", "_")
-        if not safe_name:
+        # 路径安全 — 防止路径遍历: 只取纯文件名
+        from pathlib import Path as _WSPath
+        safe_name = _WSPath(rel_path).name
+        safe_name = safe_name.replace(chr(0), '').strip()
+        if not safe_name or safe_name.startswith('.'):
             safe_name = f"{uuid.uuid4().hex[:8]}.txt"
 
         sub_dir = "temp" if category == "temp" else ("projects" if category == "project" else "thoughts")

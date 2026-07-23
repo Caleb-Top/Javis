@@ -50,6 +50,41 @@ class PlatformState:
     error_count: int = 0
 
 
+@dataclass
+class Reply:
+    """统一回复格式"""
+    text: str = ""
+    markdown: bool = False
+    reply_to: Optional[str] = None
+    attachments: List[str] = field(default_factory=list)
+
+
+class PlatformAdapter:
+    """平台适配器抽象基类"""
+    platform: Platform = None
+
+    async def connect(self) -> bool:
+        raise NotImplementedError
+
+    async def disconnect(self):
+        raise NotImplementedError
+
+    async def send_message(self, chat_id: str, reply: Reply) -> bool:
+        raise NotImplementedError
+
+    async def listen(self, callback: Callable[[Message], Awaitable[None]]):
+        raise NotImplementedError
+
+    async def get_chats(self) -> list:
+        return []
+
+    async def get_chat_history(self, chat_id: str, limit: int = 50) -> list:
+        return []
+
+    async def is_connected(self) -> bool:
+        return False
+
+
 class GatewayManager:
     """多平台消息网关"""
 
