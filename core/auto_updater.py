@@ -2,7 +2,7 @@
 自动更新系统 — GitHub API版本检查 + 自动下载替换 + 回滚
 P1-5: Auto-updater with release fetching, asset downloads, and rollback
 """
-import json, logging, os, sys, subprocess, shutil, tempfile, hashlib
+import json, logging, os, sys, subprocess, shutil, tempfile, hashlib, zipfile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -133,23 +133,26 @@ def create_backup() -> Optional[str]:
     project_root = Path(__file__).parent.parent
     current = get_current_version()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_name = f"backup_v{current}_{timestamp}.tar.gz"
+    backup_name = f"backup_v{current}_{timestamp}.zip"
     backup_path = BACKUP_DIR / backup_name
 
     try:
-        # 备份核心目录（排除 data/, venv/, __pycache__, .git）
-        exclude_dirs = ["data", "venv", "__pycache__", ".git", "node_modules",
+        # 使用 Python zipfile 做跨平台备份（排除大文件和缓存）
+        exclude_dirs = {"data", "venv", "__pycache__", ".git", "node_modules",
                        "logs", "output", "tmp", "workspace", "train_output",
-                       "ollama_models", "python-embed", "voice"]
-        exclude_args = []
-        for d in exclude_dirs:
-            exclude_args.extend(["--exclude", d])
-        exclude_args.extend(["--exclude", "*.pyc", "--exclude", ".git"])
-
-        subprocess.run(
-            ["tar", "-czf", str(backup_path)] + exclude_args + ["."],
-            cwd=str(project_root), check=True, timeout=60,
-        )
+                       "ollama_models", "python-embed", "voice", ".claude", ".codex"}
+        core_extensions = {".py", ".js", ".html", ".css", ".yaml", ".yml", ".json",
+                          ".md", ".bat", ".ps1", ".txt", ".png", ".jpg", ".ico", ".svg"}
+        with zipfile.ZipFile(str(backup_path), 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(str(project_root)):
+                # 排除目录
+                dirs[:] = [d for d in dirs if d not in exclude_dirs and not d.startswith(".")]
+                for f in files:
+                    if f.endswith(".pyc") or f.startswith("."):
+                        continue
+                    full = os.path.join(root, f)
+                    arcname = os.path.relpath(full, str(project_root))
+                    zf.write(full, arcname)
         logger.info(f"备份已创建: {backup_path} ({backup_path.stat().st_size} bytes)")
         return str(backup_path)
     except Exception as e:
@@ -158,13 +161,11 @@ def create_backup() -> Optional[str]:
 
 
 def restore_backup(backup_path: str) -> bool:
-    """从备份恢复"""
+    """从备份恢复（跨平台 zip）"""
     project_root = Path(__file__).parent.parent
     try:
-        subprocess.run(
-            ["tar", "-xzf", backup_path, "-C", str(project_root)],
-            check=True, timeout=60,
-        )
+        with zipfile.ZipFile(backup_path, 'r') as zf:
+            zf.extractall(str(project_root))
         logger.info(f"已从备份恢复: {backup_path}")
         return True
     except Exception as e:
@@ -176,7 +177,7 @@ def list_backups() -> list[dict]:
     """列出所有备份"""
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     backups = []
-    for f in sorted(BACKUP_DIR.glob("backup_*.tar.gz"), reverse=True):
+    for f in sorted(BACKUP_DIR.glob("backup_*.zip"), reverse=True):
         backups.append({
             "name": f.name,
             "size": f.stat().st_size,
@@ -192,9 +193,14 @@ def pull_latest() -> tuple[bool, str]:
         # 先创建备份
         create_backup()
 
-        # Git pull
+        # Git pull — 自动检测当前分支
+        br = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(project_root), capture_output=True, text=True, timeout=5,
+        )
+        branch = br.stdout.strip() or "main"
         r = subprocess.run(
-            ["git", "pull", "origin", "main"],
+            ["git", "pull", "origin", branch],
             cwd=str(project_root), capture_output=True, text=True, timeout=30,
         )
         output = (r.stdout + r.stderr)[:500]

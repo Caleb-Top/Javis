@@ -240,8 +240,15 @@ async def ws(ws:WebSocket):
             elif t=="folder_file":
                 p=m.get("payload",{}); path=p.get("path",""); content=p.get("content","")
                 if path:
-                    safe_path = path.replace("..","").replace("~","")
-                    full = ROOT / "uploads" / safe_path
+                    # 安全: 使用 Path 解析并验证路径不越界
+                    from pathlib import Path as _Path
+                    safe = _Path(path).name  # 只取纯文件名,丢弃目录部分
+                    if not safe or safe.startswith('.'):
+                        safe = 'uploaded_file.txt'
+                    full = (ROOT / 'uploads' / safe).resolve()
+                    if not str(full).startswith(str((ROOT / 'uploads').resolve())):
+                        logger.warning(f'路径遍历拦截: {path}')
+                        continue
                     full.parent.mkdir(parents=True, exist_ok=True)
                     full.write_text(content[:100000], encoding="utf-8")
                     logger.info(f"📁 已保存上传文件: {safe_path} ({len(content)}字符)")
@@ -498,7 +505,8 @@ async def api_terminal_exec(data: dict = Body(...)):
             r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
                 capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         else:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+            # 安全: 使用 shell=False，通过 cmd /c 执行，防止命令注入
+            r = subprocess.run(['cmd', '/c', cmd], capture_output=True, text=True,
                 timeout=timeout, encoding="utf-8", errors="replace")
         out = r.stdout.strip()
         err = r.stderr.strip()

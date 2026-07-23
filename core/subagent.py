@@ -54,7 +54,8 @@ class SubAgentRunner:
         all_tools = self.tools.list_all() if hasattr(self.tools, 'list_all') else []
         if whitelist is None:
             return all_tools
-        return [t for t in all_tools if t.name in whitelist]
+        # list_all() 返回字符串列表（工具名），直接做成员检查
+        return [t for t in all_tools if t in whitelist]
 
     async def run(self, config: AgentDefinition) -> SubAgentResult:
         """执行单个子代理"""
@@ -90,11 +91,10 @@ class SubAgentRunner:
                     logger.info(f"子代理取消: [{agent_id}] at turn {turn}")
                     break
 
-                resp = await self.llm.chat(
+                resp = await self.llm.chat_with_tools(
                     messages=messages,
                     tools=filtered_tools if filtered_tools else None,
                     system=system_msg,
-                    temperature=config.temperature,
                 )
 
                 if resp.tool_calls:
@@ -102,15 +102,16 @@ class SubAgentRunner:
                     tool_calls_count += len(resp.tool_calls)
                     for tc in resp.tool_calls:
                         if self.tools:
-                            tool_result = await self.tools.execute(tc.name, tc.arguments)
+                            # tc 是 dict: {"id": ..., "name": ..., "params": {...}}
+                            tool_result = await self.tools.execute(tc["name"], tc["params"])
                             messages.append({
                                 "role": "tool",
-                                "tool_call_id": tc.id,
+                                "tool_call_id": tc["id"],
                                 "content": str(tool_result),
                             })
                 else:
                     # 最终回复
-                    content = resp.content or ""
+                    content = resp.text or ""
                     messages.append({"role": "assistant", "content": content})
                     result.state = AgentState.DONE
                     break
@@ -122,7 +123,7 @@ class SubAgentRunner:
 
             result.content = content
             result.success = result.state == AgentState.DONE
-            result.turns = turn + 1 if result.state != AgentState.CANCELLED else turn
+            result.turns = (turn + 1) if (result.state != AgentState.CANCELLED) else turn
             result.tool_calls = tool_calls_count
             result.elapsed_ms = (time.time() - t0) * 1000
 
@@ -162,26 +163,25 @@ class SubAgentRunner:
                     yield {"type": "cancelled", "agent_id": agent_id, "turn": turn}
                     break
 
-                resp = await self.llm.chat(
+                resp = await self.llm.chat_with_tools(
                     messages=messages,
                     tools=filtered_tools if filtered_tools else None,
                     system=system_msg,
-                    temperature=config.temperature,
                 )
 
                 if resp.tool_calls:
                     for tc in resp.tool_calls:
                         yield {"type": "tool_call", "agent_id": agent_id,
-                               "tool": tc.name, "args": tc.arguments}
+                               "tool": tc["name"], "args": tc["params"]}
                         if self.tools:
-                            tool_result = await self.tools.execute(tc.name, tc.arguments)
+                            tool_result = await self.tools.execute(tc["name"], tc["params"])
                             messages.append({
                                 "role": "tool",
-                                "tool_call_id": tc.id,
+                                "tool_call_id": tc["id"],
                                 "content": str(tool_result),
                             })
                 else:
-                    content = resp.content or ""
+                    content = resp.text or ""
                     messages.append({"role": "assistant", "content": content})
                     yield {"type": "done", "agent_id": agent_id, "content": content,
                            "turns": turn + 1, "elapsed_ms": (time.time() - t0) * 1000}
