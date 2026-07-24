@@ -155,3 +155,9 @@ def register_web_tools(reg):
         ToolDef("web_search","搜索互联网 (DuckDuckGo)，返回标题+URL+摘要",{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"},"count":{"type":"integer","default":10,"description":"返回结果数量"},"allowed_domains":{"type":"array","items":{"type":"string"},"default":[],"description":"只保留这些域名"},"blocked_domains":{"type":"array","items":{"type":"string"},"default":[],"description":"排除这些域名"}},"required":["query"]},web_search,"web"),
         ToolDef("web_fetch","抓取指定URL的网页内容，解析为纯文本返回",{"type":"object","properties":{"url":{"type":"string","description":"网页URL (http/https)"},"max_chars":{"type":"integer","default":8000,"description":"最大返回字符数"},"timeout":{"type":"integer","default":15,"description":"请求超时(秒)"},"raw_html":{"type":"boolean","default":False,"description":"返回原始HTML"}},"required":["url"]},web_fetch,"web"),
     ])
+
+
+def register_cron(reg):
+    """注册 Cron 调度器工具集 — 定时任务管理"""
+    from tools.cron_scheduler import register_in_manifest as _cron_reg
+    _cron_reg(reg)
