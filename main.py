@@ -149,6 +149,11 @@ try:
     from core.skill_creator import register_in_manifest as _reg_skill_creator
     _reg_skill_creator(registry)
     logger.info('Skill creator tools registered')
+# P3-3b: SkillManager — 技能匹配和自动激活
+    from core.skill_manager import get_skill_manager, register_in_manifest as _reg_skill_manager
+    _skill_manager = get_skill_manager()
+    _reg_skill_manager(registry)
+    logger.info(f'SkillManager registered: {len(_skill_manager.list_all())} skills loaded')
 except Exception as e:
     logger.warning(f'Skill creator: {e}')
 try:
