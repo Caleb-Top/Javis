@@ -41,7 +41,7 @@ TOOL_RISK_LEVELS: dict[str, int] = {
     # Dangerous
     "file_delete": 3, "run_code": 3, "mouse_double_click": 3,
     # Critical
-    "execute_command": 4, "system_shutdown": 4, "system_restart": 4,
+    "execute_command": 4, "system_execute": 4, "system_shutdown": 4, "system_restart": 4,
     "registry_edit": 4, "install_package": 4, "uninstall_app": 4,
 }
 

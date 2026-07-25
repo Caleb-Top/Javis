@@ -241,15 +241,23 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     runner = get_runner()
 
-    async def subagent_run(args):
+    async def subagent_run(
+        prompt: str,
+        description: str = "Sub-agent task",
+        tools: list | None = None,
+        model: str | None = None,
+        max_turns: int = 10,
+        temperature: float = 0.7,
+        system_prompt: str = "",
+    ):
         config = AgentDefinition(
-            description=args.get("description", "Sub-agent task"),
-            prompt=args["prompt"],
-            tools=args.get("tools"),
-            model=args.get("model"),
-            max_turns=args.get("max_turns", 10),
-            temperature=args.get("temperature", 0.7),
-            system_prompt=args.get("system_prompt", ""),
+            description=description,
+            prompt=prompt,
+            tools=tools,
+            model=model,
+            max_turns=max_turns,
+            temperature=temperature,
+            system_prompt=system_prompt,
         )
         result = await runner.run(config)
         return {
@@ -263,9 +271,9 @@ def register_in_manifest(reg):
             "state": result.state.value,
         }
 
-    async def subagent_parallel(args):
+    async def subagent_parallel(tasks: list | None = None):
         configs = []
-        for item in args.get("tasks", []):
+        for item in tasks or []:
             configs.append(AgentDefinition(
                 description=item.get("description", ""),
                 prompt=item["prompt"],
@@ -285,7 +293,7 @@ def register_in_manifest(reg):
             } for r in results],
         }
 
-    async def subagent_status(args):
+    async def subagent_status():
         active = runner.get_active_count()
         results = runner.list_results()
         return {
@@ -299,8 +307,7 @@ def register_in_manifest(reg):
             ],
         }
 
-    async def subagent_cancel(args):
-        agent_id = args["agent_id"]
+    async def subagent_cancel(agent_id: str):
         ok = runner.cancel(agent_id)
         return {"success": ok, "agent_id": agent_id}
 

@@ -1,15 +1,16 @@
-"""Javis 计算引擎 — 云API为主, 本地模型为备用算力
+r"""Javis 计算引擎 — 云API为主, 本地模型为备用算力
 
 架构:
   用户请求 → 引擎调度器 → 首选: DeepSeek云API (快/强)
                               ↓ 失败时自动降级
                            备用: Ollama本地 deepseek-r1:8b (免费/隐私)
 
-  模型文件位置: D:\Javis\ollama_models\  (迁移后)
+  模型文件位置: <project_root>\ollama_models\ 或 OLLAMA_MODELS
   Ollama API:   http://localhost:11434/v1
 """
 
 import os, json, logging, time, asyncio
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -20,6 +21,8 @@ PRIMARY_PROVIDER = "deepseek"        # 主算力: 云端 API
 FALLBACK_PROVIDER = "local"          # 备用算力: 本地 Ollama
 OLLAMA_BASE_URL = "http://localhost:11434/v1"
 LOCAL_MODEL = "deepseek-r1:8b"       # 本地模型
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LOCAL_MODEL_PATH = str(PROJECT_ROOT / "ollama_models")
 
 # 模型能力分级 (用于任务路由)
 MODEL_CAPABILITIES = {
@@ -117,7 +120,7 @@ class InferenceEngine:
             "fallback": f"local/{LOCAL_MODEL}" if not self._fallback_active else "当前在用",
             "active": "fallback" if self._fallback_active else "primary",
             "consecutive_failures": self._consecutive_failures,
-            "local_model_path": "D:\\Javis\\ollama_models",
+            "local_model_path": os.environ.get("OLLAMA_MODELS", LOCAL_MODEL_PATH),
         }
 
     def _switch_to_local(self):

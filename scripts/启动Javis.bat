@@ -1,12 +1,13 @@
 @echo off
-cd /d D:\Javis
+set "PROJECT_ROOT=%~dp0.."
+pushd "%PROJECT_ROOT%"
 
-set OLLAMA_MODELS=D:\Javis\ollama_models
+set "OLLAMA_MODELS=%CD%\ollama_models"
 set PYTHON_CMD=python
 set PYTHONW_CMD=pythonw
 
-if exist "C:\Users\34247\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe" set PYTHON_CMD=C:\Users\34247\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
-if exist "C:\Users\34247\AppData\Local\hermes\hermes-agent\venv\Scripts\pythonw.exe" set PYTHONW_CMD=C:\Users\34247\AppData\Local\hermes\hermes-agent\venv\Scripts\pythonw.exe
+if exist "%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\python.exe" set "PYTHON_CMD=%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\python.exe"
+if exist "%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\pythonw.exe" set "PYTHONW_CMD=%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\pythonw.exe"
 
 if "%PYTHON_CMD%"=="python" (
     where python >nul 2>&1

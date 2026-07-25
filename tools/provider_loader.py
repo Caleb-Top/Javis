@@ -224,8 +224,7 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     loader = get_loader()
 
-    async def list_providers(args):
-        enabled_only = args.get("enabled_only", True)
+    async def list_providers(enabled_only: bool = True):
         providers = loader.list_all(enabled_only=enabled_only)
         return {
             "success": True,
@@ -240,8 +239,8 @@ def register_in_manifest(reg):
             "count": len(providers),
         }
 
-    async def get_provider(args):
-        p = loader.get(args["name"])
+    async def get_provider(name: str):
+        p = loader.get(name)
         if p:
             return {
                 "success": True, "name": p.name, "label": p.label,
@@ -251,31 +250,29 @@ def register_in_manifest(reg):
                 "supports_vision": p.supports_vision,
                 "supports_tools": p.supports_tools,
             }
-        return {"success": False, "error": f"Provider not found: {args['name']}"}
+        return {"success": False, "error": f"Provider not found: {name}"}
 
-    async def refresh_providers(args):
+    async def refresh_providers():
         loader._discovered = False
         loader._providers.clear()
         providers = loader.discover()
         return {"success": True, "count": len(providers)}
 
-    async def check_health(args):
-        name = args.get("name")
+    async def check_health(name: str = ""):
+        name = name or None
         results = await loader.check_health(name)
         return {"success": True, "results": results}
 
-    async def suggest_model(args):
-        task_type = args.get("task_type", "general")
+    async def suggest_model(task_type: str = "general"):
         suggestion = loader.suggest_model(task_type)
         if suggestion:
             return {"success": True, **suggestion}
         return {"success": False, "error": "No healthy provider available"}
 
-    async def provider_stats(args):
+    async def provider_stats():
         return {"success": True, **loader.get_stats()}
 
-    async def toggle_provider(args):
-        name = args["name"]; enable = args.get("enable", True)
+    async def toggle_provider(name: str, enable: bool = True):
         if enable:
             loader.enable(name)
         else:

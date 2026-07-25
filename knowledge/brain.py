@@ -18,6 +18,13 @@ MAX_FACTS = 100000
 MAX_EXPERIENCES = 50000
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class Fact:
     id: str = ""
@@ -56,8 +63,10 @@ class Brain:
         self._load()
         self._dirty = False
         self._save_timer = 0
-        self._start_auto_flush()
-        atexit.register(self._flush)
+        auto_flush_enabled = not _env_flag("JAVIS_TEST_MODE") and not _env_flag("JAVIS_DISABLE_BRAIN_AUTO_FLUSH")
+        if auto_flush_enabled:
+            self._start_auto_flush()
+            atexit.register(self._flush)
 
     def _start_auto_flush(self):
         """后台线程每30秒自动刷盘，每10分钟压缩一次"""
@@ -72,7 +81,7 @@ class Brain:
                     try: self.compress()
                     except: pass
                     tick = 0
-        t = threading.Thread(target=_loop, daemon=True)
+        t = threading.Thread(target=_loop, daemon=True, name="brain-auto-flush")
         t.start()
 
     def _ensure_dirs(self):

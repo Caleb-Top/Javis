@@ -370,31 +370,31 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     gw = get_gateway()
 
-    async def gateway_status(args):
+    async def gateway_status():
         return {"success": True, **gw.get_status()}
 
-    async def gateway_start(args):
+    async def gateway_start():
         await gw.start_all()
         return {"success": True, "message": "Gateway 已启动",
                 **gw.get_status()}
 
-    async def gateway_stop(args):
+    async def gateway_stop():
         await gw.stop_all()
         return {"success": True, "message": "Gateway 已停止"}
 
-    async def gateway_send(args):
+    async def gateway_send(platform: str, chat_id: str, text: str):
         ok = await gw.send_to_platform(
-            platform=args["platform"],
-            chat_id=args["chat_id"],
-            text=args["text"],
+            platform=platform,
+            chat_id=chat_id,
+            text=text,
         )
         return {"success": ok}
 
-    async def gateway_reload(args):
+    async def gateway_reload():
         config = gw.reload_config()
         return {"success": True, "config": config}
 
-    async def gateway_list_platforms(args):
+    async def gateway_list_platforms():
         config_platforms = gw._get_platforms_config()
         platforms = []
         for name, pconfig in config_platforms.items():

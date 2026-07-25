@@ -1,6 +1,6 @@
-"""Javis 持久记忆系统 — 文件存储, 不依赖外部数据库
+r"""Javis 持久记忆系统 — 文件存储, 不依赖外部数据库
 
-存储位置: D:\Javis\memory\
+存储位置: <project_root>\memory\
   - conversations/   → 完整对话历史
   - profiles/        → 用户偏好/习惯
   - index.json       → 索引
@@ -198,9 +198,9 @@ class SessionMeta:
 
 
 class SessionStore:
-    """会话持久化存储 — 跨会话存活
+    r"""会话持久化存储 — 跨会话存活
 
-    存储位置: D:\Javis\memory\sessions\
+    存储位置: <project_root>\memory\sessions\
     结构:
       sessions/<session_id>.json  → 完整对话
       sessions_index.json          → 快速索引

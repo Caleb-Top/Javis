@@ -33,27 +33,43 @@ COCO_LABELS = [
 ]
 
 
+def _extra_model_dirs():
+    raw = os.environ.get("JAVIS_YOLO_DIRS", "")
+    dirs = []
+    for item in raw.split(os.pathsep):
+        item = item.strip()
+        if item:
+            dirs.append(Path(item))
+    return dirs
+
+
 class YoloManager:
     """YOLO 模型管理器"""
 
-    def __init__(self):
+    def __init__(self, model_dirs=None, autoload=True):
         self._net = None
         self._active_model = None
         self._models = {}  # name -> path
+        self._model_dirs = list(model_dirs) if model_dirs is not None else [YOLO_DIR, *_extra_model_dirs()]
         self._discover()
-        self._load_active()
+        if autoload:
+            self._load_active()
 
     def _discover(self):
         """自动发现 tools/yolo/ 下所有 .onnx 模型"""
         self._models = {}
-        for f in sorted(YOLO_DIR.glob("*.onnx")):
-            name = f.stem
-            size_mb = f.stat().st_size / (1024 * 1024)
-            self._models[name] = {
-                "path": str(f),
-                "size_mb": round(size_mb, 1),
-                "description": f"YOLOv8 {name.replace('yolov8','')} detection" if "yolov8" in name else name,
-            }
+        for model_dir in self._model_dirs:
+            for pattern in ("*.onnx", "*.pt"):
+                for f in sorted(Path(model_dir).glob(pattern)):
+                    name = f.stem
+                    if name in self._models:
+                        continue
+                    size_mb = f.stat().st_size / (1024 * 1024)
+                    self._models[name] = {
+                        "path": str(f),
+                        "size_mb": round(size_mb, 1),
+                        "description": f"YOLOv8 {name.replace('yolov8','')} detection" if "yolov8" in name else name,
+                    }
         logger.info(f"YOLO 模型库: {len(self._models)} 个模型 {', '.join(self._models.keys())}")
 
     def _load_active(self):

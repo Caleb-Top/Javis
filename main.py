@@ -6,186 +6,108 @@ ROOT=Path(__file__).parent;sys.path.insert(0,str(ROOT))
 logging.basicConfig(level=logging.INFO,format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
 logger=logging.getLogger("jarvis")
 
-# ── 工具路径初始化 (Tesseract, ImageMagick 等) ──
-try:
-    from tools.setup import setup as _tool_setup
-    _r = _tool_setup()
-    for _k,_v in _r.items():
-        logger.info(f"工具初始化 {_k}: {_v}")
-except Exception as _e:
-    logger.warning(f"工具路径初始化跳过: {_e}")
-from core.llm_client import LLMClient;from core.tool_registry import ToolRegistry,ToolDef;from core.agent import Agent
-from core.engine import InferenceEngine,LOCAL_MODEL
-from knowledge.brain import Brain;from knowledge.learner import Learner
-from knowledge.papers_db import ingest_to_brain;from knowledge.human_knowledge import inject_to_brain as inject_human
-brain=Brain();learner=Learner(brain=brain)
-try:brain.compress()
-except:pass
-try:ingest_to_brain(brain);logger.info("论文知识已注入大脑")
-except Exception as e:logger.warning(f"论文注入跳过:{e}")
-try:n=inject_human(brain);logger.info(f"人类文明知识已注入:{n}条")
-except Exception as e:logger.warning(f"人类知识注入跳过:{e}")
-registry=ToolRegistry();llm=LLMClient(str(ROOT/"config.yaml"))
-try:
-    import tools.code_exec as _ce
-    _ce.REGISTRY=registry
-    _ce.set_brain(brain)
-    logger.info("🔗 执行引擎已连接大脑和注册中心")
-except Exception as e:
-    logger.warning(f"执行引擎初始化跳过: {e}")
-try:
-    brain.learn_fact("用户风格: 自然口语，先结论后数据，不读原始数据行，短句优先",
-                     category="user_style.base", source="user_feedback", priority=5)
-    brain.learn_fact("规则: 工具原始数据不能复读，用自己的话重新组织",
-                     category="user_style.rule.no_repeat_data", source="user_feedback", priority=5)
-    logger.info("用户风格初始化完成")
-except Exception as e:
-    logger.warning(f"用户风格初始化跳过: {e}")
-try:
-    from tools_lib.tool_superpowers import inject_to_brain as _sp_inj
-    _sp_inj(brain)
-    logger.info("⚡ Superpowers 技能已注入大脑")
-except Exception as _sp_e:
-    logger.warning(f"Superpowers 注入跳过: {_sp_e}")
-try:
-    from tools_lib.tool_plugin_creator import inject_to_brain as _pc_inj
-    _pc_inj(brain)
-    logger.info("🧩 Plugin Creator 技能已注入大脑")
-except Exception as _pc_e:
-    logger.warning(f"Plugin Creator 注入跳过: {_pc_e}")
-try:
-    from tools_lib.tool_anthropic_plugins import inject_to_brain as _ap_inj
-    _ap_inj(brain)
-    logger.info("📦 Anthropic 插件库已注入大脑")
-except Exception as _ap_e:
-    logger.warning(f"Anthropic 插件注入跳过: {_ap_e}")
-try:
-    from tools_lib.tool_catch2 import inject_to_brain as _ct_inj
-    _ct_inj(brain)
-    logger.info("Catch2 C++ 测试已注入大脑")
-except Exception as _ct_e:
-    logger.warning(f"Catch2 注入跳过: {_ct_e}")
-from tools.manifest import register_agent_tools;register_agent_tools(registry)
-from tools.manifest import register_task_tools;register_task_tools(registry)
-from tools.manifest import register_web_tools;register_web_tools(registry)
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
-# ═══════════════════════════════════════════════════════════════
-# P1-1: Provider 插件化 — 7个Provider的加载、健康检查、自动降级
-# ═══════════════════════════════════════════════════════════════
-try:
-    from tools.provider_loader import register_in_manifest as _reg_provider
-    _reg_provider(registry)
-    logger.info('Provider loader registered')
-except Exception as e:
-    logger.warning(f'Provider loader: {e}')
+_TEST_MODE = _env_flag("JAVIS_TEST_MODE")
+_STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_SIDE_EFFECTS")
 
-# ═══════════════════════════════════════════════════════════════
-# P1-2: 子代理系统 — 隔离上下文、白名单工具、并行执行
-# ═══════════════════════════════════════════════════════════════
-try:
-    from core.subagent import register_in_manifest as _reg_subagent
-    _reg_subagent(registry)
-    logger.info('Subagent system registered')
-except Exception as e:
-    logger.warning(f'Subagent system: {e}')
+from core.runtime import create_runtime
+from control.command_tasks import CommandTaskRunner
+from evolution.service import EvolutionService
+from memory.session_db import SessionEventStore
+from perception.adapters.ocr import OcrAdapter
+from perception.adapters.vlm import LocalVlmAdapter, OpenAICompatibleVlmDescriber
+from perception.adapters.yolo import YoloDetectionAdapter
+from perception.service import PerceptionService
+from perception.video import VideoStreamAnalyzer
 
-# ═══════════════════════════════════════════════════════════════
-# P1-3: Hooks 系统 — 10种事件钩子 (在 agent.py 中已集成触发点)
-# ═══════════════════════════════════════════════════════════════
-try:
-    from core.hook_system import register_in_manifest as _reg_hooks
-    _reg_hooks(registry)
-    logger.info('Hook system registered')
-except Exception as e:
-    logger.warning(f'Hook system: {e}')
+def _event_store_path() -> Path:
+    configured = os.environ.get("JAVIS_EVENT_STORE_PATH")
+    if configured:
+        return Path(configured)
+    if _TEST_MODE:
+        import tempfile
 
-# ═══════════════════════════════════════════════════════════════
-# P1-4: Cron 定时任务 — 用户可配置, 文件锁防重复
-# ═══════════════════════════════════════════════════════════════
-try:
-    from tools.cron_scheduler import register_in_manifest as _reg_cron
-    _reg_cron(registry)
-    logger.info('Cron scheduler registered')
-except Exception as e:
-    logger.warning(f'Cron scheduler: {e}')
+        return Path(tempfile.gettempdir()) / f"javis_test_session_events_{os.getpid()}.sqlite"
+    return ROOT / "memory" / "session_events.sqlite"
 
-# ═══════════════════════════════════════════════════════════════
-# P1-5: 自动更新 — GitHub API 版本检查 + Git 拉取 + 回滚
-# ═══════════════════════════════════════════════════════════════
-try:
-    from core.auto_updater import register_in_manifest as _reg_updater
-    _reg_updater(registry)
-    logger.info('Auto updater registered')
-except Exception as e:
-    logger.warning(f'Auto updater: {e}')
+def _build_vlm_adapter() -> LocalVlmAdapter:
+    try:
+        from utils.config_api import load_config
 
-# ═══════════════════════════════════════════════════════════════
-# P3-1: 沙箱系统 — Docker/Hyper-V/Process 三种后端
-# ═══════════════════════════════════════════════════════════════
-try:
-    from tools.sandbox import register_in_manifest as _reg_sandbox
-    _reg_sandbox(registry)
-    logger.info('Sandbox system registered')
-except Exception as e:
-    logger.warning(f'Sandbox system: {e}')
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    local_cfg = model_cfg.get("local", {}) if isinstance(model_cfg.get("local", {}), dict) else {}
+    vlm_cfg = model_cfg.get("vlm", {}) if isinstance(model_cfg.get("vlm", {}), dict) else {}
+    model_name = (
+        os.environ.get("JAVIS_VLM_MODEL")
+        or vlm_cfg.get("name")
+        or "llava:latest"
+    )
+    base_url = (
+        os.environ.get("JAVIS_VLM_BASE_URL")
+        or vlm_cfg.get("base_url")
+        or local_cfg.get("base_url")
+        or "http://localhost:11434/v1"
+    )
+    api_key = os.environ.get("JAVIS_VLM_API_KEY") or vlm_cfg.get("api_key") or local_cfg.get("api_key") or ""
+    timeout = float(os.environ.get("JAVIS_VLM_TIMEOUT") or vlm_cfg.get("timeout", 8))
+    enabled = str(os.environ.get("JAVIS_VLM_ENABLED", vlm_cfg.get("enabled", True))).lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not enabled:
+        return LocalVlmAdapter(model_name=str(model_name))
+    describer = OpenAICompatibleVlmDescriber(
+        base_url=str(base_url),
+        model=str(model_name),
+        api_key=str(api_key),
+        timeout=timeout,
+    )
+    return LocalVlmAdapter(describer=describer, model_name=str(model_name))
 
-# ═══════════════════════════════════════════════════════════════
-# P3-2: Gateway 多平台 — Telegram/微信/Slack + WebSocket 中继
-# ═══════════════════════════════════════════════════════════════
-try:
-    from gateway.gateway_manager import register_in_manifest as _reg_gateway
-    _reg_gateway(registry)
-    logger.info('Gateway manager registered')
-except Exception as e:
-    logger.warning(f'Gateway manager: {e}')
+runtime = create_runtime(ROOT, startup_side_effects=_STARTUP_SIDE_EFFECTS)
+runtime.register_event_store(SessionEventStore(_event_store_path()))
+perception_service = PerceptionService()
+perception_service.register_adapter(OcrAdapter())
+perception_service.register_adapter(YoloDetectionAdapter())
+perception_service.register_adapter(_build_vlm_adapter())
+runtime.register_subsystem(perception_service)
+evolution_service = EvolutionService()
+runtime.register_subsystem(evolution_service)
+command_task_runner = CommandTaskRunner(ROOT, runtime.event_bus, runtime.registry.guard)
+runtime.register_subsystem(command_task_runner)
+brain = runtime.brain
+learner = runtime.learner
+registry = runtime.registry
+llm = runtime.llm
+engine = runtime.engine
+agent = runtime.agent
+SKILL_LIST = runtime.skill_list
+CURRENT_SKILL = runtime.current_skill
 
-# ═══════════════════════════════════════════════════════════════
-# P3-3: /learn 技能闭环 — AI 自创技能 + 审查 + 市场
-# ═══════════════════════════════════════════════════════════════
-try:
-    from core.skill_creator import get_skill_creator
-    _skill_creator = get_skill_creator(str(ROOT))
-    logger.info(f'Skill creator initialized: {len(_skill_creator.list_skills())} skills')
-    from core.skill_creator import register_in_manifest as _reg_skill_creator
-    _reg_skill_creator(registry)
-    logger.info('Skill creator tools registered')
-# P3-3b: SkillManager — 技能匹配和自动激活
-    from core.skill_manager import get_skill_manager, register_in_manifest as _reg_skill_manager
-    _skill_manager = get_skill_manager()
-    _reg_skill_manager(registry)
-    logger.info(f'SkillManager registered: {len(_skill_manager.list_all())} skills loaded')
-except Exception as e:
-    logger.warning(f'Skill creator: {e}')
-try:
-    from memory.controller import get_controller
-    get_controller(brain).start_cycles()
-    logger.info("记忆控制器已启动 (循环: 语义5m/压缩10m/摘要30m)")
-except Exception as e:
-    logger.warning(f"记忆控制器启动跳过: {e}")
-engine=InferenceEngine(llm)
-import importlib,pkgutil;import skills as skills_pkg
-SKILL_LIST=[];CURRENT_SKILL="全功能"
-# ── 启动 Escape 键中断钩子 (全局键盘监听) ──
-try:
-    import threading
-    from core.tray import _start_escape_hook
-    _hook_thread = threading.Thread(target=_start_escape_hook, daemon=True)
-    _hook_thread.start()
-    logger.info("Escape 中断钩子已启动")
-except Exception as e:
-    logger.warning(f"Escape 钩子未启动: {e}")
+def _register_always_on_tools():
+    runtime.register_always_on_tools()
 
 def _load_skill(sid):
-    global CURRENT_SKILL;registry.clear()
-    try:m=importlib.import_module(f"skills.{sid}");c=m.register(registry);CURRENT_SKILL=sid;return c
-    except Exception as e:logger.error(f"技能{sid}:{e}");return 0
+    global CURRENT_SKILL, SKILL_LIST
+    count = runtime.load_skill(sid)
+    CURRENT_SKILL = runtime.current_skill
+    SKILL_LIST = runtime.skill_list
+    return count
+
 def _discover():
-    global SKILL_LIST;SKILL_LIST=[]
-    for m in pkgutil.iter_modules(skills_pkg.__path__):
-        mod=importlib.import_module(f"skills.{m.name}")
-        SKILL_LIST.append({"id":m.name,"name":getattr(mod,"SKILL_NAME",m.name),"icon":getattr(mod,"SKILL_ICON","🔧"),"desc":getattr(mod,"SKILL_DESC","")})
-_discover();_load_skill("全功能");agent=Agent(llm,registry,brain=brain,learner=learner,engine=engine)
-agent.set_confirm_handler()
+    global SKILL_LIST
+    SKILL_LIST = runtime.discover_skills()
+    return SKILL_LIST
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
 app=FastAPI(title="JARVIS",version="2.0")
@@ -196,15 +118,27 @@ async def root():return FileResponse(str(ROOT/"web"/"index.html"))
 @app.get("/favicon.ico")
 async def favicon():return FileResponse(str(ROOT/"web"/"favicon.ico"))
 
+def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
+    safe = Path(path or "").name
+    if not safe or safe.startswith("."):
+        safe = "uploaded_file.txt"
+    uploads_root = (ROOT / "uploads").resolve()
+    full = (uploads_root / safe).resolve()
+    if not str(full).startswith(str(uploads_root)):
+        raise ValueError("upload path escapes uploads directory")
+    uploads_root.mkdir(parents=True, exist_ok=True)
+    full.write_text((content or "")[:100000], encoding="utf-8")
+    return full
+
 @app.websocket("/ws")
 async def ws(ws:WebSocket):
     await ws.accept()
-    async def _agent_loop(text: str):
+    async def _agent_loop(text: str, session_id: str = "", cards: list | None = None):
         """并发运行 agent, 同时监听 WS 消息 (解决 confirm 死锁)"""
         q = asyncio.Queue()
         async def _run():
             try:
-                async for msg in agent.chat(text):
+                async for msg in agent.chat(text, session_id=session_id, conversation_cards=cards or []):
                     await q.put(msg)
             finally:
                 await q.put(None)
@@ -229,8 +163,7 @@ async def ws(ws:WebSocket):
                         perm = m2.get("payload",{}).get("permission","quick_auth")
                         try:
                             r = set_permission_level(perm)
-                            if hasattr(agent, '_permission_level'):
-                                agent._permission_level = perm
+                            runtime.sync_permission(perm)
                         except: pass
                     elif t2=="ping":
                         await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
@@ -238,25 +171,24 @@ async def ws(ws:WebSocket):
         while True:
             d=await ws.receive_text();m=json.loads(d);t=m.get("type","message")
             if t=="message":
-                u=m.get("payload",{}).get("text","").strip()
+                payload = m.get("payload",{})
+                u=payload.get("text","").strip()
                 if not u:continue
-                await _agent_loop(u)
+                await _agent_loop(
+                    u,
+                    session_id=str(payload.get("session_id","") or ""),
+                    cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
+                )
                 continue
             elif t=="folder_file":
                 p=m.get("payload",{}); path=p.get("path",""); content=p.get("content","")
                 if path:
-                    # 安全: 使用 Path 解析并验证路径不越界
-                    from pathlib import Path as _Path
-                    safe = _Path(path).name  # 只取纯文件名,丢弃目录部分
-                    if not safe or safe.startswith('.'):
-                        safe = 'uploaded_file.txt'
-                    full = (ROOT / 'uploads' / safe).resolve()
-                    if not str(full).startswith(str((ROOT / 'uploads').resolve())):
+                    try:
+                        full = _save_uploaded_file_for_ws(path, content)
+                        logger.info(f"📁 已保存上传文件: {full.name} ({len(content)}字符)")
+                    except ValueError:
                         logger.warning(f'路径遍历拦截: {path}')
                         continue
-                    full.parent.mkdir(parents=True, exist_ok=True)
-                    full.write_text(content[:100000], encoding="utf-8")
-                    logger.info(f"📁 已保存上传文件: {safe_path} ({len(content)}字符)")
             elif t=="voice":
                 ab=m.get("payload",{}).get("audio","")
                 if ab:
@@ -287,6 +219,194 @@ async def api_status():
     except Exception as e:logger.debug(f"引擎状态获取异常: {e}")
     return s
 
+@app.get("/api/runtime/status")
+async def api_runtime_status():
+    return runtime.get_runtime_status()
+
+@app.get("/api/blueprint/coverage")
+async def api_blueprint_coverage():
+    from blueprint.audit import BlueprintAuditor
+
+    return BlueprintAuditor(runtime).coverage()
+
+@app.post("/api/perception/ingest")
+async def api_perception_ingest(data: dict = Body(...)):
+    service = runtime.subsystems.get("perception")
+    ingest = getattr(service, "ingest", None)
+    if not callable(ingest):
+        return {"ok": False, "error": "perception subsystem unavailable"}
+    summary = str(data.get("summary", "")).strip()
+    if not summary:
+        return {"ok": False, "error": "summary is required"}
+    event = ingest(
+        source=str(data.get("source", "unknown")),
+        modality=str(data.get("modality", "unknown")),
+        summary=summary,
+        confidence=data.get("confidence", 1.0),
+        metadata=data.get("metadata", {}),
+    )
+    return {"ok": True, "event": event.to_dict()}
+
+@app.post("/api/perception/yolo/detect")
+async def api_perception_yolo_detect(data: dict = Body(...)):
+    service = runtime.subsystems.get("perception")
+    get_adapter = getattr(service, "get_adapter", None)
+    adapter = get_adapter("yolo") if callable(get_adapter) else None
+    if adapter is None:
+        return {"ok": False, "error": "YOLO adapter unavailable"}
+    image_path = str(data.get("image_path") or data.get("path") or "").strip()
+    if not image_path:
+        return {"ok": False, "error": "image_path is required"}
+    try:
+        resolved = _resolve_workspace_path(image_path)
+        image = _load_perception_image(resolved)
+        source = str(data.get("source") or resolved.relative_to(ROOT_RESOLVED))
+        event = adapter.detect(
+            image=image,
+            perception=service,
+            source=source,
+            conf_threshold=float(data.get("conf_threshold", 0.25)),
+            iou_threshold=float(data.get("iou_threshold", 0.45)),
+        )
+        return {"ok": True, "event": event.to_dict()}
+    except Exception as e:
+        logger.warning(f"YOLO 感知检测失败: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.post("/api/perception/image/analyze")
+async def api_perception_image_analyze(data: dict = Body(...)):
+    service = runtime.subsystems.get("perception")
+    analyze_image = getattr(service, "analyze_image", None)
+    if not callable(analyze_image):
+        return {"ok": False, "error": "perception image pipeline unavailable"}
+    image_path = str(data.get("image_path") or data.get("path") or "").strip()
+    if not image_path:
+        return {"ok": False, "error": "image_path is required"}
+    try:
+        resolved = _resolve_workspace_path(image_path)
+        image = _load_perception_image(resolved)
+        source = str(data.get("source") or resolved.relative_to(ROOT_RESOLVED))
+        adapters = data.get("adapters") or ["ocr", "yolo"]
+        if not isinstance(adapters, list):
+            return {"ok": False, "error": "adapters must be a list"}
+        events = analyze_image(
+            image=image,
+            source=source,
+            adapter_names=[str(name) for name in adapters],
+            adapter_options={
+                "ocr": {
+                    "min_confidence": float(data.get("ocr_min_confidence", 0.3)),
+                },
+                "yolo": {
+                    "conf_threshold": float(data.get("conf_threshold", 0.25)),
+                    "iou_threshold": float(data.get("iou_threshold", 0.45)),
+                },
+            },
+        )
+        return {"ok": True, "events": [event.to_dict() for event in events]}
+    except Exception as e:
+        logger.warning(f"本地图片感知分析失败: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.post("/api/perception/video/analyze")
+async def api_perception_video_analyze(data: dict = Body(...)):
+    service = runtime.subsystems.get("perception")
+    if service is None:
+        return {"ok": False, "error": "perception video pipeline unavailable"}
+    video_path = str(data.get("video_path") or data.get("path") or "").strip()
+    if not video_path:
+        return {"ok": False, "error": "video_path is required"}
+    try:
+        resolved = _resolve_workspace_path(video_path)
+        adapters = data.get("adapters") or ["ocr", "yolo"]
+        if not isinstance(adapters, list):
+            return {"ok": False, "error": "adapters must be a list"}
+        analyzer = VideoStreamAnalyzer(
+            perception=service,
+            change_threshold=float(data.get("change_threshold", 0.08)),
+            segment_seconds=float(data.get("segment_seconds", 8.0)),
+            max_frames=int(data.get("max_frames", 600)),
+        )
+        result = analyzer.analyze_frames(
+            _iter_video_frames(resolved, sample_seconds=float(data.get("sample_seconds", 1.0))),
+            source=str(data.get("source") or resolved.relative_to(ROOT_RESOLVED)),
+            adapters=[str(name) for name in adapters],
+            adapter_options={
+                "ocr": {"min_confidence": float(data.get("ocr_min_confidence", 0.3))},
+                "yolo": {
+                    "conf_threshold": float(data.get("conf_threshold", 0.25)),
+                    "iou_threshold": float(data.get("iou_threshold", 0.45)),
+                },
+            },
+        )
+        return result
+    except Exception as e:
+        logger.warning(f"视频感知分析失败: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.post("/api/perception/screen/analyze")
+async def api_perception_screen_analyze(data: dict = Body(...)):
+    service = runtime.subsystems.get("perception")
+    analyze_image = getattr(service, "analyze_image", None)
+    if not callable(analyze_image):
+        return {"ok": False, "error": "perception screen pipeline unavailable"}
+    try:
+        image = _capture_perception_screenshot(data.get("area"))
+        source = str(data.get("source") or "screen")
+        adapters = data.get("adapters") or ["ocr", "yolo"]
+        if not isinstance(adapters, list):
+            return {"ok": False, "error": "adapters must be a list"}
+        events = analyze_image(
+            image=image,
+            source=source,
+            adapter_names=[str(name) for name in adapters],
+            adapter_options={
+                "ocr": {
+                    "min_confidence": float(data.get("ocr_min_confidence", 0.3)),
+                },
+                "yolo": {
+                    "conf_threshold": float(data.get("conf_threshold", 0.25)),
+                    "iou_threshold": float(data.get("iou_threshold", 0.45)),
+                },
+            },
+        )
+        return {"ok": True, "events": [event.to_dict() for event in events]}
+    except Exception as e:
+        logger.warning(f"屏幕感知分析失败: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
+@app.post("/api/perception/camera/analyze")
+async def api_perception_camera_analyze(data: dict = Body(...)):
+    service = runtime.subsystems.get("perception")
+    analyze_image = getattr(service, "analyze_image", None)
+    if not callable(analyze_image):
+        return {"ok": False, "error": "perception camera pipeline unavailable"}
+    try:
+        device_id = int(data.get("device_id", 0))
+        image = _capture_perception_camera(device_id)
+        source = str(data.get("source") or f"camera:{device_id}")
+        adapters = data.get("adapters") or ["ocr", "yolo"]
+        if not isinstance(adapters, list):
+            return {"ok": False, "error": "adapters must be a list"}
+        events = analyze_image(
+            image=image,
+            source=source,
+            adapter_names=[str(name) for name in adapters],
+            adapter_options={
+                "ocr": {
+                    "min_confidence": float(data.get("ocr_min_confidence", 0.3)),
+                },
+                "yolo": {
+                    "conf_threshold": float(data.get("conf_threshold", 0.25)),
+                    "iou_threshold": float(data.get("iou_threshold", 0.45)),
+                },
+            },
+        )
+        return {"ok": True, "events": [event.to_dict() for event in events]}
+    except Exception as e:
+        logger.warning(f"摄像头感知分析失败: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
 @app.get("/api/engine/status")
 async def api_engine_status():return engine.get_power_status()
 
@@ -307,6 +427,181 @@ async def api_logs_clear():action_log.clear();return {"ok":True}
 
 @app.get("/api/memory/conversations")
 async def api_mem_list():return {"conversations":list_conversations()}
+
+@app.get("/api/memory/events")
+async def api_memory_events(type: str = "", limit: int = 50):
+    store = getattr(runtime, "event_store", None)
+    recent = getattr(store, "recent_events", None)
+    if not callable(recent):
+        return {"ok": False, "events": [], "error": "event store unavailable"}
+    events = recent(limit=limit, event_type=type or None)
+    return {"ok": True, "events": events, "count": len(events)}
+
+@app.post("/api/memory/consolidate")
+async def api_memory_consolidate(data: dict = Body(...)):
+    store = getattr(runtime, "event_store", None)
+    if store is None:
+        return {"ok": False, "result": {}, "error": "event store unavailable"}
+    try:
+        from memory.consolidation import EventMemoryConsolidator
+
+        result = EventMemoryConsolidator(store).consolidate(limit=int(data.get("limit", 500)))
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return {"ok": False, "result": {}, "error": str(e)[:200]}
+
+@app.get("/api/memory/candidates")
+async def api_memory_candidates(kind: str = "", status: str = "candidate", limit: int = 50):
+    store = getattr(runtime, "event_store", None)
+    candidates = getattr(store, "memory_candidates", None)
+    if not callable(candidates):
+        return {"ok": False, "candidates": [], "error": "memory candidates unavailable"}
+    items = candidates(kind=kind or None, status=status or None, limit=limit)
+    return {"ok": True, "candidates": items, "count": len(items)}
+
+@app.get("/api/memory/recall")
+async def api_memory_recall(q: str = "", limit: int = 10):
+    store = getattr(runtime, "event_store", None)
+    recall = getattr(store, "recall", None)
+    if not callable(recall):
+        return {"ok": False, "results": [], "error": "memory recall unavailable"}
+    results = recall(q, limit=limit)
+    return {"ok": True, "query": q, "results": results, "count": len(results)}
+
+@app.post("/api/memory/candidates/status")
+async def api_memory_candidate_status(data: dict = Body(...)):
+    store = getattr(runtime, "event_store", None)
+    update = getattr(store, "update_memory_candidate_status", None)
+    if not callable(update):
+        return {"ok": False, "error": "memory candidates unavailable"}
+    candidate_id = str(data.get("candidate_id", "")).strip()
+    status = str(data.get("status", "")).strip()
+    if not candidate_id:
+        return {"ok": False, "error": "candidate_id is required"}
+    updated = update(candidate_id, status)
+    if not updated:
+        return {"ok": False, "error": "candidate not found or status invalid"}
+    runtime.event_bus.publish(
+        "memory.candidate.status_changed",
+        {"candidate_id": candidate_id, "status": status},
+        source="memory",
+    )
+    return {"ok": True, "candidate_id": candidate_id, "status": status}
+
+@app.post("/api/memory/apply-active")
+async def api_memory_apply_active(data: dict = Body(...)):
+    try:
+        from memory.activation import ActiveMemoryApplier
+
+        result = ActiveMemoryApplier(runtime).apply(limit=int(data.get("limit", 100)))
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return {"ok": False, "result": {}, "error": str(e)[:200]}
+
+@app.post("/api/memory/materialize-procedural")
+async def api_memory_materialize_procedural(data: dict = Body(...)):
+    try:
+        from memory.procedural import PROCEDURAL_DIR
+        from memory.procedural_materializer import ProceduralMemoryMaterializer
+
+        output_dir = Path(data.get("output_dir") or PROCEDURAL_DIR)
+        result = ProceduralMemoryMaterializer(runtime.event_store, output_dir).materialize(
+            limit=int(data.get("limit", 100))
+        )
+        runtime.event_bus.publish("memory.procedural.materialized", result, source="memory")
+        return {"ok": True, "result": result, "output_dir": str(output_dir)}
+    except Exception as e:
+        return {"ok": False, "result": {}, "error": str(e)[:200]}
+
+@app.post("/api/evolution/review")
+async def api_evolution_review(data: dict = Body(...)):
+    service = runtime.subsystems.get("evolution")
+    review = getattr(service, "review", None)
+    if not callable(review):
+        return {"ok": False, "result": {}, "error": "evolution service unavailable"}
+    try:
+        result = review(limit=int(data.get("limit", 500)))
+        runtime.event_bus.publish("evolution.review.completed", result, source="evolution")
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return {"ok": False, "result": {}, "error": str(e)[:200]}
+
+@app.get("/api/evolution/candidates")
+async def api_evolution_candidates(kind: str = "", status: str = "candidate", limit: int = 50):
+    store = getattr(runtime, "event_store", None)
+    candidates = getattr(store, "evolution_candidates", None)
+    if not callable(candidates):
+        return {"ok": False, "candidates": [], "error": "evolution candidates unavailable"}
+    items = candidates(kind=kind or None, status=status or None, limit=limit)
+    return {"ok": True, "candidates": items, "count": len(items)}
+
+@app.post("/api/evolution/candidates/status")
+async def api_evolution_candidate_status(data: dict = Body(...)):
+    store = getattr(runtime, "event_store", None)
+    update = getattr(store, "update_evolution_candidate_status", None)
+    if not callable(update):
+        return {"ok": False, "error": "evolution candidates unavailable"}
+    candidate_id = str(data.get("candidate_id", "")).strip()
+    status = str(data.get("status", "")).strip()
+    if not candidate_id:
+        return {"ok": False, "error": "candidate_id is required"}
+    updated = update(candidate_id, status)
+    if not updated:
+        return {"ok": False, "error": "candidate not found or status transition invalid"}
+    runtime.event_bus.publish(
+        "evolution.candidate.status_changed",
+        {"candidate_id": candidate_id, "status": status},
+        source="evolution",
+    )
+    return {"ok": True, "candidate_id": candidate_id, "status": status}
+
+@app.post("/api/evolution/candidates/validate")
+async def api_evolution_candidate_validate(data: dict = Body(...)):
+    store = getattr(runtime, "event_store", None)
+    validate = getattr(store, "validate_evolution_candidate", None)
+    if not callable(validate):
+        return {"ok": False, "error": "evolution validation unavailable"}
+    candidate_id = str(data.get("candidate_id", "")).strip()
+    if not candidate_id:
+        return {"ok": False, "error": "candidate_id is required"}
+    result = validate(candidate_id)
+    runtime.event_bus.publish(
+        "evolution.candidate.validated",
+        {"candidate_id": candidate_id, "ok": result.get("ok"), "status": result.get("status")},
+        source="evolution",
+    )
+    return {"candidate_id": candidate_id, **result}
+
+@app.post("/api/evolution/candidates/performance")
+async def api_evolution_candidate_performance(data: dict = Body(...)):
+    store = getattr(runtime, "event_store", None)
+    record = getattr(store, "record_evolution_performance", None)
+    if not callable(record):
+        return {"ok": False, "error": "evolution performance tracking unavailable"}
+    candidate_id = str(data.get("candidate_id", "")).strip()
+    if not candidate_id:
+        return {"ok": False, "error": "candidate_id is required"}
+    result = record(
+        candidate_id,
+        success=bool(data.get("success", False)),
+        latency_ms=data.get("latency_ms"),
+        quality_score=data.get("quality_score"),
+        window=int(data.get("window", 5)),
+        max_failure_rate=float(data.get("max_failure_rate", 0.5)),
+        max_latency_ms=data.get("max_latency_ms"),
+        min_quality_score=data.get("min_quality_score"),
+    )
+    runtime.event_bus.publish(
+        "evolution.candidate.performance",
+        {
+            "candidate_id": candidate_id,
+            "ok": result.get("ok"),
+            "rolled_back": result.get("rolled_back", False),
+            "failure_rate": result.get("failure_rate"),
+        },
+        source="evolution",
+    )
+    return result
 
 @app.get("/api/memory/conversations/{sid}")
 async def api_mem_get(sid:str):return {"id":sid,"cards":load_conversation(sid)}
@@ -477,9 +772,7 @@ async def api_set_permission(d: dict):
     level = d.get("permission", "quick_auth")
     try:
         r = set_permission_level(level)
-        # 将新权限同步到 Agent 实例
-        if hasattr(agent, '_permission_level'):
-            agent._permission_level = level
+        runtime.sync_permission(level)
         return r
     except Exception as e:
         return {"applied": False, "error": str(e)[:100]}
@@ -493,46 +786,128 @@ async def api_get_mode_legacy():
 
 app.mount("/static",StaticFiles(directory=str(ROOT/"web")),name="static")
 
+ROOT_RESOLVED = ROOT.resolve()
+
+def _resolve_workspace_path(path: str | Path) -> Path:
+    candidate = (ROOT / Path(path)).resolve()
+    try:
+        candidate.relative_to(ROOT_RESOLVED)
+    except ValueError as exc:
+        raise ValueError("路径不能超出 Javis 项目根目录") from exc
+    return candidate
+
+def _load_perception_image(path: str | Path):
+    resolved = Path(path)
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError(f"图片不存在: {resolved}")
+    cv2 = __import__("cv2")
+    image = cv2.imread(str(resolved))
+    if image is None:
+        raise ValueError(f"无法读取图片: {resolved}")
+    return image
+
+def _capture_perception_screenshot(area: list | None = None):
+    from tools.desktop import screenshot
+
+    result = screenshot(area=area)
+    if not result.success or not result.image:
+        raise RuntimeError(result.error or result.data or "screenshot failed")
+    return _decode_perception_image_base64(result.image)
+
+def _capture_perception_camera(device_id: int = 0):
+    from tools.camera import camera_snapshot
+
+    result = camera_snapshot(device_id=device_id)
+    if not result.success or not result.image:
+        raise RuntimeError(result.error or result.data or "camera capture failed")
+    return _decode_perception_image_base64(result.image)
+
+def _decode_perception_image_base64(image_base64: str):
+    import base64
+    import numpy as np
+
+    cv2 = __import__("cv2")
+    raw = base64.b64decode(image_base64)
+    data = np.frombuffer(raw, dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("无法解码截图图像")
+    return image
+
+def _iter_video_frames(path: str | Path, sample_seconds: float = 1.0):
+    cv2 = __import__("cv2")
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise ValueError(f"无法打开视频: {path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    step = max(1, int(float(sample_seconds or 1.0) * fps))
+    index = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if index % step == 0:
+                yield index / fps, frame
+            index += 1
+    finally:
+        cap.release()
+
+def _validate_project_name(name: str) -> str:
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError("项目名不能包含路径分隔符")
+    return name
+
 # ═══════════════════════════════════════════════════════════════
 # ★ WORKSPACE API — 工作台: 终端/文件/项目/GitHub/浏览器 ★
 # ═══════════════════════════════════════════════════════════════
 
 @app.post("/api/workspace/terminal")
 async def api_terminal_exec(data: dict = Body(...)):
-    """执行终端命令"""
-    import subprocess
+    """Execute a terminal command through the audited control subsystem."""
     cmd = data.get("command", "").strip()
-    if not cmd: return {"ok": False, "output": "命令不能为空"}
-    shell = data.get("shell", "cmd")
-    timeout = min(data.get("timeout", 15), 60)
-    try:
-        if shell == "powershell":
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
-        else:
-            # 安全: 使用 shell=False，通过 cmd /c 执行，防止命令注入
-            r = subprocess.run(['cmd', '/c', cmd], capture_output=True, text=True,
-                timeout=timeout, encoding="utf-8", errors="replace")
-        out = r.stdout.strip()
-        err = r.stderr.strip()
-        if out and err:
-            out = out + "\n[stderr]\n" + err
-        elif err:
-            out = err
-        if not out:
-            out = f"(exit code: {r.returncode})"
-        return {"ok": True, "output": out[:5000], "exit_code": r.returncode}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "output": "命令超时", "exit_code": -1}
-    except Exception as e:
-        return {"ok": False, "output": str(e)[:500], "exit_code": -1}
+    if not cmd:
+        return {"ok": False, "output": "命令不能为空", "exit_code": -1}
+    return command_task_runner.execute(
+        command=cmd,
+        shell=data.get("shell", "cmd"),
+        timeout=data.get("timeout", 15),
+        cwd=data.get("cwd") or data.get("path") or ROOT,
+        root_token=data.get("root_token") or data.get("token") or "",
+    )
+
+@app.get("/api/control/commands")
+async def api_control_commands(limit: int = 50):
+    return {"ok": True, "tasks": command_task_runner.recent_tasks(limit)}
+
+@app.post("/api/control/rollback/restore")
+async def api_control_rollback_restore(data: dict = Body(...)):
+    rollback_id = str(data.get("rollback_id", "") or data.get("id", "")).strip()
+    if not rollback_id:
+        return {"ok": False, "error": "rollback_id is required"}
+    return command_task_runner.restore_rollback_point(rollback_id)
+
+@app.post("/api/control/root-token")
+async def api_control_root_token(data: dict = Body(...)):
+    return command_task_runner.issue_root_token(
+        reason=str(data.get("reason", "") or "api root session"),
+        ttl_sec=int(data.get("ttl_sec", 300)),
+    )
+
+@app.post("/api/control/fuse/trip")
+async def api_control_fuse_trip(data: dict = Body(...)):
+    return command_task_runner.trip_fuse(str(data.get("reason", "") or "manual fuse tripped"))
+
+@app.post("/api/control/fuse/reset")
+async def api_control_fuse_reset():
+    return command_task_runner.reset_fuse()
 
 @app.get("/api/workspace/explore")
 async def api_workspace_explore(path: str = "."):
     """浏览文件目录 (文件树)"""
     import os, stat
     try:
-        base = Path(ROOT / path).resolve()
+        base = _resolve_workspace_path(path)
         if not base.exists() or not base.is_dir():
             return {"ok": False, "error": f"目录不存在: {path}"}
         entries = []
@@ -561,7 +936,7 @@ async def api_workspace_read(path: str = ""):
     """读取文件内容"""
     if not path: return {"ok": False, "error": "路径为空"}
     try:
-        fp = (ROOT / path).resolve()
+        fp = _resolve_workspace_path(path)
         if not fp.exists() or not fp.is_file():
             return {"ok": False, "error": f"文件不存在: {path}"}
         ext = fp.suffix.lower()
@@ -580,7 +955,9 @@ async def api_workspace_save(data: dict = Body(...)):
     content = data.get("content", "")
     if not path: return {"ok": False, "error": "路径为空"}
     try:
-        fp = (ROOT / path).resolve()
+        fp = _resolve_workspace_path(path)
+        from core.workspace_manager import sandbox_check_path
+        sandbox_check_path(fp)
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content, encoding="utf-8")
         return {"ok": True, "path": str(fp.relative_to(ROOT)), "size": len(content)}
@@ -611,19 +988,23 @@ async def api_workspace_project(data: dict = Body(...)):
         return {"ok": True, "projects": projects, "projects_dir": str(projects_dir)}
 
     if not name: return {"ok": False, "error": "项目名不能为空"}
+    try:
+        name = _validate_project_name(name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
 
     if action == "from_folder":
         if not source_path: return {"ok": False, "error": "请选择源文件夹"}
         src = Path(source_path)
         if not src.exists(): return {"ok": False, "error": f"源文件夹不存在: {source_path}"}
-        dst = projects_dir / name
+        dst = _resolve_workspace_path(Path("workspace") / "projects" / name)
         if dst.exists(): return {"ok": False, "error": "项目名已存在"}
         import shutil
         shutil.copytree(src, dst, dirs_exist_ok=True)
         return {"ok": True, "path": str(dst.relative_to(ROOT)), "type": "from_folder"}
 
     if action == "create":
-        dst = projects_dir / name
+        dst = _resolve_workspace_path(Path("workspace") / "projects" / name)
         if dst.exists(): return {"ok": False, "error": "项目名已存在"}
         dst.mkdir(parents=True)
         if project_type == "python":
@@ -674,7 +1055,9 @@ async def api_workspace_github():
 # ═══ END WORKSPACE API ═══
 if __name__=="__main__":
     import uvicorn,yaml
-    try:cfg=yaml.safe_load(open(ROOT/"config.yaml",encoding="utf-8"))
+    try:
+        with (ROOT/"config.yaml").open(encoding="utf-8") as f:
+            cfg=yaml.safe_load(f)
     except yaml.YAMLError as e:logger.warning(f"config.yaml 解析异常: {e}");cfg={}
     except FileNotFoundError:cfg={};logger.info("使用默认配置")
     sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(sc.get("port", os.environ.get("PORT", 8087)))

@@ -1,0 +1,21 @@
+{
+  "session_id": "gap_test_session",
+  "meta": {
+    "id": "gap_test_session",
+    "created_at": 1784910461.9825459,
+    "updated_at": 1784910461.982575,
+    "name": "test",
+    "message_count": 1,
+    "tool_call_count": 0,
+    "last_topic": "",
+    "phase": "idle",
+    "parent_session_id": ""
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "test"
+    }
+  ],
+  "saved_at": 1784910461.9825544
+}

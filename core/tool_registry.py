@@ -1,89 +1,109 @@
-"""工具注册中心 — 管理所有工具的注册和调度"""
+"""Tool registry for registering and executing Javis tools."""
 
 import asyncio
 import logging
-from typing import Any, Callable
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
+from typing import Callable
+
+from core.tool_guardrails import ToolGuard, sanitize_params
 from core.tool_result import ToolResult
 
 logger = logging.getLogger("tools")
 
 
+PERMISSION_ALIASES = {
+    "full_access": "critical",
+    "quick_auth": "dangerous",
+    "safe_guard": "medium",
+    "full_approval": "safe",
+}
+
+
 @dataclass
 class ToolDef:
-    """工具定义"""
     name: str
     description: str
-    parameters: dict            # JSON Schema
-    handler: Callable           # async function(params) -> ToolResult
+    parameters: dict
+    handler: Callable
     category: str = "general"
 
 
 class ToolRegistry:
-    """工具注册中心 — 动态管理所有可用工具"""
-
-    def __init__(self):
+    def __init__(self, permission_level: str = "full_access", guard: ToolGuard | None = None):
         self._tools: dict[str, ToolDef] = {}
         self._categories: dict[str, list[str]] = {}
+        self.guard = guard or ToolGuard(PERMISSION_ALIASES.get(permission_level, permission_level))
 
     def register(self, tool: ToolDef):
-        """注册一个工具"""
         self._tools[tool.name] = tool
-        self._categories.setdefault(tool.category, []).append(tool.name)
-        logger.info(f"工具已注册: {tool.name} [{tool.category}]")
+        category = self._categories.setdefault(tool.category, [])
+        if tool.name not in category:
+            category.append(tool.name)
+        logger.info(f"Tool registered: {tool.name} [{tool.category}]")
 
     def register_many(self, tools: list[ToolDef]):
-        """批量注册"""
-        for t in tools:
-            self.register(t)
+        for tool in tools:
+            self.register(tool)
 
     def get(self, name: str) -> ToolDef | None:
-        """获取工具定义"""
         return self._tools.get(name)
 
-    async def execute(self, name: str, params: dict) -> ToolResult:
-        """执行工具"""
+    async def execute(self, name: str, params: dict | None) -> ToolResult:
         tool = self._tools.get(name)
         if not tool:
-            return ToolResult.failure(f"未知工具: {name}")
+            return ToolResult.failure(f"Unknown tool: {name}")
 
+        params = params or {}
+        safe_params = sanitize_params(params)
+        block_reason = self.guard.pre_check(name, safe_params, tool.parameters)
+        if block_reason:
+            return ToolResult.failure(block_reason)
+
+        started = time.perf_counter()
         try:
             result = tool.handler(**params)
             if asyncio.iscoroutine(result):
                 result = await result
             if not isinstance(result, ToolResult):
                 result = ToolResult.success(result)
+
+            duration_ms = (time.perf_counter() - started) * 1000
+            output = result.data if result.success else result.error
+            post_reason = self.guard.post_check(name, safe_params, result.success, duration_ms, str(output))
+            if post_reason:
+                return ToolResult.failure(post_reason)
             return result
-        except Exception as e:
-            logger.error(f"工具执行失败 [{name}]: {e}")
-            return ToolResult.failure(f"{name} 执行失败: {e}")
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - started) * 1000
+            self.guard.post_check(name, safe_params, False, duration_ms, str(exc))
+            logger.error(f"Tool execution failed [{name}]: {exc}")
+            return ToolResult.failure(f"{name} execution failed: {exc}")
 
     def get_schemas(self) -> list[dict]:
-        """生成 LLM function calling 用的完整工具 schema"""
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                }
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
             }
-            for t in self._tools.values()
+            for tool in self._tools.values()
         ]
 
     def get_light_schemas(self) -> list[dict]:
-        """轻量级工具 schema（仅name+一句话描述，无parameters）"""
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": t.name,
-                    "description": t.description.split(".")[0][:60],
+                    "name": tool.name,
+                    "description": tool.description.split(".")[0][:60],
                     "parameters": {"type": "object", "properties": {}},
-                }
+                },
             }
-            for t in self._tools.values()
+            for tool in self._tools.values()
         ]
 
     @property
@@ -96,7 +116,10 @@ class ToolRegistry:
     def list_by_category(self, category: str) -> list[str]:
         return self._categories.get(category, [])
 
+    def set_permission_level(self, permission_level: str):
+        normalized = PERMISSION_ALIASES.get(permission_level, permission_level)
+        self.guard.permission_level = ToolGuard(normalized).permission_level
+
     def clear(self):
-        """清空所有已注册工具 (用于技能切换)"""
         self._tools.clear()
         self._categories.clear()

@@ -11,6 +11,8 @@ from core.planner import Planner
 from core.reflector import Reflector, classify_error, map_tool_to_domain
 from core.prompt_builder import PromptBuilder, build_dynamic_prompt
 from core.hook_system import HookEvent, get_hook_manager
+from core.memory_kernel import get_core_memory_kernel
+from core.session_recall import build_session_recall_answer
 
 logger = logging.getLogger("agent")
 action_log = []
@@ -313,7 +315,39 @@ class Agent:
 
         return prompt
 
-    async def chat(self, user_input: str) -> AsyncGenerator[dict, None]:
+    async def chat(
+        self,
+        user_input: str,
+        session_id: str = "",
+        conversation_cards: list[dict] | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        core_answer = get_core_memory_kernel().answer_if_core_query(user_input)
+        if core_answer:
+            self.state.messages.append({"role": "user", "content": user_input[:500]})
+            self.state.messages.append({"role": "assistant", "content": core_answer})
+            _log("core_memory", core_answer[:100])
+            if self.brain:
+                self.brain.learn_fact("会话主题: " + user_input[:80], category="session.topic", source="self", priority=3)
+            yield {"type": "text_delta", "text": core_answer}
+            yield {"type": "done"}
+            return
+
+        session_answer = build_session_recall_answer(
+            user_input,
+            state_messages=self.state.messages,
+            conversation_cards=conversation_cards,
+            session_id=session_id,
+        )
+        if session_answer:
+            self.state.messages.append({"role": "user", "content": user_input[:500]})
+            self.state.messages.append({"role": "assistant", "content": session_answer})
+            _log("session_recall", session_answer[:100])
+            if self.brain:
+                self.brain.learn_fact("会话主题: 当前会话召回", category="session.topic", source="self", priority=3)
+            yield {"type": "text_delta", "text": session_answer}
+            yield {"type": "done"}
+            return
+
         window = list(self.state.messages[-40:])
         try:
             from memory.episodic import Episode, extract_fingerprint
@@ -717,4 +751,3 @@ class Agent:
             self._auto_learn_from_actions()
         except Exception:
             pass
-

@@ -279,10 +279,7 @@ class SandboxManager:
         wsb_path.write_text(wsb_content, encoding="utf-8")
 
         try:
-            r = subprocess.run(
-                ["start", str(wsb_path)],
-                shell=True, capture_output=True, timeout=5,
-            )
+            os.startfile(wsb_path)
             # Windows Sandbox 是 GUI 的，难以捕获输出
             return 0, f"Windows Sandbox 已启动: {wsb_path}", ""
         except subprocess.TimeoutExpired:
@@ -349,10 +346,7 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     sb = get_sandbox()
 
-    async def sandbox_exec(args):
-        code = args["code"]
-        language = args.get("language", "python")
-        timeout = args.get("timeout", 0)
+    async def sandbox_exec(code: str, language: str = "python", timeout: int = 0):
         result = sb.execute(code, language, timeout or None)
         return {
             "success": result.success,
@@ -364,8 +358,13 @@ def register_in_manifest(reg):
             "truncated": result.truncated,
         }
 
-    async def sandbox_config(args):
-        backend = args.get("backend", "")
+    async def sandbox_config(
+        backend: str = "",
+        timeout: int = 0,
+        memory_mb: int = 0,
+        cpus: int = 0,
+        network_enabled: bool | None = None,
+    ):
         if backend:
             try:
                 sb.config.backend = SandboxBackend(backend)
@@ -374,21 +373,21 @@ def register_in_manifest(reg):
                         "error": f"未知后端: {backend}. "
                         f"可用: {[b.value for b in SandboxBackend]}"}
 
-        if args.get("timeout", 0) > 0:
-            sb.config.timeout = args["timeout"]
-        if args.get("memory_mb", 0) > 0:
-            sb.config.memory_mb = args["memory_mb"]
-        if args.get("cpus", 0) > 0:
-            sb.config.cpus = args["cpus"]
-        if "network_enabled" in args:
-            sb.config.network_enabled = bool(args["network_enabled"])
+        if timeout > 0:
+            sb.config.timeout = timeout
+        if memory_mb > 0:
+            sb.config.memory_mb = memory_mb
+        if cpus > 0:
+            sb.config.cpus = cpus
+        if network_enabled is not None:
+            sb.config.network_enabled = bool(network_enabled)
 
         return {"success": True, "config": sb.config.to_dict()}
 
-    async def sandbox_status(args):
+    async def sandbox_status():
         return {"success": True, **sb.get_status()}
 
-    async def sandbox_detect(args):
+    async def sandbox_detect():
         backend = sb.detect_backend()
         return {"success": True,
                 "detected": backend.value,

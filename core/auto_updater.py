@@ -273,8 +273,7 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     import asyncio
 
-    async def check_update(args):
-        include_prerelease = args.get("include_prerelease", False)
+    async def check_update(include_prerelease: bool = False):
         info = check_for_updates(include_prerelease=include_prerelease)
         if info is None:
             return {"success": False,
@@ -290,7 +289,7 @@ def register_in_manifest(reg):
             "download_url": info.download_url if info.download_url else "",
         }
 
-    async def update_version(args):
+    async def update_version():
         success, output = pull_latest()
         return {
             "success": success,
@@ -298,20 +297,20 @@ def register_in_manifest(reg):
             "current_version": get_current_version(),
         }
 
-    async def current_version(args):
+    async def current_version():
         return {"success": True, "version": get_current_version()}
 
-    async def list_backups_tool(args):
+    async def list_backups_tool():
         backups = list_backups()
         return {"success": True, "backups": backups, "count": len(backups)}
 
-    async def create_backup_tool(args):
+    async def create_backup_tool():
         path = create_backup()
         if path:
             return {"success": True, "backup_path": path}
         return {"success": False, "error": "创建备份失败"}
 
-    async def update_history(args):
+    async def update_history():
         history = get_update_history()
         return {"success": True, "history": history, "count": len(history)}
 

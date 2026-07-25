@@ -51,6 +51,9 @@ def register(registry) -> int:
                 continue
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            if getattr(mod, "SKIP_AUTO_REGISTER", False):
+                logger.debug(f"跳过内部工具模块: {mod_name}")
+                continue
 
             tool_name = getattr(mod, "TOOL_NAME", mod_name.replace("tool_", "").replace("_", "-"))
             tool_desc = getattr(mod, "TOOL_DESC", "")

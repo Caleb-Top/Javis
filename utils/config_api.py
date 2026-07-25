@@ -1,5 +1,5 @@
 """配置管理 API"""
-import os, base64, yaml, logging
+import copy, os, base64, yaml, logging
 from pathlib import Path
 logger = logging.getLogger("config_api")
 CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
@@ -16,6 +16,48 @@ ENV_KEY_MAP = {
 }
 
 _SECURITY_WARNED = False
+
+DEFAULT_CONFIG = {
+    "model": {
+        "provider": "local",
+        "name": "qwen2.5:7b",
+        "effort": "balanced",
+        "temperature": 0.7,
+        "max_tokens": 8192,
+        "max_steps": 20,
+        "max_retries": 3,
+        "local": {
+            "name": "qwen2.5:7b",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "ollama",
+        },
+    },
+    "agent": {
+        "permission_level": "quick_auth",
+    },
+}
+
+
+def _default_config() -> dict:
+    return copy.deepcopy(DEFAULT_CONFIG)
+
+
+def _merge_defaults(config: dict) -> dict:
+    merged = _default_config()
+    if not isinstance(config, dict):
+        return merged
+    for key, value in config.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key].update(value)
+        else:
+            merged[key] = value
+    model = merged.setdefault("model", {})
+    local = model.setdefault("local", {})
+    local.setdefault("name", model.get("name", "qwen2.5:7b"))
+    local.setdefault("base_url", "http://localhost:11434/v1")
+    local["api_key"] = local.get("api_key") or "ollama"
+    merged.setdefault("agent", {}).setdefault("permission_level", "quick_auth")
+    return merged
 
 def _warn_security(config: dict):
     global _SECURITY_WARNED
@@ -36,16 +78,20 @@ def _decode(s):
     return s
 
 def load_config():
+    if not CONFIG_PATH.exists():
+        return _default_config()
     try:
-        cfg=yaml.safe_load(open(CONFIG_PATH,encoding="utf-8"))
+        with CONFIG_PATH.open(encoding="utf-8") as f:
+            cfg=yaml.safe_load(f)
+        cfg = _merge_defaults(cfg or {})
         if cfg and "model" in cfg:
             _warn_security(cfg)
             for k in ["deepseek","glm","kimi","qwen","openai","anthropic"]:
                 pc=cfg["model"].get(k)
                 if pc and isinstance(pc,dict) and pc.get("api_key"): pc["api_key"]=_decode(pc["api_key"])
-        return cfg or {}
+        return cfg
     except Exception as e:
-        logger.warning(f"config.yaml 读取异常: {e}"); return {}
+        logger.warning(f"config.yaml 读取异常: {e}"); return _default_config()
 
 def save_config(config):
     if "model" in config:
@@ -55,7 +101,8 @@ def save_config(config):
             pc=config["model"].get(k)
             if pc and isinstance(pc,dict) and pc.get("api_key") and not pc["api_key"].startswith(ENCODED_PREFIX) and pc["api_key"]!="ollama":
                 pc["api_key"]=_encode(pc["api_key"])
-    yaml.dump(config,open(CONFIG_PATH,"w",encoding="utf-8"),allow_unicode=True,default_flow_style=False,sort_keys=False)
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 def _get_env_api_key(provider: str) -> str:
     env_var = ENV_KEY_MAP.get(provider)
@@ -94,6 +141,7 @@ def set_provider(provider):
 
 def set_api_key(provider, api_key):
     cfg=load_config(); cloud=["deepseek","glm","kimi","qwen","openai","anthropic"]
+    cfg.setdefault("model", {})
     if provider in cloud:
         cfg["model"].setdefault(provider,{}); cfg["model"][provider]["api_key"]=api_key
         models=AVAILABLE_MODELS.get(provider,[])

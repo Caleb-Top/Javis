@@ -225,34 +225,34 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     hooks = get_hook_system()
 
-    async def hook_list(args):
+    async def hook_list():
         events = hooks.list_events()
         return {"success": True, "events": events, "total_events": len(events)}
 
-    async def hook_status(args):
+    async def hook_status():
         stats = hooks.get_stats()
         return {"success": True, **stats}
 
-    async def hook_trigger(args):
-        event_name = args.get("event", "")
+    async def hook_trigger(event: str = "", data: dict | None = None):
+        event_name = event
         try:
             event = HookEvent(event_name)
         except ValueError:
             return {"success": False, "error": f"Unknown event: {event_name}. "
                        f"Valid: {[e.value for e in HookEvent]}"}
-        result = hooks.trigger(event, args.get("data", {}))
+        result = hooks.trigger(event, data or {})
         return {
             "success": True, "allowed": result.allowed,
             "message": result.message, "data": result.data,
         }
 
-    async def hook_load_config(args):
-        config_path = args.get("config_path")
+    async def hook_load_config(config_path: str = ""):
+        config_path = config_path or None
         count = hooks.load_from_yaml(config_path)
         return {"success": True, "handlers_loaded": count}
 
-    async def hook_register(args):
-        event_name = args.get("event", "")
+    async def hook_register(event: str = ""):
+        event_name = event
         try:
             event = HookEvent(event_name)
         except ValueError:

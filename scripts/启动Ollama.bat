@@ -1,5 +1,7 @@
 @echo off
-set OLLAMA_MODELS=D:\Javis\ollama_models
+set "PROJECT_ROOT=%~dp0.."
+pushd "%PROJECT_ROOT%"
+set "OLLAMA_MODELS=%CD%\ollama_models"
 echo [Ollama] Model directory: %OLLAMA_MODELS%
 start /B "" "%LOCALAPPDATA%\Ollama\ollama.exe" serve
 echo [Ollama] Service started

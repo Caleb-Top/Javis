@@ -17,7 +17,7 @@ def system_info(**kwargs) -> ToolResult:
 
 def system_execute(command: str, timeout: int = 30) -> ToolResult:
     try:
-        # 安全: 使用 cmd /c 代替 shell=True，防止命令注入
+        # 安全: 使用显式 argv 启动 cmd，避免把整条命令交给 Python shell 层
         r=subprocess.run(["cmd","/c",command],capture_output=True,text=True,timeout=timeout,encoding="gbk",errors="ignore")
         return ToolResult.success(r.stdout.strip() or r.stderr.strip() or f"(exit:{r.returncode})")
     except subprocess.TimeoutExpired: return ToolResult.failure("超时")
@@ -25,7 +25,17 @@ def system_execute(command: str, timeout: int = 30) -> ToolResult:
 
 def _is_store_lnk(path):
     try:
-        r=subprocess.run(['powershell','-Command',f'$s=New-Object -ComObject WScript.Shell;$s=$s.CreateShortcut("{path}");$t=$s.TargetPath;if($t-eq""-or$t-like"*ms-windows-store*"){{Write-Output"STORE"}}else{{Write-Output"OK:$t"}}'],capture_output=True,text=True,timeout=5)
+        env = os.environ.copy()
+        env["JAVIS_LNK_PATH"] = path
+        script = (
+            '$path=$env:JAVIS_LNK_PATH;'
+            '$s=New-Object -ComObject WScript.Shell;'
+            '$s=$s.CreateShortcut($path);'
+            '$t=$s.TargetPath;'
+            'if($t-eq""-or$t-like"*ms-windows-store*"){Write-Output"STORE"}'
+            'else{Write-Output"OK:$t"}'
+        )
+        r=subprocess.run(['powershell','-NoProfile','-NonInteractive','-Command',script],capture_output=True,text=True,timeout=5,env=env)
         o=r.stdout.strip()
         if o=="STORE": return True
         if o.startswith("OK:"):

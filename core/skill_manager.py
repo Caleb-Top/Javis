@@ -63,6 +63,9 @@ class SkillManager:
     def list_installed(self) -> list[dict]:
         return [{'name': n, 'status': s} for n, s in self._status.items()]
 
+    def list_all(self) -> list[dict]:
+        return self.list_installed()
+
     def get_status(self, name: str) -> Optional[dict]:
         s = self._status.get(name)
         return {'name': name, 'status': s} if s else None
@@ -80,24 +83,27 @@ def get_manager() -> SkillManager:
         _manager = SkillManager()
     return _manager
 
+def get_skill_manager() -> SkillManager:
+    return get_manager()
+
 def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     mgr = get_manager()
 
-    async def _install(args):
-        return mgr.install(args['name'], args['source_path'])
-    async def _enable(args):
-        return mgr.enable(args['name'])
-    async def _disable(args):
-        return mgr.disable(args['name'])
-    async def _uninstall(args):
-        return mgr.uninstall(args['name'], args.get('delete_file', True))
-    async def _list(args):
+    async def _install(name: str, source_path: str):
+        return mgr.install(name, source_path)
+    async def _enable(name: str):
+        return mgr.enable(name)
+    async def _disable(name: str):
+        return mgr.disable(name)
+    async def _uninstall(name: str, delete_file: bool = True):
+        return mgr.uninstall(name, delete_file)
+    async def _list():
         return {'success': True, 'skills': mgr.list_installed(), **mgr.count()}
-    async def _status(args):
-        info = mgr.get_status(args['name'])
+    async def _status(name: str):
+        info = mgr.get_status(name)
         if info is None:
-            return {'success': False, 'error': f'Skill not found: {args["name"]}'}
+            return {'success': False, 'error': f'Skill not found: {name}'}
         return {'success': True, **info}
 
     reg.register_many([

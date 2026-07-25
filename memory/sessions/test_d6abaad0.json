@@ -1,0 +1,25 @@
+{
+  "session_id": "test_d6abaad0",
+  "meta": {
+    "id": "test_d6abaad0",
+    "created_at": 1784910437.6611567,
+    "updated_at": 1784910437.6811366,
+    "name": "hello",
+    "message_count": 2,
+    "tool_call_count": 0,
+    "last_topic": "",
+    "phase": "idle",
+    "parent_session_id": ""
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "hello"
+    },
+    {
+      "role": "assistant",
+      "content": "hi there"
+    }
+  ],
+  "saved_at": 1784910437.6811185
+}

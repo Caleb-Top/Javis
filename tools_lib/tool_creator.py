@@ -1,6 +1,6 @@
 """工具创建器 — 保存/列出自定义工具"""
 
-import textwrap, importlib.util, logging
+import json, re, textwrap, importlib.util, logging
 from pathlib import Path
 from core.tool_result import ToolResult
 from core.tool_registry import ToolDef
@@ -8,17 +8,25 @@ from core.tool_registry import ToolDef
 logger = logging.getLogger("tools_lib.tool_creator")
 _TOOLS_LIB_DIR = Path(__file__).parent
 _REGISTRY = None  # 由 loader 设置
+SKIP_AUTO_REGISTER = True
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 
 
 def save_tool(name: str, description: str, handler_code: str, category: str = "custom") -> str:
     """保存新工具到 tools_lib/ 并注册到当前会话"""
-    safe = name.replace(" ", "_").replace("-", "_")
+    name = (name or "").strip()
+    category = (category or "custom").strip()
+    if not _TOOL_NAME_RE.fullmatch(name):
+        return "❌ 工具名只能使用 ASCII 字母、数字、下划线或短横线，并且必须以字母或下划线开头"
+    if not _TOOL_NAME_RE.fullmatch(category):
+        return "❌ 工具分类只能使用 ASCII 字母、数字、下划线或短横线，并且必须以字母或下划线开头"
+    safe = name.replace("-", "_")
     path = _TOOLS_LIB_DIR / f"tool_{safe}.py"
 
     content = f'"""Javis自创: {name}"""\n'
-    content += f'TOOL_NAME="{name}"\n'
-    content += f'TOOL_DESC="{description}"\n'
-    content += f'TOOL_CATEGORY="{category}"\n'
+    content += f"TOOL_NAME={json.dumps(name, ensure_ascii=False)}\n"
+    content += f"TOOL_DESC={json.dumps(description or '', ensure_ascii=False)}\n"
+    content += f"TOOL_CATEGORY={json.dumps(category, ensure_ascii=False)}\n"
     content += f'TOOL_PARAMS={{"type":"object","properties":{{}},"required":[]}}\n\n'
     content += f'def handler(**kwargs):\n'
     content += textwrap.indent(textwrap.dedent(handler_code.strip()), "    ") + "\n"

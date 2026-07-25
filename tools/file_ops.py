@@ -3,6 +3,7 @@
 import os
 import logging
 from core.tool_result import ToolResult
+from core.workspace_manager import sandbox_check_path
 from utils.error_messages import friendly_error, translate_file_error
 
 logger = logging.getLogger("tools.file_ops")
@@ -28,6 +29,7 @@ def file_read(path: str, offset: int = 0, limit: int = 100) -> ToolResult:
 def file_write(path: str, content: str) -> ToolResult:
     """写入文件"""
     try:
+        sandbox_check_path(path)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)

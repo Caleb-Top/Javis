@@ -1,6 +1,6 @@
-"""
+r"""
 Javis 格式转换工具初始�?
-将所有工具路径统一指向 D:\Javis\tools\ �?
+将所有工具路径统一指向项目内 tools 目录。
 """
 import os
 import sys
@@ -10,7 +10,7 @@ TESSERACT_DIR = os.path.join(TOOLS_DIR, "Tesseract-OCR")
 IMAGEMAGICK_DIR = os.path.join(TOOLS_DIR, "ImageMagick")
 NODEJS_DIR = os.path.join(TOOLS_DIR, "nodejs")
 GH_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "gh")
-PANDOC_DIR = os.path.join(os.environ.get("LOCALAPPDATA", "C:/Users/34247/AppData/Local"), "Pandoc")
+PANDOC_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local")), "Pandoc")
 MINGW_DIR = os.path.join(os.path.dirname(TOOLS_DIR), "tools", "mingw32", "bin")
 TESSERACT_EXE = os.path.join(TESSERACT_DIR, "tesseract.exe")
 MAGICK_EXE = os.path.join(IMAGEMAGICK_DIR, "magick.exe")

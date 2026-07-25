@@ -17,6 +17,13 @@ class LLMClient:
         self._config_path = config_path
         self._init_client()
 
+    @staticmethod
+    def _has_usable_key(api_key: str) -> bool:
+        if not api_key:
+            return False
+        lowered = api_key.strip().lower()
+        return lowered not in {"your_api_key_here", "sk-xxx", "none", "null"}
+
     def _init_client(self):
         """读取配置并初始化 API 客户端（__init__ 和 reload 共用）"""
         self.config = lcfg()
@@ -44,10 +51,20 @@ class LLMClient:
             api_key = os.getenv(f"{self.provider.upper()}_API_KEY") or pc.get("api_key", "")
 
         if self.provider == "anthropic":
+            if not self._has_usable_key(api_key):
+                self._client = None
+                self._api_ready = False
+                logger.warning("Anthropic API key missing; LLM client started in not-ready state")
+                return
             import anthropic
             self._client = anthropic.AsyncAnthropic(api_key=api_key)
-            self._api_ready = bool(api_key)
+            self._api_ready = True
         else:
+            if self.provider != "local" and not self._has_usable_key(api_key):
+                self._client = None
+                self._api_ready = False
+                logger.warning(f"{self.provider} API key missing; LLM client started in not-ready state")
+                return
             from openai import AsyncOpenAI
             kwargs = {"api_key": api_key}
             if self.base_url:
@@ -63,6 +80,8 @@ class LLMClient:
         logger.info(f"配置已重载: {self.provider}/{self.model}")
 
     async def chat_with_tools(self, messages, tools, system=DEFAULT_SYSTEM):
+        if not self.is_ready:
+            raise RuntimeError(f"{self.provider} provider is not configured. Set an API key or switch to local mode.")
         await self._ensure_connected()
         if self.provider == "anthropic":
             return await self._chat_anthropic(messages, tools, system)
