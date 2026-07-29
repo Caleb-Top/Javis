@@ -271,7 +271,7 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     sched = get_scheduler()
 
-    async def cron_list(args):
+    async def cron_list():
         jobs = sched.list_jobs()
         return {
             "success": True,
@@ -279,33 +279,38 @@ def register_in_manifest(reg):
             "jobs": [j.to_dict() for j in jobs],
         }
 
-    async def cron_add(args):
+    async def cron_add(
+        job_id: str,
+        prompt: str,
+        schedule: str = "0 9 * * *",
+        timeout_seconds: int = 300,
+        notify_on_completion: bool = False,
+    ):
         job = sched.add(
-            job_id=args["job_id"],
-            prompt=args["prompt"],
-            schedule=args.get("schedule", "0 9 * * *"),
-            timeout=args.get("timeout_seconds", 300),
-            notify=args.get("notify_on_completion", False),
+            job_id=job_id,
+            prompt=prompt,
+            schedule=schedule,
+            timeout=timeout_seconds,
+            notify=notify_on_completion,
         )
         return {"success": True, "job": job.to_dict()}
 
-    async def cron_remove(args):
-        ok = sched.remove(args["job_id"])
-        return {"success": ok, "job_id": args["job_id"]}
+    async def cron_remove(job_id: str):
+        ok = sched.remove(job_id)
+        return {"success": ok, "job_id": job_id}
 
-    async def cron_toggle(args):
-        new_state = sched.toggle(args["job_id"])
+    async def cron_toggle(job_id: str):
+        new_state = sched.toggle(job_id)
         if new_state is None:
-            return {"success": False, "error": f"Job not found: {args['job_id']}"}
-        return {"success": True, "job_id": args["job_id"], "enabled": new_state}
+            return {"success": False, "error": f"Job not found: {job_id}"}
+        return {"success": True, "job_id": job_id, "enabled": new_state}
 
-    async def cron_history(args):
-        job_id = args.get("job_id")
-        limit = args.get("limit", 50)
+    async def cron_history(job_id: str = "", limit: int = 50):
+        job_id = job_id or None
         history = sched.get_history(job_id, limit)
         return {"success": True, "history": history, "count": len(history)}
 
-    async def cron_stats(args):
+    async def cron_stats():
         return {"success": True, **sched.get_stats()}
 
     reg.register_many([

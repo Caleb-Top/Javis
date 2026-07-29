@@ -202,6 +202,18 @@ def rebuild_index():
     except:
         pass
 
+    # Create FTS5 index for conversations (episodes + user_input)
+    try:
+        db.executescript("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
+                user_input, summary, outcome,
+                content=episodes, content_rowid=rowid
+            );
+            INSERT INTO conversations_fts(conversations_fts) VALUES('rebuild');
+        """)
+    except:
+        pass
+
     # Experiences
     for fp in sorted((BRAIN_DIR / "experiences").glob("*.json")):
         try:
@@ -330,6 +342,22 @@ def incremental_sync():
 # ════════════════════════════════════════════
 # 检索函数
 # ════════════════════════════════════════════
+
+def search_conversations(query: str, limit: int = 10) -> list[dict]:
+    """FTS5 全文检索对话记录 (episodes)"""
+    db = _get_db()
+    try:
+        rows = db.execute(
+            "SELECT e.* FROM episodes e "
+            "JOIN conversations_fts f ON e.rowid = f.rowid "
+            "WHERE conversations_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (query, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
 
 def search_facts(query: str = "", domain: str = "", priority_min: int = 1, limit: int = 5) -> list[dict]:
     """检索 facts (FTS5 全文搜索 + 优先级排序)"""

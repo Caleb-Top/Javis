@@ -1,6 +1,6 @@
-"""Javis 持久记忆系统 — 文件存储, 不依赖外部数据库
+r"""Javis 持久记忆系统 — 文件存储, 不依赖外部数据库
 
-存储位置: D:\Javis\memory\
+存储位置: <project_root>\memory\
   - conversations/   → 完整对话历史
   - profiles/        → 用户偏好/习惯
   - index.json       → 索引
@@ -167,6 +167,7 @@ class SessionMeta:
     tool_call_count: int = 0
     last_topic: str = ""
     phase: str = "idle"
+    parent_session_id: str = ""
 
     def touch(self):
         self.updated_at = time.time()
@@ -178,6 +179,7 @@ class SessionMeta:
             "message_count": self.message_count,
             "tool_call_count": self.tool_call_count,
             "last_topic": self.last_topic, "phase": self.phase,
+            "parent_session_id": self.parent_session_id,
         }
 
     @classmethod
@@ -191,13 +193,14 @@ class SessionMeta:
             tool_call_count=d.get("tool_call_count", 0),
             last_topic=d.get("last_topic", ""),
             phase=d.get("phase", "idle"),
+            parent_session_id=d.get("parent_session_id", ""),
         )
 
 
 class SessionStore:
-    """会话持久化存储 — 跨会话存活
+    r"""会话持久化存储 — 跨会话存活
 
-    存储位置: D:\Javis\memory\sessions\
+    存储位置: <project_root>\memory\sessions\
     结构:
       sessions/<session_id>.json  → 完整对话
       sessions_index.json          → 快速索引
@@ -313,6 +316,32 @@ class SessionStore:
             self.delete(sid)
             count += 1
         return count
+
+    def append_message(self, session_id: str, message: dict) -> None:
+        """追加单条消息到已有会话（保留历史，增量更新）"""
+        messages, meta = self.load(session_id)
+        if meta is None:
+            meta = SessionMeta(session_id=session_id)
+        messages.append(message)
+        if len(messages) > self._MAX_MESSAGES:
+            messages = messages[-self._MAX_MESSAGES:]
+        self.save(session_id, messages, meta)
+
+    def fork_session(self, source_id: str, new_id: str = None) -> str:
+        """从已有会话分叉创建新会话（保留历史到分支点）"""
+        import uuid
+        new_id = new_id or f"{source_id}_fork_{uuid.uuid4().hex[:8]}"
+        messages, meta = self.load(source_id)
+        if meta is None:
+            return new_id
+        new_meta = SessionMeta(
+            session_id=new_id,
+            name=f"(分叉) {meta.name or source_id}",
+            parent_session_id=source_id,
+        )
+        new_meta.touch()
+        self.save(new_id, list(messages), new_meta)
+        return new_id
 
     @property
     def stats(self) -> dict:

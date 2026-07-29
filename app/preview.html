@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Javis App Window Test</title>
+    <link rel="stylesheet" href="./src/styles.css?v=phase4-2" />
+  </head>
+  <body data-surface="live" data-desktop-mode="live" data-preview="testing-only">
+    <div id="app">
+      <main class="live-stage" data-state="idle">
+        <header class="status-rail" data-expanded="false" aria-label="运行状态">
+          <div class="status-summary">
+            <strong class="brand-mark">JAVIS</strong><span class="status-dot"></span><span class="status-state">Javis 已待命</span>
+            <span class="status-connection" data-online="true">无需安装依赖 · 视觉测试</span><span class="permission-badge">SAFE</span>
+            <button class="icon-button status-toggle" type="button" aria-label="展开运行状态" aria-expanded="false">⌄</button>
+          </div>
+          <div class="status-detail"><span><small>Provider</small><strong>Local Ready</strong></span><span><small>WebSocket</small><strong>Test Mode</strong></span><span><small>队列</small><strong>0</strong></span><span><small>Kernel</small><strong>Running</strong></span><span><small>Control</small><strong>Audited</strong></span></div>
+        </header>
+        <div class="ambient-grid"></div>
+        <section class="live-center" aria-label="Javis Live">
+          <div class="orb-wrap"><div class="live-orb"><span class="orb-core"></span><span class="orb-wave wave-a"></span><span class="orb-wave wave-b"></span><span class="orb-wave wave-c"></span><span class="orb-glint"></span></div></div>
+        </section>
+        <div id="pet-surface-root">
+          <section class="pet-surface" data-pet-state="idle" data-skin="javis-anime" aria-label="Javis 桌宠">
+            <div class="pet-aura" aria-hidden="true"></div>
+            <button type="button" class="pet-sprite-button" aria-label="展开 Javis Live"><span class="pet-sprite skin-anime" role="img" aria-label="Javis Neon Pilot" style="background-image:url('./public/pets/javis-anime/idle.png')"></span></button>
+            <button type="button" class="pet-drag-handle" aria-label="移动桌宠">移动</button>
+            <div class="pet-bubble">Javis 已待命</div>
+            <div class="pet-toolbar"><button type="button" class="pet-action pet-open-live">Live</button><button type="button" class="pet-action pet-open-code">Code</button><button type="button" class="pet-action pet-skin-button">皮肤</button></div>
+          </section>
+        </div>
+        <button class="live-caption line-clamp" type="button">Javis 已待命。这是桌面 App 窗口的无依赖视觉测试，不是网页产品入口。</button>
+        <section class="command-area">
+          <form class="live-input"><button type="button" class="icon-button voice-control" aria-label="语音">●</button><textarea rows="1" aria-label="输入任务" placeholder="说话，或输入一句指令..."></textarea><button type="submit" class="icon-button send-btn" aria-label="发送">↑</button></form>
+          <nav class="live-dock"><button type="button" class="dock-action" data-icon="●"><span>收听</span></button><button type="button" class="dock-action code-control" data-icon="⌘"><span>Code</span></button><button type="button" class="dock-action" data-icon="▣"><span>屏幕</span></button><button type="button" class="dock-action" data-icon="◇"><span>权限</span></button><button type="button" class="dock-action diagnostics-preview-control" data-icon="•••"><span>更多</span></button><button type="button" class="dock-action pet-mode-control" data-icon="◇"><span>桌宠</span></button></nav>
+        </section>
+        <div id="drawer-root"></div>
+        <div id="code-root">
+          <section class="code-surface">
+            <header class="code-header"><button class="icon-button code-close" aria-label="返回 Live">←</button><button class="icon-button explorer-toggle" aria-label="打开文件树" aria-expanded="false">☰</button><div class="code-context"><strong>Javis Code</strong><span>受控工作区</span></div><div class="code-actions"><span class="code-safety">AUDITED</span><button class="text-command">刷新</button></div></header>
+            <div class="code-workspace">
+              <aside class="file-explorer"><header><button class="icon-button">↑</button><span class="explorer-path">workspace/projects</span><button class="icon-button">↻</button></header><div class="file-list"><button class="file-entry" data-kind="directory"><span>▸</span><span>src</span></button><button class="file-entry"><span>·</span><span>README.md</span></button></div></aside>
+              <main class="editor-pane"><header><span class="editor-title">README.md</span><span class="editor-state">已保存</span><button class="text-command editor-save">保存</button></header><textarea class="editor-text"># Javis Workspace
+
+Code Surface 通过受控 API 读取和保存文件。</textarea><div class="binary-metadata" hidden></div></main>
+              <section class="terminal-pane"><header><strong>受审计终端</strong><span class="terminal-status">completed · safe · exit 0</span></header><pre class="terminal-output">PS D:\Javis&gt; git status --short\n命令输出由 Control 层审计。</pre><form class="terminal-command"><select><option>PowerShell</option></select><input class="terminal-cwd" value="."><input placeholder="输入受控命令"><button class="text-command">运行</button><button class="text-command" disabled>停止</button></form></section>
+            </div>
+          </section>
+        </div>
+        <div class="sr-only" aria-live="polite"></div>
+      </main>
+    </div>
+    <section class="first-run-panel" role="dialog" aria-modal="true" aria-label="Javis 首次启动" tabindex="-1" hidden>
+      <header class="first-run-header"><div><small>FIRST RUN</small><h1>本地数据与隐私</h1></div><button class="icon-button first-run-later" type="button" aria-label="稍后确认">×</button></header>
+      <div class="first-run-body"><p class="first-run-intro">Javis 在本机运行。确认下面的存储边界后即可进入 Live。</p><dl class="first-run-grid"><div><dt>配置、记忆与日志</dt><dd>%APPDATA%\Javis</dd></div><div><dt>本地模型</dt><dd>D:\JavisModels</dd></div><div><dt>授权工作区</dt><dd>D:\JavisWorkspace</dd></div><div><dt>麦克风</dt><dd>默认不保存原始麦克风音频，只处理当前转写请求。</dd></div><div><dt>屏幕与相机</dt><dd>屏幕和相机原始画面默认不落盘，只保留明确授权的结构化结果。</dd></div><div><dt>依赖</dt><dd>不会自动安装或下载依赖、模型或工具链。</dd></div></dl><div class="first-run-actions"><button class="text-command first-run-complete" type="button">确认并进入 Live</button></div></div>
+    </section>
+    <section class="diagnostics-panel" role="dialog" aria-modal="true" aria-label="Javis 诊断" hidden>
+      <header class="diagnostics-header"><div><small>DIAGNOSTICS</small><h2>Javis 诊断</h2></div><button class="icon-button diagnostics-close" type="button" aria-label="关闭">×</button></header>
+      <div class="diagnostics-body"><p class="diagnostics-policy">诊断只读取本机状态，未提供自动安装，也不会下载依赖。</p><div class="diagnostics-grid" data-state="ready"><div><small>Sidecar</small><pre>{ "state": "healthy", "owned": true }</pre></div><div><small>Runtime</small><pre>{ "status": "running" }</pre></div><div><small>Blueprint</small><pre>{ "score": 1.0 }</pre></div><div><small>App logs</small><pre>AppData/logs/app/app.log</pre></div><div><small>Runtime logs</small><pre>AppData/logs/runtime/</pre></div></div><div class="diagnostics-actions"><button class="text-command" type="button">刷新</button><button class="text-command" type="button">重启运行时</button></div></div>
+    </section>
+    <script>
+      const rail = document.querySelector('.status-rail');
+      document.querySelector('.status-toggle').addEventListener('click', (event) => {
+        const expanded = rail.dataset.expanded !== 'true';
+        rail.dataset.expanded = String(expanded);
+        event.currentTarget.setAttribute('aria-expanded', String(expanded));
+      });
+      const input = document.querySelector('.live-input textarea');
+      input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 144) + 'px'; });
+      document.querySelector('.live-input').addEventListener('submit', (event) => event.preventDefault());
+      document.querySelector('.code-control').addEventListener('click', () => { document.body.dataset.surface = 'code'; });
+      document.querySelector('.code-close').addEventListener('click', () => { document.body.dataset.surface = 'live'; });
+      const setDesktopMode = (mode) => { document.body.dataset.desktopMode = mode; };
+      document.querySelector('.pet-mode-control').addEventListener('click', () => setDesktopMode('pet'));
+      document.querySelector('.pet-sprite-button').addEventListener('click', () => setDesktopMode('live'));
+      document.querySelector('.pet-open-live').addEventListener('click', () => setDesktopMode('live'));
+      document.querySelector('.pet-open-code').addEventListener('click', () => { setDesktopMode('live'); document.body.dataset.surface = 'code'; });
+      document.querySelector('.explorer-toggle').addEventListener('click', (event) => {
+        const surface = document.querySelector('.code-surface');
+        const open = surface.dataset.explorerOpen !== 'true';
+        surface.dataset.explorerOpen = String(open);
+        event.currentTarget.setAttribute('aria-expanded', String(open));
+      });
+      const diagnostics = document.querySelector('.diagnostics-panel');
+      document.querySelector('.diagnostics-preview-control').addEventListener('click', () => { diagnostics.hidden = false; });
+      document.querySelector('.diagnostics-close').addEventListener('click', () => { diagnostics.hidden = true; });
+      const firstRun = document.querySelector('.first-run-panel');
+      const previewParams = new URLSearchParams(location.search);
+      if (previewParams.has('first-run')) {
+        firstRun.hidden = false;
+      }
+      if (previewParams.get('text-scale') === '200') firstRun.style.fontSize = '200%';
+      if (!firstRun.hidden) firstRun.focus();
+      document.querySelector('.first-run-complete').addEventListener('click', () => { firstRun.hidden = true; });
+      document.querySelector('.first-run-later').addEventListener('click', () => { firstRun.hidden = true; });
+      document.addEventListener('keydown', (event) => { if (event.key === 'Escape') firstRun.hidden = true; });
+    </script>
+  </body>
+</html>

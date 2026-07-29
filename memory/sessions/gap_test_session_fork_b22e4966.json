@@ -1,0 +1,21 @@
+{
+  "session_id": "gap_test_session_fork_b22e4966",
+  "meta": {
+    "id": "gap_test_session_fork_b22e4966",
+    "created_at": 1784910462.006417,
+    "updated_at": 1784910462.0064309,
+    "name": "(分叉) test",
+    "message_count": 1,
+    "tool_call_count": 0,
+    "last_topic": "",
+    "phase": "idle",
+    "parent_session_id": "gap_test_session"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "test"
+    }
+  ],
+  "saved_at": 1784910462.0064192
+}

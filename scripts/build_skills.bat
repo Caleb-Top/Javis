@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
-cd /d D:\Javis
+set "PROJECT_ROOT=%~dp0.."
+pushd "%PROJECT_ROOT%"
 
 echo ════════════════════════════════
 echo  Javis Skill Builder
@@ -20,7 +21,7 @@ python build_skills.py %*
 if %errorlevel% equ 0 (
     echo.
     echo ✅ Build complete!
-    echo Skills are in: D:\Javis\skills\
+    echo Skills are in: %CD%\skills\
     echo.
     echo Usage:
     echo   python build_skills.py         - Build all skills

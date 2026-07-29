@@ -2,7 +2,12 @@
 Hook 事件系统 — 10种事件 + register/trigger + agent.py 集成
 P1-3: Complete hook infrastructure with all 10 event types
 """
-import logging, yaml, os, time, asyncio
+import logging, os, time, asyncio
+
+try:
+    import yaml
+except ModuleNotFoundError:  # Hook loading is optional during lightweight startup checks.
+    yaml = None
 from enum import Enum
 from typing import Callable, Any, Optional
 from dataclasses import dataclass, field
@@ -112,6 +117,9 @@ class HookSystem:
     def load_from_yaml(self, config_path: str = None) -> int:
         """从 HOOK.yaml 加载钩子配置"""
         path = config_path or self._config_path
+        if yaml is None:
+            logger.warning("PyYAML is unavailable; skipping HOOK.yaml")
+            return 0
         if not os.path.exists(path):
             logger.debug(f"HOOK.yaml 未找到: {path}")
             return 0
@@ -225,34 +233,34 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     hooks = get_hook_system()
 
-    async def hook_list(args):
+    async def hook_list():
         events = hooks.list_events()
         return {"success": True, "events": events, "total_events": len(events)}
 
-    async def hook_status(args):
+    async def hook_status():
         stats = hooks.get_stats()
         return {"success": True, **stats}
 
-    async def hook_trigger(args):
-        event_name = args.get("event", "")
+    async def hook_trigger(event: str = "", data: dict | None = None):
+        event_name = event
         try:
             event = HookEvent(event_name)
         except ValueError:
             return {"success": False, "error": f"Unknown event: {event_name}. "
                        f"Valid: {[e.value for e in HookEvent]}"}
-        result = hooks.trigger(event, args.get("data", {}))
+        result = hooks.trigger(event, data or {})
         return {
             "success": True, "allowed": result.allowed,
             "message": result.message, "data": result.data,
         }
 
-    async def hook_load_config(args):
-        config_path = args.get("config_path")
+    async def hook_load_config(config_path: str = ""):
+        config_path = config_path or None
         count = hooks.load_from_yaml(config_path)
         return {"success": True, "handlers_loaded": count}
 
-    async def hook_register(args):
-        event_name = args.get("event", "")
+    async def hook_register(event: str = ""):
+        event_name = event
         try:
             event = HookEvent(event_name)
         except ValueError:

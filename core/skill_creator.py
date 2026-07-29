@@ -1,13 +1,14 @@
 """
 P3-3: /learn 技能闭环 — AI自创技能 + background_review + Curator + 技能市场
 """
-import os, logging, time, json, asyncio, shutil
+import os, logging, time, json, asyncio, shutil, re, ast
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from enum import Enum
 
 logger = logging.getLogger("skill_creator")
+_SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 
 
 class SkillStatus(str, Enum):
@@ -186,10 +187,18 @@ class SkillCreator:
         self._curator = SkillCurator(Path(skills_dir).parent if skills_dir else None)
         self._review_queue: asyncio.Queue = asyncio.Queue()
 
+    @staticmethod
+    def _validate_name(name: str) -> str:
+        safe_name = (name or "").strip()
+        if not _SAFE_SKILL_NAME_RE.fullmatch(safe_name):
+            raise ValueError("技能名只能包含英文字母、数字、下划线或连字符，并且不能包含路径")
+        return safe_name
+
     def create(self, name: str, description: str, prompt: str,
               category: str = "general", tags: list = None,
               author: str = "Javis AI") -> str:
         """创建新技能文件 — /learn 命令触发"""
+        name = self._validate_name(name)
         # 检查名称冲突
         existing = self.list_skills()
         if name in existing:
@@ -198,34 +207,27 @@ class SkillCreator:
 
         filename = f"{name}.py"
         path = self._skills_dir / filename
+        meta = {
+            "name": name,
+            "description": description,
+            "category": category,
+            "author": author,
+            "version": "1.0.0",
+            "tags": tags or [],
+        }
 
-        content = f'''"""
-{description}
+        content = f'''"""Auto-generated Javis skill: {name}."""
 
-Category: {category}
-Author: {author}
-Version: 1.0.0
-Tags: {", ".join(tags or [])}
-"""
-
-# 技能 Prompt
-SKILL_PROMPT = """{prompt}"""
+SKILL_NAME = {json.dumps(name, ensure_ascii=False)}
+SKILL_DESC = {json.dumps(description, ensure_ascii=False)}
+SKILL_CATEGORY = {json.dumps(category, ensure_ascii=False)}
+SKILL_PROMPT = {json.dumps(prompt, ensure_ascii=False)}
+SKILL_META = {json.dumps(meta, ensure_ascii=False, indent=4)}
 
 
 def register(tools):
     """技能注册入口 — 加载时被 Javis 调用"""
     pass
-
-
-# 技能元数据
-SKILL_META = {{
-    "name": "{name}",
-    "description": "{description}",
-    "category": "{category}",
-    "author": "{author}",
-    "version": "1.0.0",
-    "tags": {json.dumps(tags or [])},
-}}
 '''
         path.write_text(content, encoding="utf-8")
         logger.info(f"技能已创建: {name} → {path}")
@@ -236,7 +238,12 @@ SKILL_META = {{
             system_prompt=prompt, category=category,
             tags=tags or [], author=author,
         )
-        asyncio.create_task(self._background_review(skill))
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("无运行事件循环，跳过技能后台审查任务")
+        else:
+            loop.create_task(self._background_review(skill))
 
         return str(path)
 
@@ -276,11 +283,15 @@ SKILL_META = {{
 
     def review(self, name: str) -> dict:
         """手动审查技能"""
+        try:
+            name = self._validate_name(name)
+        except ValueError:
+            return {"status": "invalid", "name": name}
         path = self._skills_dir / f"{name}.py"
         if not path.exists():
             return {"status": "missing", "name": name}
 
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
 
         lines = len(content.splitlines())
         has_prompt = "SKILL_PROMPT" in content
@@ -288,12 +299,13 @@ SKILL_META = {{
         has_register = "def register" in content
         size = len(content)
 
-        # 提取 prompt 长度
-        prompt_start = content.find('SKILL_PROMPT = """')
         prompt_len = 0
-        if prompt_start >= 0:
-            prompt_content = content[prompt_start:]
-            prompt_len = len(prompt_content)
+        prompt_match = re.search(r"^SKILL_PROMPT\s*=\s*(.+)$", content, flags=re.MULTILINE)
+        if prompt_match:
+            try:
+                prompt_len = len(ast.literal_eval(prompt_match.group(1)))
+            except (SyntaxError, ValueError):
+                prompt_len = len(prompt_match.group(1))
 
         checks = [
             {"check": "has_prompt", "passed": has_prompt},
@@ -321,27 +333,33 @@ SKILL_META = {{
     def improve(self, name: str, new_prompt: str = "",
                new_description: str = "") -> bool:
         """改进已存在的技能"""
+        try:
+            name = self._validate_name(name)
+        except ValueError:
+            return False
         path = self._skills_dir / f"{name}.py"
         if not path.exists():
             return False
 
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
 
         if new_prompt:
             # 替换 SKILL_PROMPT
             import re
             content = re.sub(
-                r'SKILL_PROMPT = """[\s\S]*?"""',
-                f'SKILL_PROMPT = """{new_prompt}"""',
+                r"^SKILL_PROMPT = .*$",
+                f"SKILL_PROMPT = {json.dumps(new_prompt, ensure_ascii=False)}",
                 content,
+                flags=re.MULTILINE,
             )
 
         if new_description:
-            # 替换 docstring 中的描述
             content = re.sub(
-                r'^"""[\s\S]*?"""',
-                f'"""{new_description}"""',
-                content, count=1,
+                r"^SKILL_DESC = .*$",
+                f"SKILL_DESC = {json.dumps(new_description, ensure_ascii=False)}",
+                content,
+                count=1,
+                flags=re.MULTILINE,
             )
 
         path.write_text(content, encoding="utf-8")
@@ -357,6 +375,10 @@ SKILL_META = {{
 
     def delete_skill(self, name: str) -> bool:
         """删除技能"""
+        try:
+            name = self._validate_name(name)
+        except ValueError:
+            return False
         path = self._skills_dir / f"{name}.py"
         if path.exists():
             path.unlink()
@@ -367,6 +389,10 @@ SKILL_META = {{
 
     def export_skill(self, name: str, target_dir: str) -> Optional[str]:
         """导出技能到目录"""
+        try:
+            name = self._validate_name(name)
+        except ValueError:
+            return None
         path = self._skills_dir / f"{name}.py"
         if not path.exists():
             return None
@@ -378,7 +404,11 @@ SKILL_META = {{
     def import_skill(self, source_path: str) -> Optional[str]:
         """导入技能文件"""
         source = Path(source_path)
-        if not source.exists():
+        if not source.exists() or source.suffix.lower() != ".py":
+            return None
+        try:
+            self._validate_name(source.stem)
+        except ValueError:
             return None
 
         target = self._skills_dir / source.name
@@ -427,63 +457,73 @@ def get_skill_creator(skills_dir: str = "") -> SkillCreator:
 def register_in_manifest(reg):
     """注册技能创建工具到 manifest"""
     from core.tool_registry import ToolDef
+    from core.tool_result import ToolResult
     sc = get_creator()
 
-    async def create_skill(args):
-        path = sc.create(
-            name=args["name"],
-            description=args.get("description", ""),
-            prompt=args.get("system_prompt", ""),
-            category=args.get("category", "general"),
-            tags=args.get("tags", []),
-            author=args.get("author", "Javis AI"),
-        )
-        return {"success": True, "path": path, "name": args["name"]}
+    async def create_skill(
+        name: str,
+        description: str = "",
+        system_prompt: str = "",
+        category: str = "general",
+        tags: list | None = None,
+        author: str = "Javis AI",
+    ):
+        try:
+            path = sc.create(
+                name=name,
+                description=description,
+                prompt=system_prompt,
+                category=category,
+                tags=tags or [],
+                author=author,
+            )
+        except ValueError as e:
+            return ToolResult.failure(str(e))
+        return {"success": True, "path": path, "name": name}
 
-    async def list_skills(args):
+    async def list_skills():
         skills = sc.list_skills()
         return {"success": True, "skills": skills, "count": len(skills)}
 
-    async def review_skill(args):
-        result = sc.review(args["name"])
+    async def review_skill(name: str):
+        result = sc.review(name)
         return {"success": True, **result}
 
-    async def improve_skill(args):
+    async def improve_skill(name: str, system_prompt: str = "", description: str = ""):
         ok = sc.improve(
-            name=args["name"],
-            new_prompt=args.get("system_prompt", ""),
-            new_description=args.get("description", ""),
+            name=name,
+            new_prompt=system_prompt,
+            new_description=description,
         )
-        return {"success": ok, "name": args["name"]}
+        return {"success": ok, "name": name}
 
-    async def delete_skill(args):
-        ok = sc.delete_skill(args["name"])
-        return {"success": ok, "name": args["name"]}
+    async def delete_skill(name: str):
+        ok = sc.delete_skill(name)
+        return {"success": ok, "name": name}
 
-    async def skill_stats(args):
+    async def skill_stats():
         return {"success": True, **sc.get_stats()}
 
-    async def market_search(args):
+    async def market_search(query: str = "", category: str = "", tags: list | None = None):
         results = sc.market_search(
-            query=args.get("query", ""),
-            category=args.get("category", ""),
-            tags=args.get("tags", []),
+            query=query,
+            category=category,
+            tags=tags or [],
         )
         return {"success": True, "results": results, "count": len(results)}
 
-    async def market_top(args):
-        limit = args.get("limit", 10)
+    async def market_top(limit: int = 10):
         results = sc.market_top(limit)
         return {"success": True, "results": results, "count": len(results)}
 
-    async def export_skill_tool(args):
-        path = sc.export_skill(args["name"], args.get("target_dir", "."))
+    async def export_skill_tool(name: str, target_dir: str = "."):
+        path = sc.export_skill(name, target_dir)
         if path:
             return {"success": True, "path": path}
-        return {"success": False, "error": f"Skill not found: {args['name']}"}
+        return {"success": False, "error": f"Skill not found: {name}"}
 
-    async def import_skill_tool(args):
-        path = sc.import_skill(args["source_path"])
+    async def import_skill_tool(source_path: str):
+        path = sc.import_skill(source_path)
         if path:
             return {"success": True, "path": path}
         return {"success": False, "error": "Import failed"}

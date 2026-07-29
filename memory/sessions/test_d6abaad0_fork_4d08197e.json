@@ -1,0 +1,25 @@
+{
+  "session_id": "test_d6abaad0_fork_4d08197e",
+  "meta": {
+    "id": "test_d6abaad0_fork_4d08197e",
+    "created_at": 1784910437.704782,
+    "updated_at": 1784910437.7048044,
+    "name": "(分叉) hello",
+    "message_count": 2,
+    "tool_call_count": 0,
+    "last_topic": "",
+    "phase": "idle",
+    "parent_session_id": "test_d6abaad0"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "hello"
+    },
+    {
+      "role": "assistant",
+      "content": "hi there"
+    }
+  ],
+  "saved_at": 1784910437.704785
+}

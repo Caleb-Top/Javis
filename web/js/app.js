@@ -8,6 +8,30 @@ let pushToTalkKey = 'F2';
 let pttActive = false;
 let pttEpoch = 0;
 
+function applyThemeStyle(theme) {
+  let next = theme || localStorage.getItem('javis_theme_style') || 'soft';
+  if (next !== 'dark') next = 'soft';
+  if (document.body) document.body.dataset.theme = next;
+  localStorage.setItem('javis_theme_style', next);
+}
+
+function toggleThemeStyle() {
+  let current = (document.body && document.body.dataset.theme) || localStorage.getItem('javis_theme_style') || 'soft';
+  applyThemeStyle(current === 'soft' ? 'dark' : 'soft');
+}
+
+function updateInputPlaceholder() {
+  let input = document.getElementById('user-input');
+  if (!input) return;
+  input.placeholder = window.innerWidth <= 700 ? '输入任务或问题...' : '和 Javis 对话，输入任务、问题或指令...';
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  applyThemeStyle();
+  updateInputPlaceholder();
+});
+window.addEventListener('resize', updateInputPlaceholder);
+
   // ── Audio unlock (workaround for browser autoplay policy) ──
   let _audioEl = null;
   let _audioCtx = null;
@@ -148,11 +172,14 @@ function deleteThread(id) {
 function toggleSidebar() {
   let el = document.getElementById('sidebar');
   let wrap = document.querySelector('.sidebar-wrap');
+  let collapsed = !document.body.classList.contains('sidebar-collapsed');
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
   if (wrap) {
-    wrap.style.display = wrap.style.display === 'none' ? '' : 'none';
+    wrap.style.display = collapsed ? 'none' : '';
   } else if (el) {
-    el.style.display = el.style.display === 'none' ? '' : 'none';
+    el.style.display = collapsed ? 'none' : '';
   }
+  window.dispatchEvent(new Event('resize'));
 }
 
 function renderThreadTree() {
@@ -619,6 +646,20 @@ function rejectConfirm() {
 function hideConfirm() { rejectConfirm(); }
 
 // ── Send ──
+function buildMessagePayload(text) {
+  let cards = [];
+  try {
+    if (currentThreadId && threads[currentThreadId]) {
+      cards = (threads[currentThreadId].cards || []).slice(-80);
+    }
+  } catch(e) { cards = []; }
+  return { text: text, session_id: currentThreadId || '', recent_cards: cards };
+}
+
+function sendAgentMessage(text) {
+  ws.send(JSON.stringify({ type: 'message', payload: buildMessagePayload(text) }));
+}
+
 function sendMessage() {
   let inp = document.getElementById('user-input'); let t = inp.value.trim();
   if (!t || isProcessing) return;
@@ -626,7 +667,7 @@ function sendMessage() {
   if (!currentThreadId || !threads[currentThreadId]) { let id = createThread('新对话', null); currentThreadId = id; }
   tsCreate();
   addCard('user', t);
-  ws.send(JSON.stringify({ type: 'message', payload: { text: t } }));
+  sendAgentMessage(t);
   isProcessing = true; updateStep('思考中...'); updateStatusBar('thinking', '思考中…'); setProcessing(true);
   setJavisStatus('thinking', '思考中');
 }
@@ -641,7 +682,7 @@ function sendQuick(action) {
   if (isProcessing) return;
   if (!currentThreadId || !threads[currentThreadId]) { let id = createThread('新对话', null); currentThreadId = id; }
   addCard('user', action);
-  ws.send(JSON.stringify({ type: 'message', payload: { text: action } }));
+  sendAgentMessage(action);
   isProcessing = true; updateStep('思考中...'); updateStatusBar('thinking', '思考中…'); setProcessing(true);
   setJavisStatus('thinking', '思考中');
 }
@@ -655,7 +696,7 @@ function handleFileUpload(event) {
   if (textFile) {
     let reader = new FileReader();
     reader.onload = function(e) {
-      ws.send(JSON.stringify({ type: 'message', payload: { text: '📎 ' + names + '\n```\n' + e.target.result.slice(0, 10000) + '\n```' } }));
+      sendAgentMessage('📎 ' + names + '\n```\n' + e.target.result.slice(0, 10000) + '\n```');
       isProcessing = true; updateStep('思考中...'); setProcessing(true);
     };
     reader.readAsText(textFile);
@@ -666,7 +707,7 @@ function handleFileUpload(event) {
       let b64 = e.target.result.split(',')[1];
       // 先上传图片，再发消息——确保文件存盘后再让 agent 处理
       ws.send(JSON.stringify({ type: 'image_upload', payload: { name: names, data: b64 } }));
-      ws.send(JSON.stringify({ type: 'message', payload: { text: '📎 ' + names + ' (图片)' } }));
+      sendAgentMessage('📎 ' + names + ' (图片)');
       isProcessing = true; updateStep('思考中...'); setProcessing(true);
     };
     reader.readAsDataURL(files[0]);
@@ -685,7 +726,7 @@ function handleFolderUpload(event) {
   let sent = 0, total = textContents.length;
   addCard('user', '📁 上传: ' + folderName + ' (' + files.length + '个, ' + total + '个可传)');
   function sendNext() {
-    if (sent >= total) { ws.send(JSON.stringify({ type: 'message', payload: { text: '📁 ' + folderName + ' 上传完成' } })); isProcessing = true; updateStep('思考中...'); setProcessing(true); return; }
+    if (sent >= total) { sendAgentMessage('📁 ' + folderName + ' 上传完成'); isProcessing = true; updateStep('思考中...'); setProcessing(true); return; }
     let item = textContents[sent];
     let r = new FileReader();
     r.onload = function(e) { ws.send(JSON.stringify({ type: 'folder_file', payload: { path: item.path, content: e.target.result } })); sent++; setTimeout(sendNext, 20); };
@@ -746,7 +787,7 @@ function _uploadDroppedFile(file) {
   if (isText) {
     let reader = new FileReader();
     reader.onload = function(e) {
-      ws.send(JSON.stringify({ type: 'message', payload: { text: '📎 ' + names + '\n```\n' + e.target.result.slice(0, 10000) + '\n```' } }));
+      sendAgentMessage('📎 ' + names + '\n```\n' + e.target.result.slice(0, 10000) + '\n```');
     };
     reader.readAsText(file);
   } else if (isImage) {
@@ -755,11 +796,11 @@ function _uploadDroppedFile(file) {
       let b64 = e.target.result.split(',')[1];
       // 先上传图片，再发消息——确保文件存盘后再让 agent 处理
       ws.send(JSON.stringify({ type: 'image_upload', payload: { name: names, data: b64 } }));
-      ws.send(JSON.stringify({ type: 'message', payload: { text: '📎 ' + names + ' (图片)' } }));
+      sendAgentMessage('📎 ' + names + ' (图片)');
     };
     reader.readAsDataURL(file);
   } else {
-    ws.send(JSON.stringify({ type: 'message', payload: { text: '📎 ' + names + ' (二进制文件，格式可能不支持)' } }));
+    sendAgentMessage('📎 ' + names + ' (二进制文件，格式可能不支持)');
   }
 }
 

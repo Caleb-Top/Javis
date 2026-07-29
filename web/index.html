@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JAVIS · 智能助手</title>
+<title>JAVIS | 私人智能助理</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<link rel="stylesheet" href="/static/css/style.css">
-<script src="/static/js/app.js"></script>
+<link rel="stylesheet" href="/static/css/style.css?v=20260728-release1">
+<script defer src="/static/js/app.js?v=20260728-release1"></script>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <!-- ═══ Apple SF Symbols 风格 SVG 图标集 ═══ -->
@@ -108,6 +108,9 @@
     <span id="status-text" class="status-dot" title="连接状态">●</span>
     <span id="model-badge" class="model-badge"></span>
     <span id="tool-count" class="tool-badge">0 工具</span>
+    <button class="topbar-btn theme-btn" onclick="toggleThemeStyle()" title="切换风格">
+      <span class="theme-dot"></span>
+    </button>
     <button class="topbar-btn" onclick="showSettings()" title="设置">
       <svg width="18" height="18"><use href="#i-gear"/></svg>
     </button>
@@ -115,7 +118,7 @@
       <svg width="18" height="18"><use href="#i-plus"/></svg>
     </button>
     <button class="topbar-btn" onclick="toggleWorkspace()" title="工作台" style="font-size:16px;line-height:1;">
-      🧰
+      <svg width="18" height="18"><use href="#i-monitor"/></svg>
     </button>
   </div>
 </header>
@@ -137,6 +140,7 @@
       <!-- 由 JS 渲染 -->
     </div>
   </aside>
+  </div>
 
   <!-- 中间 ─ 对话区 -->
 <main class="chat" id="chat-area">
@@ -233,7 +237,7 @@
           <svg width="18" height="18"><use href="#i-folder"/></svg>
         </button>
         <div class="input-field">
-          <textarea id="user-input" class="text-input" placeholder="?????Enter ??  |  Shift+Enter ??" rows="1"
+          <textarea id="user-input" class="text-input" placeholder="和 Javis 对话，输入任务、问题或指令..." rows="1"
             onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"
             oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px';"></textarea>
         </div>
@@ -243,9 +247,9 @@
       </div>
     </div>
     <div class="kbd-hints" id="kbd-hints">
-      <span class="kbd-hint-item"><kbd>Enter</kbd> ??</span>
-      <span class="kbd-hint-item"><kbd>Shift</kbd>+<kbd>Enter</kbd> ??</span>
-      <span class="kbd-hint-item"><kbd>F2</kbd> ??</span>
+      <span class="kbd-hint-item"><kbd>Enter</kbd> 发送</span>
+      <span class="kbd-hint-item"><kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+      <span class="kbd-hint-item"><kbd>F2</kbd> 语音</span>
     </div>
   </main>
 
@@ -253,11 +257,11 @@
   <div class="workspace-panel" id="workspace-panel">
     <div class="ws-header">
       <div class="ws-tabs" id="ws-tabs">
-        <button class="ws-tab active" data-tab="files" onclick="switchWsTab('files')">📁 文件</button>
-        <button class="ws-tab" data-tab="terminal" onclick="switchWsTab('terminal')">💻 终端</button>
-        <button class="ws-tab" data-tab="browser" onclick="switchWsTab('browser')">🌐 浏览器</button>
-        <button class="ws-tab" data-tab="github" onclick="switchWsTab('github')">🐙 GitHub</button>
-        <button class="ws-tab" data-tab="project" onclick="switchWsTab('project')">🏗️ 项目</button>
+        <button class="ws-tab active" data-tab="files" onclick="switchWsTab('files')">文件</button>
+        <button class="ws-tab" data-tab="terminal" onclick="switchWsTab('terminal')">终端</button>
+        <button class="ws-tab" data-tab="browser" onclick="switchWsTab('browser')">浏览器</button>
+        <button class="ws-tab" data-tab="github" onclick="switchWsTab('github')">GitHub</button>
+        <button class="ws-tab" data-tab="project" onclick="switchWsTab('project')">项目</button>
       </div>
       <button class="ws-close" onclick="toggleWorkspace()" title="关闭工作台">✕</button>
     </div>

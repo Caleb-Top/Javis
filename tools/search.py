@@ -7,6 +7,7 @@ import logging
 from typing import Optional
 
 from core.tool_result import ToolResult
+from core.workspace_manager import sandbox_check_path
 
 logger = logging.getLogger("search_tools")
 
@@ -225,6 +226,11 @@ def file_edit(
     """
     if not os.path.exists(file_path):
         return ToolResult.failure(f"文件不存在: {file_path}")
+
+    try:
+        sandbox_check_path(file_path)
+    except PermissionError as e:
+        return ToolResult.failure(str(e))
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:

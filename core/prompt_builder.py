@@ -17,8 +17,19 @@ from __future__ import annotations
 
 import hashlib, json, logging, time
 from typing import Optional
+from core.memory_kernel import get_core_memory_kernel
 
 logger = logging.getLogger("prompt_builder")
+
+STYLE_RULE_KEYWORDS = (
+    "用户风格", "风格", "先结论", "短句", "原始数据", "不读原始",
+    "不念报告", "不读日志", "自然口语", "自己的话", "不要复读",
+)
+
+CANONICAL_STYLE_RULES = (
+    "用户风格: 先结论后数据，短句优先，不读原始数据行，用自然口语回答。",
+    "规则: 工具返回值只作为依据，不能复读原始日志或原始数据。",
+)
 
 
 # ============================================================
@@ -88,10 +99,16 @@ class MemoryLayerBuilder:
               max_style_rules: int = 5, max_topics: int = 3,
               max_user_msgs: int = 3) -> str:
         """构建记忆注入层。返回格式化文本或空字符串。"""
-        if not brain:
-            return ""
-
         blocks: list[str] = []
+
+        # 0. 核心身份记忆：固定从 brain_data/rules 加载，避免普通召回漏掉用户身份。
+        core_identity = MemoryLayerBuilder._get_core_identity_rules()
+        if core_identity:
+            blocks.append("## 核心身份记忆\n" + "\n".join(
+                f"{i+1}. {rule}" for i, rule in enumerate(core_identity)))
+
+        if not brain:
+            return "\n\n".join(blocks) if blocks else ""
 
         # 1. 高优先级经验规则
         exps = MemoryLayerBuilder._get_experiences(brain, max_experiences)
@@ -117,6 +134,11 @@ class MemoryLayerBuilder:
         return "\n\n".join(blocks) if blocks else ""
 
     @staticmethod
+    def _get_core_identity_rules() -> list[str]:
+        """读取核心身份事实，只注入身份，不原样注入危险权限句。"""
+        return get_core_memory_kernel().prompt_rules()
+
+    @staticmethod
     def _get_experiences(brain, max_n: int) -> list[str]:
         """获取高优先级经验（去重）"""
         seen: set[str] = set()
@@ -139,15 +161,60 @@ class MemoryLayerBuilder:
         """获取风格守则"""
         seen: set[str] = set()
         results: list[str] = []
+
+        def _is_style_fact(f) -> bool:
+            category = getattr(f, "category", "") or ""
+            content = getattr(f, "content", "") or ""
+            if category.startswith("user_style"):
+                return True
+            if category.startswith("semantic") or category == "session.topic":
+                return any(k in content for k in STYLE_RULE_KEYWORDS)
+            return False
+
+        def _is_low_value_style(content: str) -> bool:
+            text = content.replace("用户风格:", "").replace("用户风格：", "").strip()
+            if not text:
+                return True
+            has_real_rule = any(k in content for k in ("先结论", "短句", "原始数据", "自然口语", "不念报告", "不读日志", "自己的话", "不要复读"))
+            if has_real_rule:
+                return False
+            metric_chars = set("|=0123456789. 均句字口语短句精简用emoji，,:：")
+            return all(ch in metric_chars for ch in text)
+
+        def _score(f) -> tuple[int, int, float]:
+            content = getattr(f, "content", "") or ""
+            category = getattr(f, "category", "") or ""
+            score = 0
+            if category in ("user_style.base", "user_style.rule.no_repeat_data"):
+                score += 100
+            if "先结论" in content:
+                score += 40
+            if "短句" in content:
+                score += 25
+            if "原始数据" in content or "不要复读" in content or "自己的话" in content:
+                score += 30
+            if "自然口语" in content or "不念报告" in content:
+                score += 20
+            return (score, int(getattr(f, "priority", 0) or 0), float(getattr(f, "created_at", 0) or 0))
+
         try:
-            for f in sorted(brain._facts, key=lambda x: -x.priority):
-                if (f.category.startswith("user_style")
-                        and f.priority >= 4
-                        and len(f.content) > 5):
-                    key = f.content[:60]
-                    if key not in seen:
-                        seen.add(key)
-                        results.append(f.content[:100])
+            for rule in CANONICAL_STYLE_RULES:
+                seen.add(rule[:60])
+                results.append(rule)
+
+            candidates = [
+                f for f in getattr(brain, "_facts", [])
+                if _is_style_fact(f)
+                and int(getattr(f, "priority", 0) or 0) >= 3
+                and len((getattr(f, "content", "") or "").strip()) > 5
+                and not _is_low_value_style(getattr(f, "content", "") or "")
+            ]
+            for f in sorted(candidates, key=_score, reverse=True):
+                content = (getattr(f, "content", "") or "").strip()
+                key = content[:60]
+                if key not in seen:
+                    seen.add(key)
+                    results.append(content[:120])
                 if len(results) >= max_n:
                     break
         except Exception:
@@ -384,7 +451,8 @@ class PromptBuilder:
                     )
                 except Exception:
                     pass
-            raw = f"e{exp_count}f{fact_count}t{int(latest)}"
+            rules_latest = get_core_memory_kernel().rules_fingerprint_value()
+            raw = f"e{exp_count}f{fact_count}t{int(latest)}r{int(rules_latest)}"
             return hashlib.md5(raw.encode()).hexdigest()[:12]
         except Exception:
             return str(time.time())

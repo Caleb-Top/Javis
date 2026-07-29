@@ -1,0 +1,77 @@
+model:
+  provider: local
+  name: deepseek-r1:8b
+  effort: max
+  temperature: 0.3
+  max_tokens: 32768
+  max_steps: 50
+  max_retries: 8
+  local:
+    api_key: ollama
+    base_url: http://localhost:11434/v1
+    name: deepseek-r1:8b
+  anthropic:
+    api_key: ''
+    name: claude-haiku-3-5
+  deepseek:
+    api_key: ''
+    base_url: https://api.deepseek.com/v1
+    name: deepseek-v4-pro
+  glm:
+    api_key: ''
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    name: glm-4
+  kimi:
+    api_key: ''
+    base_url: https://api.moonshot.cn/v1
+    name: moonshot-v1-8k
+  vlm:
+    enabled: true
+    api_key: ollama
+    base_url: http://localhost:11434/v1
+    name: llava:latest
+    timeout: 8
+  openai:
+    api_key: ''
+    base_url: ''
+    name: gpt-4o-mini
+  qwen:
+    api_key: ''
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    name: qwen-plus
+  stream: true
+  remote_provider: deepseek
+agent:
+  permission_level: full_access
+  confirm_dangerous: true
+  max_steps: 15
+paths:
+  model_dir: D:\Javis\ollama_models\models
+  workspace_dir: D:\Javis\workspace
+  output_dir: D:\Javis\uploads
+  backup_dir: D:\Javis\backups
+camera:
+  device_id: 0
+  resolution:
+  - 1280
+  - 720
+server:
+  host: 127.0.0.1
+  port: 8080
+user:
+  language: zh-CN
+  name: ''
+  timezone: Asia/Shanghai
+voice:
+  stt:
+    language: zh
+    model: small
+    provider: whisper
+  tts:
+    provider: edge-tts
+    rate: +0%
+    voice: zh-CN-XiaoxiaoNeural
+wake_word:
+  sensitivity: 0.5
+  words:
+  - Javis

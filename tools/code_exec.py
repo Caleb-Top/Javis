@@ -297,7 +297,7 @@ def _exec_cmd(code: str) -> str:
         lines = [l.strip() for l in code.split("\n")]
         flat = " && ".join(l for l in lines if l and not l.startswith("@"))
         if not flat: flat = " ".join(l for l in lines if l)
-        # 安全: 使用 cmd /c 代替 shell=True
+        # 安全: 使用显式 argv 启动 cmd，避免把整条命令交给 Python shell 层
         r = subprocess.run(["cmd","/c",flat], capture_output=True, timeout=30, encoding="utf-8", errors="replace")
         out = r.stdout.strip(); err = r.stderr.strip()
         if out: return out[:2000]
@@ -398,21 +398,36 @@ def _do_update_language(name: str, handler_source: str) -> str:
         _LANGUAGE_INFO.get(name, {}).get("version", "?"))
 
 
+def _extract_language_handler_source(source: str) -> str:
+    lines = source.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("def handler")), None)
+    if start is None:
+        return ""
+
+    body = lines[start:]
+    end = next((i for i, line in enumerate(body) if line == 'if __name__ == "__main__":'), len(body))
+    return "\n".join(body[:end]).rstrip() + "\n"
+
+
+def _render_language_registration(name, handler_source, compiler_path, version) -> str:
+    body = _extract_language_handler_source(handler_source) if "def handler" in handler_source else handler_source.rstrip() + "\n"
+    source = "# Auto-registered language: " + name + chr(10)
+    source += "# compiler: " + str(compiler_path) + ", version: " + str(version) + chr(10) + chr(10)
+    source += body.rstrip() + chr(10) + chr(10)
+    source += 'if __name__ == "__main__":' + chr(10)
+    source += '    import sys' + chr(10)
+    source += '    r = handler(sys.stdin.read())' + chr(10)
+    source += '    print(r)' + chr(10)
+    return source
+
+
 def _persist_language_registration(name, handler_source, compiler_path, version):
     """将语言注册写入持久文件, 重启后自动加载"""
     try:
         reg_dir = Path(__file__).parent.parent / "tools_lib" / "_languages"
         reg_dir.mkdir(parents=True, exist_ok=True)
         reg_file = reg_dir / f"{name}.py"
-        # Always overwrite — never append.
-        source = "# Auto-registered language: " + name + chr(10)
-        source += "# compiler: " + str(compiler_path) + ", version: " + str(version) + chr(10) + chr(10)
-        source += handler_source + chr(10) + chr(10)
-        source += 'if __name__ == "__main__":' + chr(10)
-        source += '    import sys' + chr(10)
-        source += '    r = handler(sys.stdin.read())' + chr(10)
-        source += '    print(r)' + chr(10)
-        reg_file.write_text(source, encoding="utf-8")
+        reg_file.write_text(_render_language_registration(name, handler_source, compiler_path, version), encoding="utf-8")
     except Exception as e:
         logger.warning(f"持久化语言 {name} 失败: {e}")
 
@@ -426,16 +441,10 @@ def _load_persisted_languages():
         try:
             name = f.stem
             source = f.read_text(encoding="utf-8")
-            # 提取 handler 源码 (去掉 auto-gen 注释头)
-            lines = source.split("\n")
-            start = 0
-            for i, l in enumerate(lines):
-                if l.strip().startswith("def handler"):
-                    start = i
-                    source_body = "\n".join(lines[start:])
-                    _do_register_language(name, source_body, "persisted", "auto")
-                    logger.info(f"  加载持久化语言: {name}")
-                    break
+            source_body = _extract_language_handler_source(source)
+            if source_body:
+                _do_register_language(name, source_body, "persisted", "auto")
+                logger.info(f"  加载持久化语言: {name}")
         except Exception as e:
             logger.warning(f"加载语言 {f.name} 失败: {e}")
 

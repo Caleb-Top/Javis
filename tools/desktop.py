@@ -210,7 +210,60 @@ def _filter_candidates(name: str) -> list[tuple[int, str]]:
 # 截图
 # ═══════════════════════════════════════════════════════════════
 
+def _screenshot_native_fallback(area: list = None) -> ToolResult:
+    capture_errors = []
+    try:
+        import mss
+        from PIL import Image
+
+        with mss.mss() as sct:
+            if area and len(area) >= 4:
+                monitor = {
+                    "top": int(area[1]),
+                    "left": int(area[0]),
+                    "width": int(area[2]),
+                    "height": int(area[3]),
+                }
+            else:
+                monitor = sct.monitors[1]
+            shot = sct.grab(monitor)
+            image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    except Exception as error:
+        capture_errors.append(f"mss: {error}")
+        try:
+            from PIL import Image, ImageGrab
+
+            image = ImageGrab.grab(all_screens=True)
+            if area and len(area) >= 4:
+                left, top, width, height = (int(value) for value in area[:4])
+                image = image.crop((left, top, left + width, top + height))
+        except Exception as fallback_error:
+            capture_errors.append(f"pillow: {fallback_error}")
+            return ToolResult.failure("; ".join(capture_errors))
+
+    original_width, original_height = image.width, image.height
+    max_dimension = 1024
+    if original_width > max_dimension or original_height > max_dimension:
+        ratio = min(max_dimension / original_width, max_dimension / original_height)
+        width, height = int(original_width * ratio), int(original_height * ratio)
+        image = image.resize((width, height), Image.LANCZOS)
+    else:
+        width, height = original_width, original_height
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    return ToolResult(
+        success=True,
+        data=(
+            f"Screenshot captured: {original_width}x{original_height} -> "
+            f"{width}x{height} ({len(encoded)//1024}KB)"
+        ),
+        image=encoded,
+    )
+
+
 def screenshot(area: list = None, **kwargs) -> ToolResult:
+    return _screenshot_native_fallback(area)
     """截取全屏并返回图片 (缩放至最大1024px, 省token)"""
     try:
         import mss

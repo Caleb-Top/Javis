@@ -1,0 +1,10 @@
+{
+  "id": "javis-anime",
+  "name": "Javis Neon Pilot",
+  "format": "portrait-skin-v1",
+  "source": "CC0 Anime Girl sprite by Hordana, adapted as a Javis skin",
+  "idle": "/pets/javis-anime/idle.png",
+  "sourceStrip": "/pets/javis-anime/walk-source.png",
+  "states": ["idle", "listening", "thinking", "speaking", "executing", "blocked", "error", "offline"],
+  "atlasUpgrade": "hatch-pet-v2"
+}

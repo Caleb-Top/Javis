@@ -1,0 +1,52 @@
+{
+  "product": "Javis",
+  "version": "3.0.0",
+  "channel": "test",
+  "shell": "tauri-v2",
+  "surfaces": [
+    "live-orb",
+    "desktop-pet",
+    "code",
+    "control",
+    "conversation",
+    "diagnostics"
+  ],
+  "backend": {
+    "type": "packaged-python-runtime",
+    "packaged": true,
+    "complete_source": true,
+    "archive": "javis-runtime.zip",
+    "entry": "app/main.py",
+    "port": 8080,
+    "health": "/api/status"
+  },
+  "runtime": {
+    "archive": "javis-runtime.zip",
+    "install_root": "%LOCALAPPDATA%/Javis/runtime",
+    "python": "python/python.exe",
+    "offline_build": true
+  },
+  "data": {
+    "preserved": true,
+    "root": "%LOCALAPPDATA%/Javis",
+    "upgrade_rollback": true
+  },
+  "models": {
+    "ollama_external": true,
+    "yolo_runtime_discovery": true
+  },
+  "systems": [
+    "core",
+    "memory",
+    "perception",
+    "control",
+    "evolution"
+  ],
+  "external_components": {
+    "deepseek_api": true,
+    "ollama_models": true,
+    "cuda_training_stack": true
+  },
+  "web_debug_preserved": true,
+  "release_scope": "integrated Windows x64 v3 test installer"
+}
