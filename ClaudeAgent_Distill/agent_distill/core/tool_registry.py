@@ -400,9 +400,17 @@ def _edit_file(file_path: str, old_string: str, new_string: str,
 def _bash(command: str, timeout_ms: int = 30000) -> ToolResult:
     """实现 Bash 工具"""
     try:
+        import os
+        import shutil
         import subprocess
+        if os.name == "nt":
+            shell_exe = shutil.which("powershell") or shutil.which("pwsh")
+            args = [shell_exe, "-NoProfile", "-NonInteractive", "-Command", command] if shell_exe else ["cmd", "/c", command]
+        else:
+            shell_exe = shutil.which("bash")
+            args = [shell_exe, "-lc", command] if shell_exe else ["/bin/sh", "-c", command]
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
+            args, capture_output=True, text=True,
             timeout=timeout_ms / 1000,
         )
         output = result.stdout

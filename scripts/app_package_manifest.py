@@ -3,8 +3,9 @@ from pathlib import Path
 
 INCLUDE = [
     "main.py",
-    "start.py",
     "config.example.yaml",
+    "blueprint",
+    "brain_data",
     "core",
     "control",
     "evolution",
@@ -14,6 +15,7 @@ INCLUDE = [
     "perception",
     "providers",
     "skills",
+    "tools",
     "tools_lib",
     "utils",
     "voice",
@@ -41,12 +43,13 @@ EXCLUDE = [
 
 EXTERNAL = [
     "ollama_models",
+    "DeepSeek API",
+    "CUDA/PyTorch training stack",
     "data",
     "workspace",
     "tools/rust",
     "tools/mingw32",
     "tools/nodejs",
-    "tools/Tesseract-OCR",
     "tools/ImageMagick",
     "tools/gh",
     "tools/yolo",

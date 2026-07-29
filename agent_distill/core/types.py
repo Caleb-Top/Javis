@@ -191,7 +191,7 @@ class AgentConfig:
 
 @dataclass
 class PathMapper:
-    """
+    r"""
     路径映射器 — Windows 路径 ↔ VM 路径 的双向转换。
 
     Windows 实际路径           → VM 工具路径

@@ -2448,6 +2448,31 @@ body:has(.workspace-panel.open) .topbar-center {
   max-width: 600px !important;
 }
 
+body.sidebar-collapsed {
+  --sidebar-w: 0px;
+}
+
+body.sidebar-collapsed .controls-bar,
+body.sidebar-collapsed .permission-bar,
+body.sidebar-collapsed .input-area {
+  left: 32px !important;
+}
+
+body.sidebar-collapsed .topbar-center {
+  left: 28px !important;
+  width: min(760px, calc(100vw - 390px)) !important;
+}
+
+body.sidebar-collapsed:has(.workspace-panel.open) .controls-bar,
+body.sidebar-collapsed:has(.workspace-panel.open) .permission-bar,
+body.sidebar-collapsed:has(.workspace-panel.open) .input-area {
+  right: 462px !important;
+}
+
+body.sidebar-collapsed:has(.workspace-panel.open) .topbar-center {
+  width: min(600px, calc(100vw - 520px)) !important;
+}
+
 .mode-pill {
   transition: transform .18s ease, background .18s ease, border-color .18s ease, color .18s ease !important;
 }

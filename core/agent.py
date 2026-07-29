@@ -1,6 +1,6 @@
 """JAVIS Agent v3 — Phase-driven + Dynamic Prompt + Auto-Learning"""
 
-import asyncio, json, logging, time, hashlib, uuid
+import asyncio, json, logging, time, hashlib, uuid, re
 from typing import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +13,7 @@ from core.prompt_builder import PromptBuilder, build_dynamic_prompt
 from core.hook_system import HookEvent, get_hook_manager
 from core.memory_kernel import get_core_memory_kernel
 from core.session_recall import build_session_recall_answer
+from core.action_policy import evaluate_action
 
 logger = logging.getLogger("agent")
 action_log = []
@@ -50,6 +51,47 @@ def _is_quick_request(user_input: str) -> bool:
     ]
     text = user_input.lower()
     return any(kw in text for kw in quick_keywords)
+
+
+LIVE_ACTION_KEYWORDS = (
+    "打开", "关闭", "运行", "执行", "创建", "删除", "修改", "写入", "保存",
+    "读取", "文件", "文件夹", "项目", "代码", "命令", "终端", "截图", "截屏",
+    "屏幕", "摄像头", "搜索", "下载", "安装", "发送", "点击", "鼠标", "键盘",
+    "音量", "系统", "浏览器", "网页", "git ", "github", "训练", "部署", "构建",
+)
+
+LIVE_BRIEF_SYSTEM = """你是 Javis，Eric 的本地桌面智能管家。
+这是实时语音/文字交流。先给结论，短句，自然直接。
+不要展示思考过程，不要复读原始数据，不要写报告。
+严格遵守用户指定的输出格式。"""
+
+
+def _extract_live_exact_reply(user_input: str) -> str | None:
+    """Return a requested literal reply without letting a model rewrite it."""
+    text = str(user_input or "").strip()
+    patterns = (
+        r"^(?:请)?(?:严格)?(?:仅|只)(?:需|要)?(?:回复|输出)\s*[:：]\s*(.+?)\s*$",
+        r"^(?:please\s+)?(?:reply|respond|output)(?:\s+with)?\s+(?:exactly|only)\s*[:：]\s*(.+?)\s*$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        answer = match.group(1).strip()
+        paired_quotes = {('"', '"'), ("'", "'"), ("“", "”")}
+        if len(answer) >= 2 and (answer[0], answer[-1]) in paired_quotes:
+            answer = answer[1:-1].strip()
+        return answer[:1000] if answer else None
+    return None
+
+
+def _is_live_fast_dialogue(user_input: str) -> bool:
+    """Only route short, non-action conversation away from the full tool agent."""
+    text = " ".join(str(user_input or "").strip().split())
+    if not text or len(text) > 160:
+        return False
+    lowered = text.lower()
+    return not any(keyword in lowered for keyword in LIVE_ACTION_KEYWORDS)
 
 def _log(t, d):
     action_log.append({"time": time.strftime("%H:%M:%S"), "type": t, "detail": d})
@@ -260,8 +302,10 @@ class Agent:
         except Exception:
             return 2
 
-    def _should_auto_approve(self, tool_name: str) -> bool:
+    def _should_auto_approve(self, tool_name: str, params: dict | None = None) -> bool:
         """根据权限级别决定工具是否自动批准"""
+        if evaluate_action(tool_name, params or {}).action != "allow":
+            return False
         perm_num = self._get_permission_number()
 
         # Level 1 — 完全访问：全部自动批准
@@ -320,6 +364,7 @@ class Agent:
         user_input: str,
         session_id: str = "",
         conversation_cards: list[dict] | None = None,
+        interaction_mode: str = "",
     ) -> AsyncGenerator[dict, None]:
         core_answer = get_core_memory_kernel().answer_if_core_query(user_input)
         if core_answer:
@@ -347,6 +392,47 @@ class Agent:
             yield {"type": "text_delta", "text": session_answer}
             yield {"type": "done"}
             return
+
+        if interaction_mode == "live" and _is_live_fast_dialogue(user_input):
+            exact_reply = _extract_live_exact_reply(user_input)
+            if exact_reply is not None:
+                self.state.messages.append({"role": "user", "content": user_input[:500]})
+                self.state.messages.append({"role": "assistant", "content": exact_reply})
+                _log("live_exact", exact_reply[:100])
+                yield {"type": "text_delta", "text": exact_reply}
+                yield {"type": "done"}
+                return
+            history = []
+            for card in (conversation_cards or [])[-12:]:
+                role = str(card.get("role", "") or "")
+                text = str(card.get("text", "") or "").strip()
+                if role in {"user", "assistant"} and text:
+                    history.append({"role": role, "content": text[:800]})
+            if history and history[-1].get("role") == "user" and history[-1].get("content") == user_input:
+                history.pop()
+            messages = history + [{"role": "user", "content": user_input}]
+            yield {"type": "thinking", "content": "正在快速理解"}
+            try:
+                if self.engine:
+                    response, route = await self.engine.chat_brief_with_fallback(
+                        messages,
+                        LIVE_BRIEF_SYSTEM,
+                        max_tokens=256,
+                    )
+                    _log("live_fast", f"{route.provider}/{route.model} {route.latency_ms:.0f}ms")
+                else:
+                    response = await self.llm.chat_brief(messages, LIVE_BRIEF_SYSTEM, max_tokens=256)
+                answer = str(response.text or "").strip()
+                if not answer:
+                    raise RuntimeError("empty live response")
+                self.state.messages.append({"role": "user", "content": user_input[:500]})
+                self.state.messages.append({"role": "assistant", "content": answer[:2000]})
+                self._after_learn(user_input)
+                yield {"type": "text_delta", "text": answer}
+                yield {"type": "done"}
+                return
+            except Exception as exc:
+                logger.warning("Live fast path fallback: %s", str(exc)[:120])
 
         window = list(self.state.messages[-40:])
         try:
@@ -494,9 +580,20 @@ class Agent:
                     yield {"type": "tool_start", "tool": tn, "params": tp}
                     _log("tool", tn)
 
-                    if not self._should_auto_approve(tn):
+                    decision = evaluate_action(tn, tp)
+                    if decision.action == "deny":
+                        yield {"type": "tool_result", "tool": tn, "success": False, "data": decision.reason}
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", f"c{self.state.step}"),
+                            "content": decision.reason,
+                        })
+                        continue
+
+                    action_confirmed = False
+                    if not self._should_auto_approve(tn, tp):
                         tool_info = DANGEROUS_TOOLS.get(tn, ("未分类操作", "normal"))
-                        reason = tool_info[0] if isinstance(tool_info, tuple) else tool_info
+                        reason = decision.reason or (tool_info[0] if isinstance(tool_info, tuple) else tool_info)
                         perm_info = PERM_LEVELS.get(self._permission_level, {})
                         yield {"type": "confirm_required", "tool": tn, "reason": reason, "params": tp,
                                "permission_level": self._permission_level,
@@ -508,6 +605,7 @@ class Agent:
                             messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
                                              "content": "用户取消了该操作"})
                             continue
+                        action_confirmed = True
 
                     # ── P1-3: PreToolUse Hook ──
                     try:
@@ -525,7 +623,7 @@ class Agent:
 
                     t0 = time.time()
                     try:
-                        result = await self.tools.execute(tn, tp)
+                        result = await self.tools.execute(tn, tp, confirmed=action_confirmed)
                     except Exception as e:
                         result = ToolResult.failure(str(e))
                     elapsed_ms = (time.time() - t0) * 1000

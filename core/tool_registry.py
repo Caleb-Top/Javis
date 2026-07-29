@@ -49,14 +49,25 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDef | None:
         return self._tools.get(name)
 
-    async def execute(self, name: str, params: dict | None) -> ToolResult:
+    async def execute(
+        self,
+        name: str,
+        params: dict | None,
+        *,
+        confirmed: bool = False,
+    ) -> ToolResult:
         tool = self._tools.get(name)
         if not tool:
             return ToolResult.failure(f"Unknown tool: {name}")
 
         params = params or {}
         safe_params = sanitize_params(params)
-        block_reason = self.guard.pre_check(name, safe_params, tool.parameters)
+        block_reason = self.guard.pre_check(
+            name,
+            safe_params,
+            tool.parameters,
+            confirmed=confirmed,
+        )
         if block_reason:
             return ToolResult.failure(block_reason)
 

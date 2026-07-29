@@ -7,7 +7,10 @@ def handler(code):
     src = os.path.join(tempfile.gettempdir(), tag + ".rs")
     exe = os.path.join(tempfile.gettempdir(), tag + ".exe")
 
-    jarvis_root = os.environ.get("JARVIS_ROOT", "D:\\Javis")
+    jarvis_root = os.environ.get(
+        "JARVIS_ROOT",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+    )
     rust_root = os.path.join(jarvis_root, "tools", "rust")
     toolchain = os.path.join(rust_root, "rustup", "toolchains",
         "stable-x86_64-pc-windows-gnu")
@@ -38,108 +41,6 @@ def handler(code):
     if out: return out[:2000]
     if err: return "[stderr] " + err[:1900]
     return str(rr.returncode)
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
-
-if __name__ == "__main__":
-    import sys
-    r = handler(sys.stdin.read())
-    print(r)
-
 
 if __name__ == "__main__":
     import sys

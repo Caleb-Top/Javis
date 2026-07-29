@@ -1,0 +1,26 @@
+{
+  "product": "Javis",
+  "version": "1.0.0",
+  "channel": "test",
+  "shell": "tauri-v2",
+  "surfaces": [
+    "live-orb",
+    "desktop-pet",
+    "code",
+    "control",
+    "conversation"
+  ],
+  "backend": {
+    "type": "workspace-sidecar",
+    "entry": "../main.py",
+    "port": 8080,
+    "health": "/api/status"
+  },
+  "pet": {
+    "default_skin": "javis-anime",
+    "skin_format": "portrait-skin-v1",
+    "animated_states": true
+  },
+  "web_debug_preserved": true,
+  "release_scope": "workspace-coupled test build"
+}

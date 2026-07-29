@@ -172,11 +172,14 @@ function deleteThread(id) {
 function toggleSidebar() {
   let el = document.getElementById('sidebar');
   let wrap = document.querySelector('.sidebar-wrap');
+  let collapsed = !document.body.classList.contains('sidebar-collapsed');
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
   if (wrap) {
-    wrap.style.display = wrap.style.display === 'none' ? '' : 'none';
+    wrap.style.display = collapsed ? 'none' : '';
   } else if (el) {
-    el.style.display = el.style.display === 'none' ? '' : 'none';
+    el.style.display = collapsed ? 'none' : '';
   }
+  window.dispatchEvent(new Event('resize'));
 }
 
 function renderThreadTree() {

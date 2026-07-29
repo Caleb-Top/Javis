@@ -1,0 +1,4 @@
+   Compiling javis-app v3.0.0 (D:\Javis\app\src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.49s
+     Running `C:\Users\34247\AppData\Local\Temp\javis-cargo-ui-polish\debug\javis-app.exe`
+error: process didn't exit successfully: `C:\Users\34247\AppData\Local\Temp\javis-cargo-ui-polish\debug\javis-app.exe` (exit code: 0xffffffff)

@@ -81,7 +81,7 @@ class AgentBootstrap:
 
         探测用户挂载的文件夹, 建立 Windows ↔ VM 映射表。
         逻辑:
-        - 如果有 D:\Javis → mount_name="Javis"
+        - 如果有项目目录 → mount_name="Javis"
         - 如果有 D:\Claude测试 → mount_name="Claude测试"
         - 内部生成 session_id
         """

@@ -53,11 +53,16 @@ def build_session_recall_answer(
     if not is_session_recall_query(user_input):
         return ""
 
-    turns = _merge_turns(
-        _cards_to_turns(conversation_cards or []),
-        _messages_to_turns(state_messages or []),
-        _load_session_turns(session_id, conversations_dir),
+    visible_turns = _cards_to_turns(conversation_cards or [])
+    state_turns = _messages_to_turns(state_messages or [])
+    # The UI cards are the authoritative current session. Do not let an
+    # unrelated "most recent" file evict them from the bounded recall window.
+    persisted_turns = (
+        _load_session_turns(session_id, conversations_dir)
+        if session_id or not (visible_turns or state_turns)
+        else []
     )
+    turns = _merge_turns(persisted_turns, state_turns, visible_turns)
     turns = _without_current_query(turns, user_input)[-max_turns:]
     if not turns:
         return "不需要重新训练。是当前会话记录没有被稳定注入，我这边没读到这轮对话内容。"

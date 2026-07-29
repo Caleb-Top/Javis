@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Javis",
+  "version": "3.0.0",
+  "identifier": "local.javis.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Javis Live",
+        "width": 200,
+        "height": 218,
+        "minWidth": 132,
+        "minHeight": 158,
+        "resizable": false,
+        "center": true,
+        "transparent": true,
+        "shadow": false,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8080 ws://127.0.0.1:8080; frame-src http://127.0.0.1:8080; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "resources": [
+      "resources/javis-runtime.zip",
+      "resources/javis-runtime-manifest.json",
+      "resources/javis-runtime.sha256"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/nsis-hooks.nsh",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
+      }
+    }
+  }
+}

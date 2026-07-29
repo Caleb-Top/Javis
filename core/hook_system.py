@@ -2,7 +2,12 @@
 Hook 事件系统 — 10种事件 + register/trigger + agent.py 集成
 P1-3: Complete hook infrastructure with all 10 event types
 """
-import logging, yaml, os, time, asyncio
+import logging, os, time, asyncio
+
+try:
+    import yaml
+except ModuleNotFoundError:  # Hook loading is optional during lightweight startup checks.
+    yaml = None
 from enum import Enum
 from typing import Callable, Any, Optional
 from dataclasses import dataclass, field
@@ -112,6 +117,9 @@ class HookSystem:
     def load_from_yaml(self, config_path: str = None) -> int:
         """从 HOOK.yaml 加载钩子配置"""
         path = config_path or self._config_path
+        if yaml is None:
+            logger.warning("PyYAML is unavailable; skipping HOOK.yaml")
+            return 0
         if not os.path.exists(path):
             logger.debug(f"HOOK.yaml 未找到: {path}")
             return 0

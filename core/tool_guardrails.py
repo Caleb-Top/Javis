@@ -13,6 +13,7 @@
 import time, re, logging
 from typing import Optional, Any
 from dataclasses import dataclass, field
+from core.action_policy import evaluate_action
 
 logger = logging.getLogger("guardrails")
 
@@ -183,7 +184,14 @@ class ToolGuard:
         self._blocked_count: int = 0
         self._total_count: int = 0
 
-    def pre_check(self, tool_name: str, params: dict, schema: dict = None) -> Optional[str]:
+    def pre_check(
+        self,
+        tool_name: str,
+        params: dict,
+        schema: dict = None,
+        *,
+        confirmed: bool = False,
+    ) -> Optional[str]:
         """调用前检查, 返回 None=通过, 否则=拦截原因"""
         self._total_count += 1
         if schema:
@@ -192,6 +200,17 @@ class ToolGuard:
                 self._blocked_count += 1
                 self._log(tool_name, params, 0, 0, False, True, err)
                 return err
+        decision = evaluate_action(tool_name, params)
+        if decision.action == "deny":
+            msg = decision.reason
+            self._blocked_count += 1
+            self._log(tool_name, params, 4, 0, False, True, msg)
+            return msg
+        if decision.action == "confirm" and not confirmed:
+            msg = f"需要用户确认: {decision.reason}"
+            self._blocked_count += 1
+            self._log(tool_name, params, 3, 0, False, True, msg)
+            return msg
         risk = TOOL_RISK_LEVELS.get(tool_name, 2)
         if risk > self.permission_level:
             msg = f"[{tool_name}] 风险级别({risk}) 超过当前权限({self._perm_label()})，已拦截"

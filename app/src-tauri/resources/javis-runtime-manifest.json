@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "product": "Javis",
+  "version": "3.0.0",
+  "created_at": "2026-07-29T06:04:37.651550+00:00",
+  "archive": {
+    "name": "javis-runtime.zip",
+    "sha256": "8dd5858f5d3c05bfab6b79b0394d12701b7029f34b4db451b888efd64853dce7",
+    "files": 26737,
+    "uncompressed_bytes": 2063046071,
+    "compressed_bytes": 1019620626
+  },
+  "backend": {
+    "complete_source": true,
+    "include": [
+      "main.py",
+      "config.example.yaml",
+      "blueprint",
+      "brain_data",
+      "core",
+      "control",
+      "evolution",
+      "gateway",
+      "knowledge",
+      "memory",
+      "perception",
+      "providers",
+      "skills",
+      "tools",
+      "tools_lib",
+      "utils",
+      "voice",
+      "web"
+    ],
+    "systems": [
+      "core",
+      "memory",
+      "perception",
+      "control",
+      "evolution"
+    ]
+  },
+  "python": {
+    "source": "C:\\Users\\34247\\AppData\\Roaming\\uv\\python\\cpython-3.11.15-windows-x86_64-none",
+    "site_packages": "D:\\Javis\\venv\\Lib\\site-packages",
+    "optional_excludes": [
+      "torch",
+      "torchaudio",
+      "torchgen",
+      "torchvision",
+      "torio",
+      "ultralytics"
+    ]
+  },
+  "models": {
+    "faster_whisper_base": "C:\\Users\\34247\\.cache\\huggingface\\hub\\models--Systran--faster-whisper-base\\snapshots\\ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+    "network_downloads": false
+  },
+  "systems": [
+    "core",
+    "memory",
+    "perception",
+    "control",
+    "evolution"
+  ],
+  "external_components": [
+    "deepseek_api",
+    "ollama_models",
+    "cuda_training_stack"
+  ],
+  "persistent_paths": [
+    "app/brain_data",
+    "app/data",
+    "app/memory",
+    "app/workspace",
+    "app/uploads",
+    "app/logs",
+    "app/output",
+    "app/config.yaml",
+    "app/skills/generated"
+  ],
+  "required_members": [
+    "python/python.exe",
+    "python/Lib/site-packages/av/__init__.py",
+    "python/Lib/site-packages/ctranslate2/__init__.py",
+    "python/Lib/site-packages/edge_tts/__init__.py",
+    "python/Lib/site-packages/faster_whisper/__init__.py",
+    "python/Lib/site-packages/pytesseract/__init__.py",
+    "python/Lib/site-packages/pyaudio/__init__.py",
+    "python/Lib/site-packages/pyaudio/_portaudio.cp311-win_amd64.pyd",
+    "python/Lib/site-packages/win32com/__init__.py",
+    "python/Lib/site-packages/pywin32_system32/pythoncom311.dll",
+    "app/main.py",
+    "app/models/faster-whisper-base/model.bin",
+    "app/core/agent.py",
+    "app/core/llm_client.py",
+    "app/core/tool_guardrails.py",
+    "app/blueprint/audit.py",
+    "app/control/command_tasks.py",
+    "app/evolution/service.py",
+    "app/memory/session_db.py",
+    "app/perception/service.py",
+    "app/tools/Tesseract-OCR/tesseract.exe",
+    "app/voice/stt.py",
+    "app/voice/native_capture.py",
+    "app/voice/native_capture_worker.py",
+    "app/voice/native/javis-wasapi-loopback.exe",
+    "app/web/index.html"
+  ]
+}

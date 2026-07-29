@@ -74,7 +74,9 @@ tools/rust/
 
 # 运行时数据
 data/
-logs/
+logs/*
+!logs/README.md
+!logs/JAVIS_MASTER_PLAN_AND_LOG_INDEX_2026-07-27.md
 output/
 train_output/
 tmp/

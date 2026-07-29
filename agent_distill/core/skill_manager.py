@@ -17,6 +17,27 @@ from .types import SkillDef
 logger = logging.getLogger("agent.skills")
 
 
+def _read_skill_text(path: str) -> str:
+    import locale
+
+    encodings = ["utf-8-sig", "utf-8", locale.getpreferredencoding(False)]
+    seen = set()
+    last_error = None
+    for encoding in encodings:
+        if not encoding or encoding in seen:
+            continue
+        seen.add(encoding)
+        try:
+            with open(path, "r", encoding=encoding) as f:
+                return f.read()
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
 class SkillManager:
     """
     Skills 管理器。
@@ -72,8 +93,7 @@ class SkillManager:
             return None
 
         try:
-            with open(skill_md_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            content = _read_skill_text(skill_md_path)
         except Exception as e:
             logger.warning(f"无法读取 Skill [{name}]: {e}")
             return None

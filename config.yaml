@@ -1,6 +1,6 @@
 model:
-  provider: deepseek
-  name: deepseek-v4-flash
+  provider: local
+  name: deepseek-r1:8b
   effort: max
   temperature: 0.3
   max_tokens: 32768
@@ -16,7 +16,7 @@ model:
   deepseek:
     api_key: ''
     base_url: https://api.deepseek.com/v1
-    name: deepseek-v4-flash
+    name: deepseek-v4-pro
   glm:
     api_key: ''
     base_url: https://open.bigmodel.cn/api/paas/v4
@@ -40,10 +40,16 @@ model:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     name: qwen-plus
   stream: true
+  remote_provider: deepseek
 agent:
   permission_level: full_access
   confirm_dangerous: true
   max_steps: 15
+paths:
+  model_dir: D:\Javis\ollama_models\models
+  workspace_dir: D:\Javis\workspace
+  output_dir: D:\Javis\uploads
+  backup_dir: D:\Javis\backups
 camera:
   device_id: 0
   resolution:

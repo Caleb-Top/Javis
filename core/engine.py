@@ -105,6 +105,41 @@ class InferenceEngine:
             logger.error(f"本地模型也失败: {e}")
             raise
 
+    async def chat_brief_with_fallback(self, messages, system, max_tokens=256) -> tuple:
+        """Fast conversational route that immediately uses local compute when cloud is unconfigured."""
+        route = ModelRoute()
+        if not self.llm.is_ready:
+            self._saved_provider = self.llm.provider
+            self._saved_model = self.llm.model
+            self._switch_to_local()
+            self._fallback_active = True
+
+        try:
+            t0 = time.time()
+            response = await self.llm.chat_brief(messages, system, max_tokens=max_tokens)
+            route.latency_ms = (time.time() - t0) * 1000
+            route.provider = self.llm.provider
+            route.model = self.llm.model
+            route.is_fallback = self.llm.provider == "local" and self._saved_provider != "local"
+            self._route_history.append(route)
+            return response, route
+        except Exception as primary_error:
+            if self.llm.provider == "local":
+                raise
+            route.error = str(primary_error)[:100]
+            self._saved_provider = self.llm.provider
+            self._saved_model = self.llm.model
+            self._switch_to_local()
+            self._fallback_active = True
+            t0 = time.time()
+            response = await self.llm.chat_brief(messages, system, max_tokens=max_tokens)
+            route.latency_ms = (time.time() - t0) * 1000
+            route.provider = "local"
+            route.model = LOCAL_MODEL
+            route.is_fallback = True
+            self._route_history.append(route)
+            return response, route
+
     def restore_primary(self):
         """恢复主算力 (云API)"""
         if self._fallback_active:

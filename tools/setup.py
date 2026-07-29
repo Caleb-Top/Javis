@@ -65,7 +65,9 @@ def setup():
     if os.path.isdir(PANDOC_DIR) and os.path.isfile(os.path.join(PANDOC_DIR, 'pandoc.exe')):
         results['pandoc'] = f'OK -> {os.path.join(PANDOC_DIR, "pandoc.exe")}'
     try:
-        os.environ['GH_TOKEN'] = open(os.path.join(os.path.dirname(TOOLS_DIR), 'tools', 'gh', '.token'), encoding='utf-8').read().strip()
+        token_path = os.path.join(os.path.dirname(TOOLS_DIR), 'tools', 'gh', '.token')
+        with open(token_path, encoding='utf-8') as token_file:
+            os.environ['GH_TOKEN'] = token_file.read().strip()
         results['gh_token'] = 'OK'
     except Exception:
         results['gh_token'] = 'SKIP: .token not found'

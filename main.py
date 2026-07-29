@@ -24,6 +24,13 @@ from perception.adapters.vlm import LocalVlmAdapter, OpenAICompatibleVlmDescribe
 from perception.adapters.yolo import YoloDetectionAdapter
 from perception.service import PerceptionService
 from perception.video import VideoStreamAnalyzer
+from voice.native_capture import (
+    get_diagnostics as get_capture_diagnostics,
+    probe_capture,
+    start_capture,
+    stop_capture,
+)
+from utils.local_surface_commands import match_local_surface_command
 
 def _event_store_path() -> Path:
     configured = os.environ.get("JAVIS_EVENT_STORE_PATH")
@@ -110,7 +117,9 @@ def _discover():
     return SKILL_LIST
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
+from utils.app_cors import install_desktop_cors
 app=FastAPI(title="JARVIS",version="2.0")
+install_desktop_cors(app)
 
 @app.get("/")
 async def root():return FileResponse(str(ROOT/"web"/"index.html"))
@@ -122,7 +131,7 @@ def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
     safe = Path(path or "").name
     if not safe or safe.startswith("."):
         safe = "uploaded_file.txt"
-    uploads_root = (ROOT / "uploads").resolve()
+    uploads_root = Path(get_path_settings()["output_dir"]).resolve()
     full = (uploads_root / safe).resolve()
     if not str(full).startswith(str(uploads_root)):
         raise ValueError("upload path escapes uploads directory")
@@ -133,12 +142,41 @@ def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
 @app.websocket("/ws")
 async def ws(ws:WebSocket):
     await ws.accept()
-    async def _agent_loop(text: str, session_id: str = "", cards: list | None = None):
+    async def _dispatch_local_surface_action(text: str, payload: dict) -> bool:
+        if str(payload.get("interaction_mode", "") or "") != "live":
+            return False
+        action = match_local_surface_command(text)
+        if not action:
+            return False
+        request_id = str(payload.get("request_id", "") or "")
+        await ws.send_json({
+            "type": "app_action",
+            "action": action,
+            "request_id": request_id,
+        })
+        await ws.send_json({
+            "type": "done",
+            "detail": f"{action} opened",
+            "request_id": request_id,
+        })
+        return True
+
+    async def _agent_loop(
+        text: str,
+        session_id: str = "",
+        cards: list | None = None,
+        interaction_mode: str = "",
+    ):
         """并发运行 agent, 同时监听 WS 消息 (解决 confirm 死锁)"""
         q = asyncio.Queue()
         async def _run():
             try:
-                async for msg in agent.chat(text, session_id=session_id, conversation_cards=cards or []):
+                async for msg in agent.chat(
+                    text,
+                    session_id=session_id,
+                    conversation_cards=cards or [],
+                    interaction_mode=interaction_mode,
+                ):
                     await q.put(msg)
             finally:
                 await q.put(None)
@@ -174,10 +212,13 @@ async def ws(ws:WebSocket):
                 payload = m.get("payload",{})
                 u=payload.get("text","").strip()
                 if not u:continue
+                if await _dispatch_local_surface_action(u, payload):
+                    continue
                 await _agent_loop(
                     u,
                     session_id=str(payload.get("session_id","") or ""),
                     cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
+                    interaction_mode=str(payload.get("interaction_mode", "") or ""),
                 )
                 continue
             elif t=="folder_file":
@@ -190,11 +231,38 @@ async def ws(ws:WebSocket):
                         logger.warning(f'路径遍历拦截: {path}')
                         continue
             elif t=="voice":
-                ab=m.get("payload",{}).get("audio","")
+                payload=m.get("payload",{})
+                ab=payload.get("audio","")
+                request_id = str(payload.get("request_id", "") or "")
                 if ab:
-                    from voice.stt import transcribe;txt=transcribe(ab)
+                    from voice.stt import transcribe
+                    txt = await asyncio.to_thread(transcribe, ab)
                     if txt:
-                        await _agent_loop(txt)
+                        await ws.send_json({
+                            "type": "voice_transcript",
+                            "text": txt,
+                            "request_id": request_id,
+                        })
+                        if await _dispatch_local_surface_action(txt, payload):
+                            continue
+                        await _agent_loop(
+                            txt,
+                            session_id=str(payload.get("session_id","") or ""),
+                            cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
+                            interaction_mode=str(payload.get("interaction_mode", "") or ""),
+                        )
+                    else:
+                        await ws.send_json({
+                            "type": "done",
+                            "detail": "未识别到语音",
+                            "request_id": request_id,
+                        })
+                else:
+                    await ws.send_json({
+                        "type": "done",
+                        "detail": "录音为空",
+                        "request_id": request_id,
+                    })
             elif t=="confirm":
                 confirmed=m.get("payload",{}).get("confirmed",False)
                 if hasattr(agent,'resolve_confirm'):
@@ -208,16 +276,100 @@ async def ws(ws:WebSocket):
             elif t=="ping":await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
     except WebSocketDisconnect:pass
 
-from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS
+from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,_get_api_key
 from core.agent import action_log
 from utils.memory import save_conversation,load_conversation,list_conversations,delete_conversation
 
 @app.get("/api/status")
 async def api_status():
-    s=get_status();s["skill"]=CURRENT_SKILL;s["skill_count"]=registry.count;s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
+    s=get_status();s["service"]="javis";s["skill"]=CURRENT_SKILL;s["skill_count"]=registry.count;s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
     try:s["engine"]=engine.get_power_status()
     except Exception as e:logger.debug(f"引擎状态获取异常: {e}")
     return s
+
+@app.get("/api/voice/diagnostics")
+async def api_voice_diagnostics():
+    from voice.stt import get_diagnostics as get_stt_diagnostics
+    from voice.tts import get_diagnostics as get_tts_diagnostics
+
+    return {
+        "capture": get_capture_diagnostics(),
+        "stt": get_stt_diagnostics(),
+        "tts": get_tts_diagnostics(),
+    }
+
+@app.post("/api/voice/capture/start")
+async def api_voice_capture_start(data: dict = Body(default={})):
+    try:
+        return await asyncio.to_thread(
+            start_capture,
+            str(data.get("source", "microphone") or "microphone"),
+            data.get("device_index"),
+        )
+    except Exception as error:
+        return {
+            "ok": False,
+            "status": "error",
+            "source": str(data.get("source", "microphone") or "microphone"),
+            "message": str(error),
+        }
+
+@app.post("/api/voice/capture/stop")
+async def api_voice_capture_stop():
+    return await asyncio.to_thread(stop_capture)
+
+@app.post("/api/voice/capture/probe")
+async def api_voice_capture_probe(data: dict = Body(default={})):
+    source = str(data.get("source", "microphone") or "microphone")
+    try:
+        return await asyncio.to_thread(
+            probe_capture,
+            source,
+            float(data.get("duration", 1.2) or 1.2),
+        )
+    except Exception as error:
+        return {
+            "ok": False,
+            "status": "error",
+            "source": source,
+            "message": str(error),
+        }
+
+@app.post("/api/voice/stt/test")
+async def api_voice_stt_test(data: dict = Body(...)):
+    audio = str(data.get("audio", "") or "")
+    if not audio:
+        return {"ok": False, "error": "audio is required"}
+    if len(audio) > 12_000_000:
+        return {"ok": False, "error": "audio payload is too large"}
+    from voice.stt import transcribe
+
+    transcript = await asyncio.to_thread(
+        transcribe,
+        audio,
+        str(data.get("language", "zh") or "zh"),
+    )
+    return {
+        "ok": bool(transcript.strip()),
+        "transcript": transcript.strip(),
+        "error": "" if transcript.strip() else "no speech recognized",
+    }
+
+@app.post("/api/voice/tts/test")
+async def api_voice_tts_test(data: dict = Body(default={})):
+    text = str(data.get("text", "") or "Javis 语音输出正常").strip()[:120]
+    from voice.tts import synthesize
+
+    audio, mime = await synthesize(text)
+    if not audio:
+        return {"ok": False, "error": "speech synthesis failed"}
+    import base64
+
+    try:
+        byte_count = len(base64.b64decode(audio, validate=True))
+    except Exception:
+        byte_count = 0
+    return {"ok": True, "audio": audio, "mime": mime, "bytes": byte_count}
 
 @app.get("/api/runtime/status")
 async def api_runtime_status():
@@ -228,6 +380,107 @@ async def api_blueprint_coverage():
     from blueprint.audit import BlueprintAuditor
 
     return BlueprintAuditor(runtime).coverage()
+
+@app.post("/api/diagnostics/self-test")
+async def api_diagnostics_self_test(data: dict = Body(default={})):
+    from blueprint.audit import BlueprintAuditor
+    from memory.indexer import index_status
+    from utils.system_diagnostics import (
+        build_report,
+        check_directory,
+        check_model_directory,
+        probe_ollama,
+        probe_remote_provider,
+    )
+
+    scope = str(data.get("scope", "full"))
+    if scope not in {"full", "model", "data"}:
+        scope = "full"
+    checks = []
+
+    if scope == "full":
+        runtime_status = runtime.get_runtime_status()
+        tools = int(runtime_status.get("tools", 0) or 0)
+        subsystems = runtime_status.get("subsystems", [])
+        checks.append({
+            "id": "runtime",
+            "label": "Python 运行时",
+            "status": "pass" if tools > 0 and len(subsystems) >= 3 else "fail",
+            "message": f"{tools} 个工具，{len(subsystems)} 个核心子系统已挂载",
+            "action": "restart_runtime" if tools <= 0 else "",
+        })
+        coverage = BlueprintAuditor(runtime).coverage()
+        score = float(coverage.get("score", 0) or 0)
+        checks.append({
+            "id": "blueprint",
+            "label": "五大系统",
+            "status": "pass" if score >= 0.8 else "warn",
+            "message": f"蓝图覆盖率 {round(score * 100)}%",
+        })
+        from voice.stt import get_diagnostics as get_stt_diagnostics
+        from voice.tts import get_diagnostics as get_tts_diagnostics
+
+        voice_parts = {
+            "采集": bool(get_capture_diagnostics().get("available")),
+            "STT": bool(get_stt_diagnostics().get("available")),
+            "TTS": bool(get_tts_diagnostics().get("available")),
+        }
+        unavailable = [name for name, available in voice_parts.items() if not available]
+        checks.append({
+            "id": "voice_components",
+            "label": "语音组件",
+            "status": "warn" if unavailable else "pass",
+            "message": "组件已就绪" if not unavailable else f"未就绪：{'、'.join(unavailable)}",
+        })
+
+    paths = get_path_settings()
+    if scope in {"full", "model"}:
+        checks.append(check_model_directory(paths["model_dir"]))
+        model_settings = get_model_connection_settings()
+        local = model_settings["local"]
+        remote = model_settings["remote"]
+        local_check, remote_check = await asyncio.gather(
+            asyncio.to_thread(
+                probe_ollama,
+                str(local.get("base_url", "http://127.0.0.1:11434/v1")),
+                str(local.get("model") or ""),
+            ),
+            asyncio.to_thread(
+                probe_remote_provider,
+                str(remote.get("provider") or ""),
+                str(remote.get("base_url") or ""),
+                _get_api_key(str(remote.get("provider") or "")),
+                str(remote.get("model") or ""),
+            ),
+        )
+        checks.extend([local_check, remote_check])
+
+    if scope in {"full", "data"}:
+        store_status = runtime.get_runtime_status().get("event_store", {})
+        checks.append({
+            "id": "memory_store",
+            "label": "长效记忆",
+            "status": "pass" if runtime.event_store is not None else "fail",
+            "message": f"事件库可用，已记录 {store_status.get('events', 0)} 个事件",
+        })
+        memory_index = index_status()
+        checks.append({
+            "id": "memory_index",
+            "label": "记忆索引",
+            "status": "warn" if memory_index.get("error") else "pass",
+            "message": (
+                str(memory_index.get("error"))
+                if memory_index.get("error")
+                else f"事实 {memory_index.get('facts', 0)}，经验 {memory_index.get('experiences', 0)}"
+            ),
+        })
+        checks.extend([
+            check_directory("workspace_dir", "项目工作区", paths["workspace_dir"], create=True, writable=True),
+            check_directory("output_dir", "导入与输出", paths["output_dir"], create=True, writable=True),
+            check_directory("backup_dir", "备份目录", paths["backup_dir"], create=True, writable=True),
+        ])
+
+    return build_report(checks, scope)
 
 @app.post("/api/perception/ingest")
 async def api_perception_ingest(data: dict = Body(...)):
@@ -260,7 +513,7 @@ async def api_perception_yolo_detect(data: dict = Body(...)):
     try:
         resolved = _resolve_workspace_path(image_path)
         image = _load_perception_image(resolved)
-        source = str(data.get("source") or resolved.relative_to(ROOT_RESOLVED))
+        source = str(data.get("source") or _workspace_display_path(resolved))
         event = adapter.detect(
             image=image,
             perception=service,
@@ -285,7 +538,7 @@ async def api_perception_image_analyze(data: dict = Body(...)):
     try:
         resolved = _resolve_workspace_path(image_path)
         image = _load_perception_image(resolved)
-        source = str(data.get("source") or resolved.relative_to(ROOT_RESOLVED))
+        source = str(data.get("source") or _workspace_display_path(resolved))
         adapters = data.get("adapters") or ["ocr", "yolo"]
         if not isinstance(adapters, list):
             return {"ok": False, "error": "adapters must be a list"}
@@ -329,7 +582,7 @@ async def api_perception_video_analyze(data: dict = Body(...)):
         )
         result = analyzer.analyze_frames(
             _iter_video_frames(resolved, sample_seconds=float(data.get("sample_seconds", 1.0))),
-            source=str(data.get("source") or resolved.relative_to(ROOT_RESOLVED)),
+            source=str(data.get("source") or _workspace_display_path(resolved)),
             adapters=[str(name) for name in adapters],
             adapter_options={
                 "ocr": {"min_confidence": float(data.get("ocr_min_confidence", 0.3))},
@@ -351,7 +604,14 @@ async def api_perception_screen_analyze(data: dict = Body(...)):
     if not callable(analyze_image):
         return {"ok": False, "error": "perception screen pipeline unavailable"}
     try:
-        image = _capture_perception_screenshot(data.get("area"))
+        if data.get("image_bgra_base64"):
+            image = _decode_perception_bgra(
+                str(data["image_bgra_base64"]),
+                int(data.get("width", 0)),
+                int(data.get("height", 0)),
+            )
+        else:
+            image = _capture_perception_screenshot(data.get("area"))
         source = str(data.get("source") or "screen")
         adapters = data.get("adapters") or ["ocr", "yolo"]
         if not isinstance(adapters, list):
@@ -620,7 +880,9 @@ async def api_mem_rename(sid:str,data:dict):
             for c in idx.get("conversations",[]):
                 if c["id"]==sid: c["name"]=name;break
             ip.write_text(_json.dumps(idx,ensure_ascii=False,indent=2),encoding="utf-8")
-        except:pass
+        except Exception as e:
+            logger.warning(f"会话重命名失败: {e}")
+            return {"ok": False, "error": str(e)[:200]}
     return {"ok":True,"name":name}
 
 @app.delete("/api/memory/conversations/{sid}")
@@ -735,6 +997,53 @@ async def api_set_model(d: dict):
     except Exception as e:
         return {"applied": False, "error": str(e)[:100]}
 
+@app.get("/api/config/models")
+async def api_get_model_connections():
+    return get_model_connection_settings()
+
+@app.post("/api/config/models")
+async def api_set_model_connections(d: dict = Body(...)):
+    result = set_model_connection_settings(d)
+    if result.get("applied"):
+        llm.reload()
+    return result
+
+@app.post("/api/config/models/local")
+async def api_get_local_models(d: dict = Body(default={})):
+    from utils.system_diagnostics import get_ollama_models
+
+    settings = get_model_connection_settings()
+    base_url = str(
+        d.get("base_url")
+        or settings.get("local", {}).get("base_url")
+        or "http://127.0.0.1:11434/v1"
+    )
+    try:
+        models = await asyncio.to_thread(get_ollama_models, base_url)
+        return {
+            "connected": True,
+            "models": models,
+            "message": f"Ollama 在线，发现 {len(models)} 个模型",
+        }
+    except Exception as error:
+        return {
+            "connected": False,
+            "models": [],
+            "message": f"Ollama 无法连接：{str(error)[:120]}",
+        }
+
+@app.get("/api/config/paths")
+async def api_get_paths():
+    return {"applied": True, "paths": get_path_settings()}
+
+@app.post("/api/config/paths")
+async def api_set_paths(d: dict = Body(...)):
+    values = d.get("paths", d)
+    try:
+        return set_path_settings(values)
+    except Exception as e:
+        return {"applied": False, "error": str(e)[:200]}
+
 @app.get("/api/config/effort")
 async def api_get_effort():
     level = get_effort()
@@ -788,13 +1097,26 @@ app.mount("/static",StaticFiles(directory=str(ROOT/"web")),name="static")
 
 ROOT_RESOLVED = ROOT.resolve()
 
-def _resolve_workspace_path(path: str | Path) -> Path:
-    candidate = (ROOT / Path(path)).resolve()
+def _configured_workspace_root() -> Path:
+    return Path(get_path_settings()["workspace_dir"]).resolve()
+
+def _workspace_display_path(path: Path) -> str:
+    resolved = path.resolve()
     try:
-        candidate.relative_to(ROOT_RESOLVED)
-    except ValueError as exc:
-        raise ValueError("路径不能超出 Javis 项目根目录") from exc
-    return candidate
+        return str(resolved.relative_to(ROOT_RESOLVED))
+    except ValueError:
+        return str(resolved)
+
+def _resolve_workspace_path(path: str | Path) -> Path:
+    supplied = Path(path)
+    candidate = supplied.resolve() if supplied.is_absolute() else (ROOT / supplied).resolve()
+    for allowed_root in (ROOT_RESOLVED, _configured_workspace_root()):
+        try:
+            candidate.relative_to(allowed_root)
+            return candidate
+        except ValueError:
+            continue
+    raise ValueError("路径不在 Javis 或已授权工作区内")
 
 def _load_perception_image(path: str | Path):
     resolved = Path(path)
@@ -833,6 +1155,19 @@ def _decode_perception_image_base64(image_base64: str):
     if image is None:
         raise ValueError("无法解码截图图像")
     return image
+
+def _decode_perception_bgra(image_base64: str, width: int, height: int):
+    import base64
+    import numpy as np
+
+    if width <= 0 or height <= 0 or width * height > 33_177_600:
+        raise ValueError("屏幕图像尺寸无效")
+    raw = base64.b64decode(image_base64, validate=True)
+    expected = width * height * 4
+    if len(raw) != expected:
+        raise ValueError(f"屏幕像素长度无效: {len(raw)} != {expected}")
+    bgra = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 4))
+    return bgra[:, :, :3].copy()
 
 def _iter_video_frames(path: str | Path, sample_seconds: float = 1.0):
     cv2 = __import__("cv2")
@@ -880,6 +1215,24 @@ async def api_terminal_exec(data: dict = Body(...)):
 async def api_control_commands(limit: int = 50):
     return {"ok": True, "tasks": command_task_runner.recent_tasks(limit)}
 
+@app.post("/api/control/commands/start")
+async def api_control_command_start(data: dict = Body(...)):
+    return command_task_runner.start_command(
+        command=str(data.get("command", "")).strip(),
+        shell=data.get("shell", "cmd"),
+        timeout=data.get("timeout", 15),
+        cwd=data.get("cwd") or data.get("path") or ROOT,
+        root_token=data.get("root_token") or data.get("token") or "",
+    )
+
+@app.get("/api/control/commands/{task_id}")
+async def api_control_command_get(task_id: str):
+    return command_task_runner.get_task(task_id)
+
+@app.post("/api/control/commands/{task_id}/cancel")
+async def api_control_command_cancel(task_id: str):
+    return command_task_runner.cancel_task(task_id)
+
 @app.post("/api/control/rollback/restore")
 async def api_control_rollback_restore(data: dict = Body(...)):
     rollback_id = str(data.get("rollback_id", "") or data.get("id", "")).strip()
@@ -916,7 +1269,7 @@ async def api_workspace_explore(path: str = "."):
                 is_dir = f.is_dir()
                 st = f.stat()
                 entries.append({
-                    "name": f.name, "path": str(f.relative_to(ROOT)) if ROOT in f.parents else str(f),
+                    "name": f.name, "path": _workspace_display_path(f),
                     "is_dir": is_dir, "size": st.st_size if not is_dir else 0,
                     "modified": st.st_mtime,
                 })
@@ -942,9 +1295,9 @@ async def api_workspace_read(path: str = ""):
         ext = fp.suffix.lower()
         binary_exts = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.exe', '.dll', '.zip', '.7z', '.pdf'}
         if ext in binary_exts:
-            return {"ok": True, "binary": True, "name": fp.name, "size": fp.stat().st_size}
+            return {"ok": True, "binary": True, "name": fp.name, "size": fp.stat().st_size, "modified": fp.stat().st_mtime}
         content = fp.read_text(encoding="utf-8", errors="replace")
-        return {"ok": True, "content": content[:50000], "name": fp.name, "size": len(content)}
+        return {"ok": True, "content": content[:50000], "name": fp.name, "size": len(content), "modified": fp.stat().st_mtime}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -956,11 +1309,25 @@ async def api_workspace_save(data: dict = Body(...)):
     if not path: return {"ok": False, "error": "路径为空"}
     try:
         fp = _resolve_workspace_path(path)
+        expected_modified = data.get("expected_modified")
+        if expected_modified is not None and fp.exists():
+            actual_modified = fp.stat().st_mtime
+            if abs(float(expected_modified) - actual_modified) > 0.000001:
+                return {
+                    "ok": False,
+                    "conflict": True,
+                    "error": "文件已在外部修改，请重新加载后再保存",
+                    "modified": actual_modified,
+                }
         from core.workspace_manager import sandbox_check_path
         sandbox_check_path(fp)
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content, encoding="utf-8")
-        return {"ok": True, "path": str(fp.relative_to(ROOT)), "size": len(content)}
+        try:
+            result_path = _workspace_display_path(fp)
+        except ValueError:
+            result_path = str(fp)
+        return {"ok": True, "path": result_path, "size": len(content), "modified": fp.stat().st_mtime}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -972,7 +1339,7 @@ async def api_workspace_project(data: dict = Body(...)):
     project_type = data.get("type", "empty")
     source_path = data.get("source_path", "")
 
-    projects_dir = ROOT / "workspace" / "projects"
+    projects_dir = Path(get_path_settings()["workspace_dir"]).resolve() / "projects"
 
     if action == "list":
         projects_dir.mkdir(parents=True, exist_ok=True)
@@ -981,7 +1348,7 @@ async def api_workspace_project(data: dict = Body(...)):
             if p.is_dir():
                 files = list(p.rglob("*"))[:20]
                 projects.append({
-                    "name": p.name, "path": str(p.relative_to(ROOT)),
+                    "name": p.name, "path": _workspace_display_path(p),
                     "file_count": len(files),
                     "created": p.stat().st_ctime,
                 })
@@ -997,14 +1364,14 @@ async def api_workspace_project(data: dict = Body(...)):
         if not source_path: return {"ok": False, "error": "请选择源文件夹"}
         src = Path(source_path)
         if not src.exists(): return {"ok": False, "error": f"源文件夹不存在: {source_path}"}
-        dst = _resolve_workspace_path(Path("workspace") / "projects" / name)
+        dst = (projects_dir / name).resolve()
         if dst.exists(): return {"ok": False, "error": "项目名已存在"}
         import shutil
         shutil.copytree(src, dst, dirs_exist_ok=True)
-        return {"ok": True, "path": str(dst.relative_to(ROOT)), "type": "from_folder"}
+        return {"ok": True, "path": _workspace_display_path(dst), "type": "from_folder"}
 
     if action == "create":
-        dst = _resolve_workspace_path(Path("workspace") / "projects" / name)
+        dst = (projects_dir / name).resolve()
         if dst.exists(): return {"ok": False, "error": "项目名已存在"}
         dst.mkdir(parents=True)
         if project_type == "python":
@@ -1014,7 +1381,7 @@ async def api_workspace_project(data: dict = Body(...)):
         elif project_type == "node":
             (dst / "index.js").write_text(f'// {name}\nconsole.log("Hello from {name}");\n', encoding="utf-8")
         (dst / ".gitkeep").write_text("")
-        return {"ok": True, "path": str(dst.relative_to(ROOT)), "type": project_type}
+        return {"ok": True, "path": _workspace_display_path(dst), "type": project_type}
 
     return {"ok": False, "error": f"未知操作: {action}"}
 
@@ -1060,7 +1427,7 @@ if __name__=="__main__":
             cfg=yaml.safe_load(f)
     except yaml.YAMLError as e:logger.warning(f"config.yaml 解析异常: {e}");cfg={}
     except FileNotFoundError:cfg={};logger.info("使用默认配置")
-    sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(sc.get("port", os.environ.get("PORT", 8087)))
+    sc=cfg.get("server",{});h=sc.get("host","127.0.0.1");p=int(os.environ.get("PORT", sc.get("port", 8087)))
     print(f"JARVIS http://{h}:{p}  {llm.model}  {registry.count}工具")
     try:__import__('asyncio').run(__import__('voice.tts',fromlist=['']).preload_phrases())
     except ImportError:logger.debug("TTS 模块未安装，跳过语音预加载")
