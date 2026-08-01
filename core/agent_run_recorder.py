@@ -33,6 +33,10 @@ class AgentRunRecorder:
         self._pending_approval_id: str | None = None
         self._finalized = False
 
+    @property
+    def pending_approval_id(self) -> str | None:
+        return self._pending_approval_id
+
     def record(self, message: dict[str, Any]) -> dict[str, Any]:
         if self._finalized:
             return message
