@@ -460,7 +460,6 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         skill_catalog=skill_catalog,
         agent_runs=agent_runs,
     )
-    runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     runtime.register_always_on_tools()
     _discover_external_skill_imports(runtime)
 
@@ -472,6 +471,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         runtime.discover_skills()
         runtime.load_skill("全功能")
 
+    runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     return runtime
 
 
