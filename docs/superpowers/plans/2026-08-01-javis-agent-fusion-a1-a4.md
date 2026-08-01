@@ -104,11 +104,11 @@
 - `core/agent_runs.py`
 - `tests/test_agent_runs.py`
 
-- [ ] Test run/task/step creation, ordered deltas, checkpoints, approvals, cancellation, resume, and reopen persistence.
-- [ ] Test invalid state transitions and unresolved approval behavior fail closed.
-- [ ] Confirm RED, then implement a transactional SQLite store with schema versioning and stable IDs/order.
-- [ ] Publish correlated typed events for each lifecycle transition.
-- [ ] Confirm focused GREEN, including concurrent append ordering.
+- [x] Test run/task/step creation, ordered deltas, checkpoints, approvals, cancellation, resume, and reopen persistence.
+- [x] Test invalid state transitions and unresolved approval behavior fail closed.
+- [x] Confirm RED, then implement a transactional SQLite store with schema versioning and stable IDs/order.
+- [x] Publish correlated typed events for each lifecycle transition.
+- [x] Confirm focused GREEN, including concurrent append ordering (`22 passed` across A1-A3 ownership and persistence tests).
 
 ## Task 6: Integrate Runtime, Agent, and APIs
 

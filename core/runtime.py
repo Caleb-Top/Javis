@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.agent_runs import AgentRunStore
 from core.agent import Agent
 from core.engine import InferenceEngine
 from core.events import EventBus
@@ -46,6 +47,7 @@ class JarvisRuntime:
     middleware: MiddlewarePipeline
     tool_catalog: ToolCatalog
     skill_catalog: SkillCatalog
+    agent_runs: AgentRunStore
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -166,7 +168,7 @@ class JarvisRuntime:
                 except Exception as exc:
                     logger.debug("Subsystem stop skipped: %s", exc)
         closed: set[int] = set()
-        for resource in (self.event_store, self.skill_catalog):
+        for resource in (self.event_store, self.agent_runs, self.skill_catalog):
             if resource is None or id(resource) in closed:
                 continue
             close = getattr(resource, "close", None)
@@ -346,6 +348,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
     )
     tool_catalog = ToolCatalog(registry)
     skill_catalog = SkillCatalog(root / "data" / "skills" / "catalog.sqlite3", event_bus=event_bus)
+    agent_runs = AgentRunStore(root / "data" / "agent_runs" / "runs.sqlite3", event_bus=event_bus)
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
     agent = Agent(llm, registry, brain=brain, learner=learner, engine=engine)
@@ -364,6 +367,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         middleware=middleware,
         tool_catalog=tool_catalog,
         skill_catalog=skill_catalog,
+        agent_runs=agent_runs,
     )
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     runtime.register_always_on_tools()
