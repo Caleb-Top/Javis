@@ -654,7 +654,80 @@ git commit -m "feat: add voice barge-in and fallback status"
 
 ---
 
-### Task 8: Cross-Surface Integration and Global Verification
+### Task 8: Native Continuous Audio, Noise Suppression, and Streaming STT
+
+**Files:**
+- Create: `app/src-tauri/src/audio/` native frame engine modules
+- Modify: `app/src-tauri/src/main.rs`
+- Modify: `app/src-tauri/Cargo.toml`
+- Create: `voice/streaming_pipeline.py`
+- Modify: `voice/stt.py`
+- Modify: `app/src/live/VoiceCapture.ts`
+- Modify: `app/src/main.ts`
+- Create: `tests/test_streaming_voice_pipeline.py`
+- Create: `app/tests/continuousVoiceCapture.test.ts`
+
+**Interfaces:**
+- Native commands: `audio_stream_start`, `audio_stream_stop`,
+  `audio_stream_status`, and `audio_playback_stop`.
+- Native events: `javis://audio-level`, `javis://speech-start`,
+  `javis://transcript-partial`, `javis://transcript-final`, and
+  `javis://audio-error`.
+- Python `StreamingVoicePipeline.push_frame(frame) -> VoicePipelineEvents`.
+
+- [ ] **Step 1: Write failing frame, endpoint, and interruption tests**
+
+Cover bounded ring-buffer behavior, speech pre-roll, VAD hysteresis, partial
+replacement, final transcript order, continuous second turns, queue overload,
+and a speech-start event stopping TTS before request cancellation.
+
+- [ ] **Step 2: Add deterministic noisy-speech fixtures**
+
+Generate or keep small licensed fixtures for clean speech, fan-like stationary
+noise, keyboard impulses, and TTS echo. Assert intelligible speech is preserved,
+silence does not create final transcripts, and stronger suppression is opt-in.
+
+- [ ] **Step 3: Implement native WASAPI frame capture**
+
+Capture 48 kHz mono PCM as 10/20 ms frames. Keep capture and playback references
+native and process-wide so the microphone remains open across turns. The App must
+not call browser media APIs in production Tauri mode.
+
+- [ ] **Step 4: Integrate AEC, NS, AGC, and optional RNNoise**
+
+Use WebRTC APM for echo cancellation, noise suppression, and gain control. Feed
+TTS playback frames into the reverse stream. Add RNNoise as a selectable measured
+enhancer, with standard/strong profiles and reduced-mode diagnostics when an
+optional component is unavailable.
+
+- [ ] **Step 5: Implement rolling VAD and streaming transcription**
+
+Run Silero VAD on 16 kHz rolling frames. Emit partial hypotheses every 250-500 ms
+from bounded overlapping windows and finalize after 350-600 ms endpoint silence.
+Only finalized segments become conversation messages; partials update Live status.
+
+- [ ] **Step 6: Wire continuous conversation and native barge-in**
+
+Keep capture active while Javis thinks and speaks. New speech onset stops native
+TTS, cancels the current request through the shared `ConversationHub`, and submits
+the finalized replacement segment in the same session.
+
+- [ ] **Step 7: Verify latency, noise, and privacy behavior**
+
+Record first-partial, endpoint, barge-in, queue, overrun, and real-time-factor
+metrics. Confirm raw audio is not persisted by default. Separate automated fixture
+results from a real Windows microphone, speaker, and noisy-room hardware test.
+
+- [ ] **Step 8: Commit the native continuous voice path**
+
+```powershell
+git add app/src-tauri app/src/live/VoiceCapture.ts app/src/main.ts voice tests/test_streaming_voice_pipeline.py app/tests/continuousVoiceCapture.test.ts
+git commit -m "feat: add native continuous voice pipeline"
+```
+
+---
+
+### Task 9: Cross-Surface Integration and Global Verification
 
 **Files:**
 - Create: `scripts/verify_unified_conversation.py`
@@ -727,14 +800,14 @@ git commit -m "test: verify unified interruptible conversations"
 
 ---
 
-### Task 9: Merge, Reverify, and Build v3 Release
+### Task 10: Merge, Reverify, and Build v3 Release
 
 **Files:**
 - Modify only generated release manifests under the existing release pipeline.
 - Do not modify blueprint, memory, model, training, or Live visual source files.
 
 **Interfaces:**
-- Consumes all verified commits from Tasks 1-8.
+- Consumes all verified commits from Tasks 1-9.
 - Produces merged `G:\Javis`, NSIS installer, standalone ZIP, checksum manifest,
   and installed-app test report.
 
@@ -797,6 +870,7 @@ user-dependent.
 - Task 5 native session changes can revert without deleting backend history.
 - Task 6 Code timeline is one controller and one stylesheet section.
 - Task 7 voice barge-in is isolated behind one callback.
+- Task 8 native audio is isolated behind a frame-source and processing interface.
 - Every task ends in a focused commit before the merge commit.
 
 ## Definition of Done

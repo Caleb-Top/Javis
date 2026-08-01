@@ -196,6 +196,52 @@ stops TTS immediately, captures the new utterance, cancels the old request, and
 submits the transcript as the next turn in the same conversation. Pet consumes
 the same state and uses the same short text.
 
+### 8.1 Native Continuous Audio Pipeline
+
+The installed App uses a native Windows audio path. Browser `getUserMedia`,
+`MediaRecorder`, and permission prompts are preview-only fallbacks and must not be
+used for the production Live microphone path.
+
+The pipeline is always frame-oriented rather than record-then-upload:
+
+1. WASAPI captures 48 kHz, 16-bit, mono PCM in 10 or 20 ms frames with a bounded
+   ring buffer and 250 ms speech pre-roll.
+2. WebRTC Audio Processing Module applies acoustic echo cancellation, noise
+   suppression, and automatic gain control. The TTS playback stream is supplied
+   as the reverse-stream reference required by echo cancellation.
+3. Optional RNNoise enhancement runs as a measured profile, not blindly on top
+   of maximum WebRTC suppression. `standard` and `strong` modes are exposed so
+   double suppression cannot silently destroy speech consonants.
+4. Audio is resampled to 16 kHz for streaming VAD and STT. Silero VAD receives
+   rolling frames with hysteresis; a cheap energy gate may skip obvious silence
+   but cannot decide speech endpoints by itself.
+5. Streaming STT emits partial text every 250-500 ms from overlapping bounded
+   windows and a final segment after 350-600 ms of endpoint silence. Partial text
+   is UI state only; finalized segments enter the authoritative conversation.
+6. The conversation remains open after each final segment. A new speech onset
+   while Javis is speaking immediately ducks and stops TTS, cancels the active
+   request through `ConversationHub`, and continues capture without reopening the
+   microphone.
+
+The capture, enhancement, VAD, STT, TTS, and conversation stages communicate
+through bounded queues. Slow inference may replace stale partial hypotheses but
+must not block capture or discard final speech. No raw microphone audio is stored
+unless the user explicitly enables diagnostic recording.
+
+Required telemetry includes capture overruns, first-partial latency, endpoint
+latency, STT real-time factor, VAD false cuts, barge-in latency, input/output
+levels, and estimated before/after noise energy. Diagnostics report component
+availability separately from a real spoken hardware pass.
+
+### 8.2 Audio Portability and Fallbacks
+
+The native audio engine exposes a narrow frame-source interface so Windows WASAPI
+can later be replaced by Core Audio or PipeWire without changing the conversation
+protocol. If optional neural suppression or Silero is unavailable, the App falls
+back to WebRTC processing and conservative energy/VAD logic while visibly marking
+the reduced mode. It must never fall back to a full browser page or pretend that
+an untested microphone path passed.
+
 ## 9. Tool Failure and Fallback
 
 A failed integration is an execution event, not the end of the conversation. For
@@ -250,6 +296,10 @@ Automated verification must cover:
 - cancellation before LLM response, during streaming, before a tool, during a
   cancellable tool, and at a non-cancellable safe boundary;
 - new voice input interrupting TTS and continuing the same conversation;
+- continuous native capture without stop/reopen between conversational turns;
+- noisy speech fixtures for standard and strong suppression profiles;
+- partial transcript replacement, endpoint finalization, and bounded queue load;
+- AEC reverse-stream ordering and measured TTS barge-in latency;
 - event ordering, replay, deduplication, and reconnect;
 - durable completed, failed, and cancelled run graphs;
 - assistant responses persisted in continuous history;
@@ -285,3 +335,12 @@ The design adapts useful patterns identified in the comparative agent analysis:
 
 Only architecture patterns are reused where licenses or source provenance do not
 permit direct copying. The current imported MIT skill set remains candidate-only.
+
+Audio implementation is based on primary upstream documentation and code:
+
+- WebRTC Audio Processing Module: https://webrtc.googlesource.com/src/+/HEAD/modules/audio_processing/g3doc/audio_processing_module.md
+- RNNoise: https://github.com/xiph/rnnoise
+- Microsoft low-latency audio: https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/low-latency-audio
+- Microsoft audio processing modes: https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/audio-signal-processing-modes
+- Silero VAD: https://github.com/snakers4/silero-vad
+- faster-whisper: https://github.com/SYSTRAN/faster-whisper
