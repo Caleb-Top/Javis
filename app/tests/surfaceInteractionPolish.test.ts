@@ -54,7 +54,7 @@ test("Code renders immediately while native window geometry settles in the backg
   const handler = mainSource.match(/const showCodeSurface[\s\S]*?\n\};/)?.[0] || "";
 
   assert.match(handler, /const transition = setDesktopMode\("code"\);/);
-  assert.match(handler, /openCodeSurface\(\);/);
+  assert.match(handler, /openCodeSurface\(conversationId\);/);
   assert.match(handler, /void transition;/);
   assert.doesNotMatch(handler, /\.then\(\(\) => openCodeSurface\(\)\)/);
 });

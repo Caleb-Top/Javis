@@ -6,9 +6,15 @@ import { installAppErrorBoundary } from "./app/AppErrorBoundary";
 import { createFirstRunPanel } from "./app/FirstRunPanel";
 import { getStartupDesktopMode } from "./app/startupMode.ts";
 import { AppLogger } from "./app/AppLogger";
+import { readStringPreference, writeStringPreference } from "./app/AppPreferences.ts";
 import { createBackendClient, type ConnectionSnapshot } from "./bridge/backendClient";
 import { createSidecarClient, isTauriRuntime, type SidecarSnapshot } from "./bridge/sidecarClient";
 import { openCodeSurface, closeCodeSurface, mountCodeSurface } from "./code/CodeSurface";
+import {
+  ConversationEventReducer,
+  isConversationEvent,
+} from "./conversation/ConversationEventReducer.ts";
+import { getOrCreateConversationId } from "./conversation/conversationSession.ts";
 import { activateLiveOrb } from "./live/LiveOrb";
 import { createCommandComposer } from "./live/CommandComposer";
 import { createLiveCaption } from "./live/LiveCaption";
@@ -85,6 +91,16 @@ const petModeButton = document.querySelector<HTMLButtonElement>(".pet-mode-contr
 const drawerManager = createDrawerManager(document.querySelector<HTMLElement>("#drawer-root")!);
 const statusRail = createStatusRail(document.querySelector<HTMLElement>(".status-rail")!);
 const liveCaption = createLiveCaption(caption, () => document.dispatchEvent(new CustomEvent("javis:open-conversations")));
+const conversationId = getOrCreateConversationId(localStorage);
+const conversationCursorKey = `conversation.${conversationId}.cursor`;
+const storedConversationCursor = Number.parseInt(
+  readStringPreference(conversationCursorKey, "0"),
+  10,
+);
+const conversationEvents = new ConversationEventReducer(
+  conversationId,
+  Number.isFinite(storedConversationCursor) ? storedConversationCursor : 0,
+);
 const liveSurfaceStatus = createSurfaceStatus(
   document.querySelector<HTMLElement>(".live-surface-status")!,
 );
@@ -113,12 +129,31 @@ function mergeConnectionDetails(): void {
 }
 
 const client = createBackendClient({
+  sessionId: conversationId,
+  afterSequence: () => conversationEvents.current().lastSequence,
   onConnection: (snapshot) => {
     backendConnection = snapshot;
     mergeConnectionDetails();
   },
   onEvent: (event) => {
-    if (event.type === "text_delta") liveCaption.append(String(event.text || ""), String(event.request_id || ""));
+    if (isConversationEvent(event)) {
+      const previous = conversationEvents.current();
+      const snapshot = conversationEvents.accept(event);
+      if (snapshot.lastSequence !== previous.lastSequence) {
+        writeStringPreference(conversationCursorKey, String(snapshot.lastSequence));
+      }
+      if (event.type === "request.accepted" && snapshot.activeRequestId === event.request_id) {
+        liveCaption.begin(event.request_id, "正在理解");
+      } else if (
+        event.type === "response.delta"
+        && previous.activeRequestId === event.request_id
+        && snapshot.response !== previous.response
+      ) {
+        liveCaption.setText(snapshot.response, event.request_id);
+      } else if (event.type === "request.cancelled" && previous.activeRequestId === event.request_id) {
+        liveCaption.setText("已中断", event.request_id);
+      }
+    }
     if (event.type === "app_action") {
       document.dispatchEvent(new CustomEvent("javis:surface-command", {
         detail: event.action,
@@ -143,7 +178,7 @@ const firstRun = createFirstRunPanel({
 });
 const showCodeSurface = (): void => {
   const transition = setDesktopMode("code");
-  openCodeSurface();
+  openCodeSurface(conversationId);
   void transition;
 };
 const showSettingsSurface = (): void => {
@@ -234,7 +269,7 @@ const voiceCapture = createVoiceCapture(client, {
 diagnostics = createDiagnosticsPanel(client, sidecar, voiceCapture, {
   onClose: () => {
     if (diagnosticsReturnMode === "code") {
-      void setDesktopMode("code").then(() => openCodeSurface());
+      void setDesktopMode("code").then(() => openCodeSurface(conversationId));
       return;
     }
     if (diagnosticsReturnMode !== "settings") {
@@ -255,7 +290,7 @@ settingsSurface = createSettingsSurface({
   root: document.querySelector<HTMLElement>("#settings-root")!,
   onClose: (mode) => {
     if (mode === "code") {
-      void setDesktopMode("code").then(() => openCodeSurface());
+      void setDesktopMode("code").then(() => openCodeSurface(conversationId));
       return;
     }
     closeCodeSurface();
