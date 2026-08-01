@@ -33,6 +33,19 @@ EVALUATION_STATES = {"untested", "passed", "failed"}
 SKILL_STATES = {"candidate", "staged", "active", "disabled", "rejected"}
 
 
+def provenance_sha256(path: str | Path) -> str:
+    """Hash imported source files without platform-specific text newlines."""
+    data = Path(path).read_bytes()
+    if b"\x00" not in data:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+        else:
+            data = text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
 class SkillGovernanceError(ValueError):
     """Raised when a skill cannot pass a governance transition."""
 
@@ -162,7 +175,7 @@ class SkillCatalog:
                 raise SkillGovernanceError(f"provenance file is missing: {raw_path}")
             if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
                 raise SkillGovernanceError(f"invalid provenance hash: {raw_path}")
-            actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            actual_hash = provenance_sha256(resolved)
             if actual_hash != expected_hash:
                 raise SkillGovernanceError(f"provenance hash mismatch: {raw_path}")
             listed_paths.append(relative.as_posix())

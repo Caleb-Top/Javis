@@ -1,4 +1,3 @@
-import hashlib
 import json
 import shutil
 import tempfile
@@ -6,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from core.runtime import create_runtime
-from core.skill_catalog import SkillCatalog, SkillGovernanceError
+from core.skill_catalog import SkillCatalog, SkillGovernanceError, provenance_sha256
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -16,11 +15,17 @@ EXPECTED_ARCHIVE_SHA256 = (
 )
 
 
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 class ExternalAgentSkillsTests(unittest.TestCase):
+    def test_provenance_hash_is_stable_across_windows_newlines(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            lf = root / "lf.md"
+            crlf = root / "crlf.md"
+            lf.write_bytes(b"alpha\nbeta\n")
+            crlf.write_bytes(b"alpha\r\nbeta\r\n")
+
+            self.assertEqual(provenance_sha256(lf), provenance_sha256(crlf))
+
     def test_provenance_manifest_covers_every_imported_source_file(self):
         manifest = json.loads((IMPORT_ROOT / "PROVENANCE.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema_version"], 1)
@@ -42,7 +47,10 @@ class ExternalAgentSkillsTests(unittest.TestCase):
         self.assertEqual(listed_paths, actual_paths)
         self.assertEqual(len(actual_paths), 29)
         for entry in manifest["files"]:
-            self.assertEqual(sha256(IMPORT_ROOT / entry["path"]), entry["sha256"])
+            self.assertEqual(
+                provenance_sha256(IMPORT_ROOT / entry["path"]),
+                entry["sha256"],
+            )
 
     def test_import_has_mit_notice_and_24_unique_governed_candidates(self):
         license_text = (IMPORT_ROOT / "LICENSE").read_text(encoding="utf-8")
