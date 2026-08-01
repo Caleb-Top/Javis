@@ -2,7 +2,8 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis/app/src")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT / "app" / "src"
 
 
 class AppPhase2Tests(unittest.TestCase):
@@ -70,8 +71,8 @@ class AppPhase2Tests(unittest.TestCase):
         self.assertIn('.live-stage:has(.status-rail[data-expanded="true"]) .orb-wrap', css)
 
     def test_tauri_window_enforces_orb_and_code_minimum_sizes(self):
-        config = Path("D:/Javis/app/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
-        mode = Path("D:/Javis/app/src/desktop/windowMode.ts").read_text(encoding="utf-8")
+        config = (PROJECT_ROOT / "app" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
+        mode = (PROJECT_ROOT / "app" / "src" / "desktop" / "windowMode.ts").read_text(encoding="utf-8")
 
         self.assertIn('"minWidth": 132', config)
         self.assertIn('"minHeight": 158', config)

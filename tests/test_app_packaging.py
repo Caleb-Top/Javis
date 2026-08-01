@@ -4,11 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class AppPackagingTests(unittest.TestCase):
     def test_app_environment_probe_reports_no_app_when_missing(self):
         from scripts.app_env_probe import probe_app_environment
 
-        result = probe_app_environment(Path("D:/Javis/_missing_app_probe_root"))
+        result = probe_app_environment(ROOT / "_missing_app_probe_root")
 
         self.assertFalse(result["app_dir_exists"])
         self.assertIn("node", result)
@@ -18,7 +21,7 @@ class AppPackagingTests(unittest.TestCase):
     def test_package_manifest_excludes_large_runtime_dirs(self):
         from scripts.app_package_manifest import build_app_package_manifest
 
-        result = build_app_package_manifest(Path("D:/Javis"))
+        result = build_app_package_manifest(ROOT)
 
         self.assertIn("core", result["include"])
         self.assertIn("blueprint", result["include"])
@@ -30,7 +33,7 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("data", result["external"])
 
     def test_app_scaffold_has_live_entry_files(self):
-        root = Path("D:/Javis/app")
+        root = ROOT / "app"
 
         self.assertTrue((root / "package.json").exists())
         self.assertTrue((root / "index.html").exists())
@@ -38,8 +41,8 @@ class AppPackagingTests(unittest.TestCase):
         self.assertTrue((root / "src/styles.css").exists())
 
     def test_app_entry_is_live_orb_not_code_first(self):
-        main = Path("D:/Javis/app/src/main.ts").read_text(encoding="utf-8")
-        stage = Path("D:/Javis/app/src/live/LiveStage.ts").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "src" / "main.ts").read_text(encoding="utf-8")
+        stage = (ROOT / "app" / "src" / "live" / "LiveStage.ts").read_text(encoding="utf-8")
 
         self.assertIn("renderLiveStage", main)
         self.assertIn('data-surface", "live', main)
@@ -49,15 +52,15 @@ class AppPackagingTests(unittest.TestCase):
         self.assertNotIn("Code Surface", main)
 
     def test_live_state_file_defines_required_states(self):
-        text = Path("D:/Javis/app/src/live/liveState.ts").read_text(encoding="utf-8")
+        text = (ROOT / "app" / "src" / "live" / "liveState.ts").read_text(encoding="utf-8")
 
         for state in ["idle", "listening", "thinking", "speaking", "executing", "blocked", "error", "offline"]:
             self.assertIn(state, text)
         self.assertIn("setLiveState", text)
 
     def test_backend_client_connects_to_existing_ws(self):
-        text = Path("D:/Javis/app/src/bridge/backendClient.ts").read_text(encoding="utf-8")
-        endpoints = Path("D:/Javis/app/src/bridge/backendEndpoints.ts").read_text(encoding="utf-8")
+        text = (ROOT / "app" / "src" / "bridge" / "backendClient.ts").read_text(encoding="utf-8")
+        endpoints = (ROOT / "app" / "src" / "bridge" / "backendEndpoints.ts").read_text(encoding="utf-8")
 
         self.assertIn('DEFAULT_HTTP_ORIGIN = "http://127.0.0.1:8080"', endpoints)
         self.assertIn("VITE_JAVIS_BACKEND_URL", endpoints)
@@ -67,15 +70,15 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("executing", text)
 
     def test_tauri_config_is_app_first_and_not_web_first(self):
-        cfg = json.loads(Path("D:/Javis/app/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+        cfg = json.loads((ROOT / "app" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
 
         self.assertEqual(cfg["productName"], "Javis")
         self.assertEqual(cfg["app"]["windows"][0]["title"], "Javis Live")
         self.assertEqual(cfg["build"]["frontendDist"], "../dist")
 
     def test_live_shell_has_voice_and_code_controls(self):
-        main = Path("D:/Javis/app/src/main.ts").read_text(encoding="utf-8")
-        stage = Path("D:/Javis/app/src/live/LiveStage.ts").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "src" / "main.ts").read_text(encoding="utf-8")
+        stage = (ROOT / "app" / "src" / "live" / "LiveStage.ts").read_text(encoding="utf-8")
 
         self.assertIn("voice-control", stage)
         self.assertIn("code-control", stage)
@@ -83,9 +86,9 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("openCodeSurface", main)
 
     def test_code_surface_is_hidden_by_default_and_summonable(self):
-        code = Path("D:/Javis/app/src/code/CodeSurface.ts").read_text(encoding="utf-8")
-        styles = Path("D:/Javis/app/src/styles.css").read_text(encoding="utf-8")
-        config = json.loads(Path("D:/Javis/app/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+        code = (ROOT / "app" / "src" / "code" / "CodeSurface.ts").read_text(encoding="utf-8")
+        styles = (ROOT / "app" / "src" / "styles.css").read_text(encoding="utf-8")
+        config = json.loads((ROOT / "app" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
 
         self.assertIn("openCodeSurface", code)
         self.assertIn("closeCodeSurface", code)
@@ -95,28 +98,28 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("frame-src http://127.0.0.1:8080", config["app"]["security"]["csp"])
 
     def test_live_and_code_shell_install_window_drag_regions(self):
-        main = Path("D:/Javis/app/src/main.ts").read_text(encoding="utf-8")
-        stage = Path("D:/Javis/app/src/live/LiveStage.ts").read_text(encoding="utf-8")
-        styles = Path("D:/Javis/app/src/styles.css").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "src" / "main.ts").read_text(encoding="utf-8")
+        stage = (ROOT / "app" / "src" / "live" / "LiveStage.ts").read_text(encoding="utf-8")
+        styles = (ROOT / "app" / "src" / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("installWindowDragRegions", main)
         self.assertIn("window-drag-region", stage)
         self.assertIn("data-tauri-drag-region", stage)
-        self.assertIn("data-tauri-drag-region", Path("D:/Javis/app/src/code/CodeSurface.ts").read_text(encoding="utf-8"))
+        self.assertIn("data-tauri-drag-region", (ROOT / "app" / "src" / "code" / "CodeSurface.ts").read_text(encoding="utf-8"))
         self.assertIn("-webkit-app-region: drag", styles)
         self.assertIn("-webkit-app-region: no-drag", styles)
 
     def test_backend_client_checks_http_status(self):
-        text = Path("D:/Javis/app/src/bridge/backendClient.ts").read_text(encoding="utf-8")
+        text = (ROOT / "app" / "src" / "bridge" / "backendClient.ts").read_text(encoding="utf-8")
 
         self.assertIn("/api/status", text)
         self.assertIn("checkBackendHealth", text)
         self.assertIn("offline", text)
 
     def test_live_voice_capture_sends_existing_voice_protocol(self):
-        voice = Path("D:/Javis/app/src/live/VoiceCapture.ts").read_text(encoding="utf-8")
-        backend = Path("D:/Javis/app/src/bridge/backendClient.ts").read_text(encoding="utf-8")
-        main = Path("D:/Javis/app/src/main.ts").read_text(encoding="utf-8")
+        voice = (ROOT / "app" / "src" / "live" / "VoiceCapture.ts").read_text(encoding="utf-8")
+        backend = (ROOT / "app" / "src" / "bridge" / "backendClient.ts").read_text(encoding="utf-8")
+        main = (ROOT / "app" / "src" / "main.ts").read_text(encoding="utf-8")
 
         self.assertIn('"/api/voice/capture/start"', voice)
         self.assertNotIn("MediaRecorder", voice)
@@ -126,7 +129,7 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("createVoiceCapture", main)
 
     def test_static_preview_exists_without_build_dependencies(self):
-        preview = Path("D:/Javis/app/preview.html")
+        preview = ROOT / "app" / "preview.html"
 
         self.assertTrue(preview.exists())
         text = preview.read_text(encoding="utf-8")
@@ -135,11 +138,11 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("无需安装依赖", text)
 
     def test_app_launcher_prefers_live_app_and_preserves_web(self):
-        launcher = Path("D:/Javis/scripts/start_javis_app.py")
+        launcher = ROOT / "scripts" / "start_javis_app.py"
 
         self.assertTrue(launcher.exists())
         text = launcher.read_text(encoding="utf-8")
-        backend = Path("D:/Javis/main.py").read_text(encoding="utf-8")
+        backend = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn("app/preview.html", text)
         self.assertIn('ROOT / "main.py"', text)
         self.assertIn('env["PORT"]', text)

@@ -7,6 +7,23 @@ from utils import config_api
 
 
 class ConfigPathSettingsTests(unittest.TestCase):
+    def test_configured_relative_paths_are_rooted_at_the_config_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            config_path.write_text(
+                "paths:\n"
+                "  workspace_dir: custom-workspace\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                paths = config_api.get_path_settings()
+
+            self.assertEqual(
+                paths["workspace_dir"],
+                str((config_path.parent / "custom-workspace").resolve()),
+            )
+
     def test_path_settings_round_trip_as_absolute_existing_directories(self):
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
