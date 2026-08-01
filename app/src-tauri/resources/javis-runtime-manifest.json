@@ -2,13 +2,13 @@
   "schema_version": 1,
   "product": "Javis",
   "version": "3.0.0",
-  "created_at": "2026-07-29T06:04:37.651550+00:00",
+  "created_at": "2026-08-01T13:15:29.150634+00:00",
   "archive": {
     "name": "javis-runtime.zip",
-    "sha256": "8dd5858f5d3c05bfab6b79b0394d12701b7029f34b4db451b888efd64853dce7",
-    "files": 26737,
-    "uncompressed_bytes": 2063046071,
-    "compressed_bytes": 1019620626
+    "sha256": "16681ea731f853737e68d12d366250922e6c959dc52626f5d51b148814bb8696",
+    "files": 26910,
+    "uncompressed_bytes": 2065097054,
+    "compressed_bytes": 1020254580
   },
   "backend": {
     "complete_source": true,
@@ -42,7 +42,7 @@
   },
   "python": {
     "source": "C:\\Users\\34247\\AppData\\Roaming\\uv\\python\\cpython-3.11.15-windows-x86_64-none",
-    "site_packages": "D:\\Javis\\venv\\Lib\\site-packages",
+    "site_packages": "G:\\Javis\\venv\\Lib\\site-packages",
     "optional_excludes": [
       "torch",
       "torchaudio",
@@ -104,6 +104,10 @@
     "app/voice/stt.py",
     "app/voice/native_capture.py",
     "app/voice/native_capture_worker.py",
+    "app/voice/streaming_pipeline.py",
+    "app/voice/continuous_capture.py",
+    "app/voice/streaming_ws.py",
+    "app/voice/native_playback.py",
     "app/voice/native/javis-wasapi-loopback.exe",
     "app/web/index.html"
   ]

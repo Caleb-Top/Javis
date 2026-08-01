@@ -191,6 +191,18 @@ try {
     Add-Check "Installed App executable" ($null -ne $AppExe) $(if ($AppExe) { $AppExe.FullName } else { "missing" })
 
     if ($AppExe) {
+        $WebView2Loader = Join-Path $AppExe.DirectoryName "WebView2Loader.dll"
+        $WebView2LoaderPresent = Test-Path -LiteralPath $WebView2Loader -PathType Leaf
+        $WebView2LoaderHash = if ($WebView2LoaderPresent) {
+            (Get-FileHash -LiteralPath $WebView2Loader -Algorithm SHA256).Hash
+        } else {
+            ""
+        }
+        Add-Check "Installed WebView2 loader" ($WebView2LoaderPresent -and $WebView2LoaderHash.Length -eq 64) $(if ($WebView2LoaderPresent) { "$WebView2Loader; sha256=$WebView2LoaderHash" } else { "missing beside javis-app.exe" })
+        if (-not $WebView2LoaderPresent) {
+            throw "Installed App is missing WebView2Loader.dll beside javis-app.exe."
+        }
+
         $BaselineAppHash = (Get-FileHash -LiteralPath $AppExe.FullName -Algorithm SHA256).Hash
         Add-Check "Installed App binary baseline" ($BaselineAppHash.Length -eq 64) "installed=$BaselineAppHash"
         $App = Start-Process -FilePath $AppExe.FullName -PassThru

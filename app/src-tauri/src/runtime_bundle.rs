@@ -60,7 +60,7 @@ pub fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&incoming).map_err(|error| error.to_string())?;
 
     let output = Command::new("tar.exe")
-        .args(["-xf"])
+        .args(["-m", "-xf"])
         .arg(&archive)
         .arg("-C")
         .arg(&incoming)
