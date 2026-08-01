@@ -62,11 +62,11 @@
 **Modify:**
 - `core/events.py`
 
-- [ ] Test backward-compatible string subscriptions/history plus typed metadata and monotonic sequence numbers.
-- [ ] Test ordered `before`, reverse `after`, and reverse `on_error` middleware behavior.
-- [ ] Confirm RED, then implement `EventType`, versioned `Event`, correlation/causation metadata, and thread-safe sequence assignment.
-- [ ] Implement `MiddlewareContext`, protocol/base hooks, rejection semantics, and `MiddlewarePipeline`.
-- [ ] Confirm focused GREEN and existing EventBus tests remain green.
+- [x] Test backward-compatible string subscriptions/history plus typed metadata and monotonic sequence numbers.
+- [x] Test ordered `before`, reverse `after`, and reverse `on_error` middleware behavior.
+- [x] Confirm RED, then implement `EventType`, versioned `Event`, correlation/causation metadata, and thread-safe sequence assignment.
+- [x] Implement `MiddlewareContext`, protocol/base hooks, rejection semantics, and `MiddlewarePipeline`.
+- [x] Confirm focused GREEN and existing EventBus tests remain green (`8 passed`; related regression `16 passed`).
 
 ## Task 3: Add Progressive Tool Catalog (A1)
 
