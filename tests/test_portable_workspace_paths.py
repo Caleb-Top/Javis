@@ -66,6 +66,7 @@ class PortableWorkspacePathTests(unittest.TestCase):
             "PIP_CACHE_DIR",
             "PNPM_HOME",
             "CARGO_HOME",
+            "RUSTUP_HOME",
             "CARGO_TARGET_DIR",
             "TEMP",
             "TMP",
@@ -73,6 +74,38 @@ class PortableWorkspacePathTests(unittest.TestCase):
             self.assertIn(name, text)
         self.assertNotIn("C:\\", text)
         self.assertNotIn("D:\\", text)
+        self.assertIn("stable-x86_64-pc-windows-gnu", text)
+        self.assertIn("tools\\mingw32\\bin", text)
+        self.assertIn("self-contained", text)
+
+    def test_frontend_dependency_cache_stays_under_repository_root(self):
+        workspace = (ROOT / "app" / "pnpm-workspace.yaml").read_text(encoding="utf-8")
+        self.assertIn("enableGlobalVirtualStore: false", workspace)
+        self.assertIn("nodeLinker: hoisted", workspace)
+        self.assertIn("packageImportMethod: copy", workspace)
+        self.assertIn("storeDir: ../.pnpm-store", workspace)
+
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn(".pnpm-store/", ignored)
+        self.assertIn("node_modules/", ignored)
+        self.assertTrue((ROOT / "app" / "src-tauri" / "Cargo.lock").is_file())
+
+    def test_pytest_collection_isolated_from_duplicate_modules_and_temp_audits(self):
+        config = (ROOT / "pytest.ini").read_text(encoding="utf-8")
+        self.assertIn("--import-mode=importlib", config)
+        self.assertIn("testpaths", config)
+        self.assertNotIn("tmp", config.split("testpaths", 1)[1])
+        self.assertNotIn("agent_distill", config.split("testpaths", 1)[1])
+
+        runner = ROOT / "scripts" / "run_python_tests.ps1"
+        self.assertTrue(runner.is_file())
+        runner_text = runner.read_text(encoding="utf-8")
+        for suite in (
+            "tests",
+            "agent_distill\\tests",
+            "ClaudeAgent_Distill\\agent_distill\\tests",
+        ):
+            self.assertIn(suite, runner_text)
 
 
 if __name__ == "__main__":

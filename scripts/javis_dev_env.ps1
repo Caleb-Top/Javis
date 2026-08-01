@@ -21,7 +21,6 @@ $env:JAVIS_ROOT = $root
 $env:PIP_CACHE_DIR = Join-Path $cacheRoot "pip"
 $env:PNPM_HOME = Join-Path $cacheRoot "pnpm"
 $env:PNPM_STORE_DIR = Join-Path $root ".pnpm-store"
-$env:CARGO_HOME = Join-Path $cacheRoot "cargo"
 $env:CARGO_TARGET_DIR = Join-Path $root "app\src-tauri\target"
 $env:TEMP = $tempRoot
 $env:TMP = $tempRoot
@@ -38,9 +37,24 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeRoot "tools\nodejs\node.exe"
     }
 }
 
+$rustRoot = Join-Path $runtimeRoot "tools\rust"
+if (Test-Path -LiteralPath (Join-Path $rustRoot "rustup\settings.toml")) {
+    $env:CARGO_HOME = Join-Path $rustRoot "cargo"
+    $env:RUSTUP_HOME = Join-Path $rustRoot "rustup"
+} else {
+    $env:CARGO_HOME = Join-Path $cacheRoot "cargo"
+    $env:RUSTUP_HOME = Join-Path $cacheRoot "rustup"
+    New-Item -ItemType Directory -Force -Path $env:CARGO_HOME, $env:RUSTUP_HOME | Out-Null
+}
+
+$rustToolchainBin = Join-Path $env:RUSTUP_HOME "toolchains\stable-x86_64-pc-windows-gnu\bin"
+$rustSelfContainedBin = Join-Path $rustToolchainBin "..\lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained"
 $toolPaths = @(
     (Join-Path $runtimeRoot "tools\nodejs"),
-    (Join-Path $runtimeRoot "tools\rust\cargo\bin")
+    $rustToolchainBin,
+    (Join-Path $runtimeRoot "tools\mingw32\bin"),
+    $rustSelfContainedBin,
+    (Join-Path $env:CARGO_HOME "bin")
 ) | Where-Object { Test-Path -LiteralPath $_ }
 if ($toolPaths) {
     $env:PATH = (($toolPaths -join [IO.Path]::PathSeparator) + [IO.Path]::PathSeparator + $env:PATH)
