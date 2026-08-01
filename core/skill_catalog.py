@@ -266,6 +266,18 @@ class SkillCatalog:
         ranked.sort(key=lambda item: (item[0], item[1]))
         return [skill for _, _, skill in ranked[:max(0, limit)]]
 
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            total = int(self._connection.execute("SELECT COUNT(*) FROM skills").fetchone()[0])
+            rows = self._connection.execute(
+                "SELECT status, COUNT(*) AS count FROM skills GROUP BY status ORDER BY status"
+            ).fetchall()
+        return {
+            "total": total,
+            "by_status": {str(row["status"]): int(row["count"]) for row in rows},
+            "fts_enabled": self._fts_enabled,
+        }
+
     def record_evaluation(
         self,
         name: str,

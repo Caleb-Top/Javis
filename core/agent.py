@@ -212,11 +212,12 @@ class AgentState:
 
 
 class Agent:
-    def __init__(self, llm, tools, brain=None, learner=None, engine=None):
+    def __init__(self, llm, tools, brain=None, learner=None, engine=None, tool_catalog=None):
         self.llm = llm
         self.tools = tools
         self.state = AgentState()
         self.engine = engine
+        self.tool_catalog = tool_catalog
         self.planner = Planner()
         self.reflector = Reflector(brain=brain)
         self._current_episode = None
@@ -335,6 +336,31 @@ class Agent:
         self._action_history = []
         if hasattr(self, 'prompt_builder'):
             self.prompt_builder.invalidate_cache()
+
+    def _select_tool_schemas(self, user_input: str) -> list[dict]:
+        if self.tool_catalog is None:
+            return self.tools.get_schemas()
+        selected = self.tool_catalog.schemas_for(user_input, limit=12)
+        selected_names = {
+            schema.get("function", {}).get("name")
+            for schema in selected
+        }
+        for name in ("tool_search", "tool_inspect", "end_turn"):
+            if name in selected_names:
+                continue
+            tool = self.tools.get(name)
+            if tool is None:
+                continue
+            selected.append({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            })
+            selected_names.add(name)
+        return selected
 
     def _build_system_prompt(self, force: bool = False) -> str:
         """构建完整 System Prompt（三层架构: 身份 + 记忆 + 阶段）
@@ -501,7 +527,7 @@ class Agent:
                 for r in range(self.max_retries + 1):
                     try:
                         resp, route = await self.engine.chat_with_fallback(
-                            messages, self.tools.get_schemas(), sys_prompt)
+                            messages, self._select_tool_schemas(user_input), sys_prompt)
                         if route.is_fallback:
                             logger.info(f"⚠️ 使用备用算力: local/{route.model}")
                         break
@@ -517,7 +543,7 @@ class Agent:
                 for r in range(self.max_retries + 1):
                     try:
                         resp = await self.llm.chat_with_tools(
-                            messages=messages, tools=self.tools.get_schemas(), system=sys_prompt)
+                            messages=messages, tools=self._select_tool_schemas(user_input), system=sys_prompt)
                         break
                     except Exception as e:
                         if r < self.max_retries:

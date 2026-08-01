@@ -20,6 +20,9 @@ RISK_ORDER = {
     "critical": 4,
 }
 RISK_NAMES = {value: name for name, value in RISK_ORDER.items()}
+SEARCH_STOP_WORDS = {
+    "a", "an", "and", "for", "in", "of", "on", "or", "please", "the", "this", "to", "with",
+}
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,8 @@ class ToolCatalog:
         preset: str | None = None,
         max_risk: str | None = None,
     ) -> list[dict[str, Any]]:
-        terms = [term for term in re.split(r"[^\w-]+", query.lower()) if term]
+        raw_terms = [term for term in re.split(r"[^\w-]+", query.lower()) if term]
+        terms = [term for term in raw_terms if term not in SEARCH_STOP_WORDS]
         candidates = self.list_tools(preset=preset, max_risk=max_risk)
         if not terms:
             return candidates[:max(0, limit)]
@@ -98,10 +102,11 @@ class ToolCatalog:
             category = item["category"].lower()
             tags = [tag.lower() for tag in item["tags"]]
             searchable = " ".join((name, description, category, *tags))
-            if any(term not in searchable for term in terms):
+            matched_terms = [term for term in terms if term in searchable]
+            if not matched_terms:
                 continue
             score = 0
-            for term in terms:
+            for term in matched_terms:
                 if term == name:
                     score += 100
                 elif name.startswith(term):
@@ -114,6 +119,7 @@ class ToolCatalog:
                     score += 20
                 if term in description:
                     score += 10
+            score += round(50 * len(matched_terms) / len(terms))
             ranked.append((-score, item["name"], item))
         ranked.sort(key=lambda value: (value[0], value[1]))
         return [item for _, _, item in ranked[:max(0, limit)]]

@@ -560,6 +560,19 @@ class AgentRunStore:
                 ).fetchall()
         return [_run_dict(row) for row in rows]
 
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            total = int(self._connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+            rows = self._connection.execute(
+                "SELECT status, COUNT(*) AS count FROM runs GROUP BY status ORDER BY status"
+            ).fetchall()
+        by_status = {str(row["status"]): int(row["count"]) for row in rows}
+        return {
+            "total": total,
+            "active": sum(count for status, count in by_status.items() if status not in FINAL_RUN_STATES),
+            "by_status": by_status,
+        }
+
     def _require_run(self, run_id: str) -> dict[str, Any]:
         run = self.get_run(run_id)
         if run is None:

@@ -7,6 +7,7 @@ assistant. Call ``create_runtime`` to assemble the runtime explicitly.
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import os
 import pkgutil
@@ -59,6 +60,81 @@ class JarvisRuntime:
         register_agent_tools(self.registry)
         register_task_tools(self.registry)
         register_web_tools(self.registry)
+        self._register_catalog_tools()
+
+    def _register_catalog_tools(self) -> None:
+        from core.tool_registry import ToolDef
+        from core.tool_result import ToolResult
+
+        def search_tools(
+            query: str,
+            category: str = "",
+            max_risk: str = "",
+            limit: int = 12,
+        ) -> ToolResult:
+            try:
+                if category:
+                    tools = self.tool_catalog.list_tools(
+                        categories=(category,),
+                        max_risk=max_risk or None,
+                    )[:max(1, min(int(limit), 50))]
+                else:
+                    tools = self.tool_catalog.search(
+                        query,
+                        max_risk=max_risk or None,
+                        limit=max(1, min(int(limit), 50)),
+                    )
+                return ToolResult.success(json.dumps({"tools": tools}, ensure_ascii=False))
+            except (KeyError, TypeError, ValueError) as exc:
+                return ToolResult.failure(str(exc))
+
+        def inspect_tool(name: str) -> ToolResult:
+            tool = self.tool_catalog.inspect(name)
+            if tool is None:
+                return ToolResult.failure(f"Unknown tool: {name}")
+            return ToolResult.success(json.dumps(tool, ensure_ascii=False))
+
+        self.registry.register_many([
+            ToolDef(
+                "tool_search",
+                "Search the internal Javis tool catalog by task, category, tags, and risk",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "category": {"type": "string", "default": ""},
+                        "max_risk": {
+                            "type": "string",
+                            "enum": ["", "safe", "low", "medium", "dangerous", "critical"],
+                            "default": "",
+                        },
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 12},
+                    },
+                    "required": ["query"],
+                },
+                search_tools,
+                "catalog",
+                tags=("discover", "tools", "internal"),
+                source="javis.kernel",
+                risk="safe",
+                timeout_seconds=2,
+            ),
+            ToolDef(
+                "tool_inspect",
+                "Inspect one internal Javis tool and return its full parameter schema",
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+                inspect_tool,
+                "catalog",
+                tags=("inspect", "schema", "internal"),
+                source="javis.kernel",
+                risk="safe",
+                timeout_seconds=2,
+            ),
+        ])
 
     def discover_skills(self) -> list[dict[str, Any]]:
         import skills as skills_pkg
@@ -148,6 +224,11 @@ class JarvisRuntime:
             "event_count": len(events),
             "recent_events": [event.type for event in events[-20:]],
             "event_store": self._event_store_status(),
+            "catalogs": {
+                "tools": {"count": self.registry.count},
+                "skills": self.skill_catalog.stats(),
+            },
+            "agent_runs": self.agent_runs.stats(),
         }
 
     def _event_store_status(self) -> dict[str, Any]:
@@ -351,7 +432,14 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
     agent_runs = AgentRunStore(root / "data" / "agent_runs" / "runs.sqlite3", event_bus=event_bus)
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
-    agent = Agent(llm, registry, brain=brain, learner=learner, engine=engine)
+    agent = Agent(
+        llm,
+        registry,
+        brain=brain,
+        learner=learner,
+        engine=engine,
+        tool_catalog=tool_catalog,
+    )
     agent.set_confirm_handler()
 
     runtime = JarvisRuntime(

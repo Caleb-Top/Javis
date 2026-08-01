@@ -120,11 +120,11 @@
 - `core/agent.py`
 - `main.py`
 
-- [ ] Test that one runtime instance owns and connects the event bus, middleware, catalogs, registry, and run store.
-- [ ] Test catalog-selected schemas replace unconditional full-schema injection while explicit tool calls remain compatible.
-- [ ] Test `/api/tool-catalog`, `/api/skill-catalog`, and `/api/agent-runs` contracts and structured failure responses.
-- [ ] Record WebSocket chat/tool/approval lifecycle into durable runs without changing the Live renderer.
-- [ ] Confirm focused GREEN and existing API/WebSocket tests remain green.
+- [x] Test that one runtime instance owns and connects the event bus, middleware, catalogs, registry, and run store.
+- [x] Test catalog-selected schemas replace unconditional full-schema injection while explicit tool calls remain compatible.
+- [x] Test `/api/tool-catalog`, `/api/skill-catalog`, and `/api/agent-runs` contracts and structured failure responses.
+- [x] Record WebSocket chat/tool/approval lifecycle into durable runs without changing the Live renderer.
+- [x] Confirm focused GREEN and existing API/runtime tests remain green (`30 passed`).
 
 ## Task 7: Import Approved MIT Skill Assets
 

@@ -16,6 +16,7 @@ _TEST_MODE = _env_flag("JAVIS_TEST_MODE")
 _STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_SIDE_EFFECTS")
 
 from core.runtime import create_runtime
+from core.agent_run_recorder import AgentRunRecorder
 from control.command_tasks import CommandTaskRunner
 from evolution.service import EvolutionService
 from memory.session_db import SessionEventStore
@@ -168,6 +169,16 @@ async def ws(ws:WebSocket):
         interaction_mode: str = "",
     ):
         """并发运行 agent, 同时监听 WS 消息 (解决 confirm 死锁)"""
+        recorder = None
+        try:
+            recorder = AgentRunRecorder(
+                runtime.agent_runs,
+                text,
+                session_id=session_id,
+                interaction_mode=interaction_mode,
+            )
+        except Exception as error:
+            logger.warning("Agent run recorder unavailable: %s", str(error)[:160])
         q = asyncio.Queue()
         async def _run():
             try:
@@ -177,8 +188,18 @@ async def ws(ws:WebSocket):
                     conversation_cards=cards or [],
                     interaction_mode=interaction_mode,
                 ):
+                    if recorder is not None:
+                        try:
+                            recorder.record(msg)
+                        except Exception as error:
+                            logger.warning("Agent run record skipped: %s", str(error)[:160])
                     await q.put(msg)
             finally:
+                if recorder is not None:
+                    try:
+                        recorder.finalize("completed")
+                    except Exception as error:
+                        logger.warning("Agent run finalization skipped: %s", str(error)[:160])
                 await q.put(None)
         task = asyncio.create_task(_run())
         running = True
@@ -196,7 +217,16 @@ async def ws(ws:WebSocket):
                 else:
                     m2=json.loads(r);t2=m2.get("type","")
                     if t2=="confirm" and hasattr(agent,'resolve_confirm'):
-                        agent.resolve_confirm(m2.get("payload",{}).get("confirmed",False))
+                        confirmed = m2.get("payload",{}).get("confirmed",False)
+                        if recorder is not None:
+                            try:
+                                recorder.resolve_confirmation(
+                                    confirmed,
+                                    response={"source": "websocket"},
+                                )
+                            except Exception as error:
+                                logger.warning("Approval record skipped: %s", str(error)[:160])
+                        agent.resolve_confirm(confirmed)
                     elif t2=="permission_change":
                         perm = m2.get("payload",{}).get("permission","quick_auth")
                         try:
@@ -270,7 +300,28 @@ async def ws(ws:WebSocket):
             elif t=="tool":
                 tn=m.get("payload",{}).get("name","");tp=m.get("payload",{}).get("params",{})
                 if tn:
+                    direct_recorder = None
+                    try:
+                        direct_recorder = AgentRunRecorder(
+                            runtime.agent_runs,
+                            f"Execute tool: {tn}",
+                            interaction_mode="tool",
+                        )
+                        direct_recorder.record({"type": "tool_start", "tool": tn, "params": tp})
+                    except Exception as error:
+                        logger.warning("Direct tool recorder unavailable: %s", str(error)[:160])
                     r=await registry.execute(tn,tp)
+                    if direct_recorder is not None:
+                        try:
+                            direct_recorder.record({
+                                "type": "tool_result",
+                                "tool": tn,
+                                "success": r.success,
+                                "data": (r.data or r.error or "")[:2000],
+                            })
+                            direct_recorder.record({"type": "done"})
+                        except Exception as error:
+                            logger.warning("Direct tool record skipped: %s", str(error)[:160])
                     await ws.send_json({"type":"tool_result","tool":tn,"success":r.success,"data":(r.data or r.error or "")[:500],"image":r.image or ""})
                     await ws.send_json({"type":"done"})
             elif t=="ping":await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
@@ -374,6 +425,171 @@ async def api_voice_tts_test(data: dict = Body(default={})):
 @app.get("/api/runtime/status")
 async def api_runtime_status():
     return runtime.get_runtime_status()
+
+def _catalog_error(code: str, message: str) -> dict:
+    return {"ok": False, "error": {"code": code, "message": str(message)[:500]}}
+
+@app.get("/api/tool-catalog")
+async def api_tool_catalog(
+    q: str = "",
+    preset: str = "",
+    category: str = "",
+    tag: str = "",
+    max_risk: str = "",
+    limit: int = 50,
+):
+    try:
+        bounded_limit = max(1, min(int(limit), 100))
+        if q.strip():
+            tools = runtime.tool_catalog.search(
+                q,
+                preset=preset or None,
+                max_risk=max_risk or None,
+                limit=bounded_limit,
+            )
+        else:
+            categories = tuple(value.strip() for value in category.split(",") if value.strip())
+            tags = tuple(value.strip() for value in tag.split(",") if value.strip())
+            tools = runtime.tool_catalog.list_tools(
+                preset=preset or None,
+                categories=categories,
+                tags=tags,
+                max_risk=max_risk or None,
+            )[:bounded_limit]
+        return {"ok": True, "tools": tools, "count": len(tools)}
+    except (KeyError, TypeError, ValueError) as error:
+        return _catalog_error("invalid_tool_query", str(error))
+
+@app.get("/api/tool-catalog/{name}")
+async def api_tool_catalog_inspect(name: str):
+    tool = runtime.tool_catalog.inspect(name)
+    if tool is None:
+        return _catalog_error("tool_not_found", f"Unknown tool: {name}")
+    return {"ok": True, "tool": tool, "health": runtime.tool_catalog.health(name)[0]}
+
+@app.get("/api/skill-catalog")
+async def api_skill_catalog(
+    q: str = "",
+    status: str = "",
+    source: str = "",
+    limit: int = 50,
+):
+    try:
+        bounded_limit = max(1, min(int(limit), 100))
+        if q.strip():
+            skills = runtime.skill_catalog.search(q, limit=bounded_limit)
+            if status:
+                skills = [skill for skill in skills if skill["status"] == status]
+            if source:
+                skills = [skill for skill in skills if skill["source"] == source]
+        else:
+            skills = runtime.skill_catalog.list_skills(
+                status=status or None,
+                source=source or None,
+            )[:bounded_limit]
+        return {"ok": True, "skills": skills, "count": len(skills)}
+    except (TypeError, ValueError) as error:
+        return _catalog_error("invalid_skill_query", str(error))
+
+@app.get("/api/skill-catalog/{name}")
+async def api_skill_catalog_inspect(name: str):
+    skill = runtime.skill_catalog.get(name)
+    if skill is None:
+        return _catalog_error("skill_not_found", f"Unknown skill: {name}")
+    return {"ok": True, "skill": skill}
+
+@app.post("/api/skill-catalog/evaluate")
+async def api_skill_catalog_evaluate(data: dict = Body(...)):
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return _catalog_error("invalid_skill", "name is required")
+    try:
+        skill = runtime.skill_catalog.record_evaluation(
+            name,
+            str(data.get("status", "untested")),
+            score=data.get("score"),
+            details=data.get("details") if isinstance(data.get("details"), dict) else {},
+        )
+        return {"ok": True, "skill": skill}
+    except KeyError:
+        return _catalog_error("skill_not_found", f"Unknown skill: {name}")
+    except (TypeError, ValueError) as error:
+        return _catalog_error("skill_evaluation_rejected", str(error))
+
+@app.post("/api/skill-catalog/status")
+async def api_skill_catalog_status(data: dict = Body(...)):
+    name = str(data.get("name", "")).strip()
+    target = str(data.get("status", "")).strip()
+    if not name or not target:
+        return _catalog_error("invalid_skill", "name and status are required")
+    try:
+        skill = runtime.skill_catalog.promote(name, target)
+        return {"ok": True, "skill": skill}
+    except KeyError:
+        return _catalog_error("skill_not_found", f"Unknown skill: {name}")
+    except (TypeError, ValueError) as error:
+        return _catalog_error("skill_transition_rejected", str(error))
+
+@app.get("/api/agent-runs")
+async def api_agent_runs(status: str = "", limit: int = 50):
+    runs = runtime.agent_runs.list_runs(status=status or None, limit=max(1, min(int(limit), 100)))
+    return {"ok": True, "runs": runs, "count": len(runs)}
+
+@app.post("/api/agent-runs")
+async def api_agent_run_create(data: dict = Body(...)):
+    objective = str(data.get("objective", "")).strip()
+    if not objective:
+        return _catalog_error("invalid_run", "objective is required")
+    try:
+        run = runtime.agent_runs.create_run(
+            objective,
+            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
+            parent_run_id=str(data.get("parent_run_id") or "") or None,
+        )
+        return {"ok": True, "run": run}
+    except (KeyError, TypeError, ValueError) as error:
+        return _catalog_error("run_create_failed", str(error))
+
+@app.get("/api/agent-runs/{run_id}")
+async def api_agent_run_get(run_id: str):
+    run = runtime.agent_runs.get_run(run_id, include_graph=True)
+    if run is None:
+        return _catalog_error("run_not_found", f"Unknown run: {run_id}")
+    return {"ok": True, "run": run}
+
+@app.post("/api/agent-runs/{run_id}/cancel")
+async def api_agent_run_cancel(run_id: str, data: dict = Body(default={})):
+    try:
+        run = runtime.agent_runs.cancel_run(run_id, reason=str(data.get("reason", "")))
+        return {"ok": True, "run": run}
+    except KeyError:
+        return _catalog_error("run_not_found", f"Unknown run: {run_id}")
+    except (TypeError, ValueError, RuntimeError) as error:
+        return _catalog_error("run_transition_rejected", str(error))
+
+@app.post("/api/agent-runs/{run_id}/resume")
+async def api_agent_run_resume(run_id: str):
+    try:
+        result = runtime.agent_runs.resume_run(run_id)
+        return {"ok": True, **result}
+    except KeyError:
+        return _catalog_error("run_not_found", f"Unknown run: {run_id}")
+    except (TypeError, ValueError, RuntimeError) as error:
+        return _catalog_error("run_transition_rejected", str(error))
+
+@app.post("/api/agent-runs/approvals/{approval_id}")
+async def api_agent_approval_resolve(approval_id: str, data: dict = Body(...)):
+    try:
+        approval = runtime.agent_runs.resolve_approval(
+            approval_id,
+            approved=bool(data.get("approved", False)),
+            response=data.get("response") if isinstance(data.get("response"), dict) else {},
+        )
+        return {"ok": True, "approval": approval}
+    except KeyError:
+        return _catalog_error("approval_not_found", f"Unknown approval: {approval_id}")
+    except (TypeError, ValueError, RuntimeError) as error:
+        return _catalog_error("approval_transition_rejected", str(error))
 
 @app.get("/api/blueprint/coverage")
 async def api_blueprint_coverage():
