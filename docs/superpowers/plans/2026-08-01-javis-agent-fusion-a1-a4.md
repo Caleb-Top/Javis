@@ -78,12 +78,12 @@
 - `core/tool_registry.py`
 - `core/runtime.py`
 
-- [ ] Test lightweight list/search, one-tool inspect, category/tag presets, risk filtering, and health ordering.
-- [ ] Test that catalog execution still delegates to `ToolRegistry` and emits correlated start/result/error events.
-- [ ] Confirm RED, then extend `ToolDef` with optional metadata without breaking positional constructors.
-- [ ] Implement catalog indexing, deterministic matching, presets, execution statistics, and health snapshots.
-- [ ] Inject the shared EventBus and middleware into `ToolRegistry`; keep guardrail checks authoritative.
-- [ ] Confirm focused and registry regression GREEN.
+- [x] Test lightweight list/search, one-tool inspect, category/tag presets, risk filtering, and health ordering.
+- [x] Test that catalog execution still delegates to `ToolRegistry` and emits correlated start/result/error events.
+- [x] Confirm RED, then extend `ToolDef` with optional metadata without breaking positional constructors.
+- [x] Implement catalog indexing, deterministic matching, presets, execution statistics, and health snapshots.
+- [x] Inject the shared EventBus and middleware into `ToolRegistry`; keep guardrail checks authoritative.
+- [x] Confirm focused and registry regression GREEN (`31 passed`, plus guard/tool regression `15 passed`).
 
 ## Task 4: Add Governed Skill Catalog (A2)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import inspect
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Callable, Iterable
@@ -81,6 +82,37 @@ class MiddlewarePipeline:
             for middleware in reversed(entered):
                 try:
                     middleware.on_error(context, error)
+                except Exception:
+                    continue
+            raise
+
+    async def execute_async(
+        self,
+        context: MiddlewareContext,
+        handler: Callable[[MiddlewareContext], Any],
+    ) -> Any:
+        chain = self.middleware
+        entered: list[Middleware] = []
+        try:
+            for middleware in chain:
+                before_result = middleware.before(context)
+                if inspect.isawaitable(before_result):
+                    await before_result
+                entered.append(middleware)
+            result = handler(context)
+            if inspect.isawaitable(result):
+                result = await result
+            for middleware in reversed(entered):
+                result = middleware.after(context, result)
+                if inspect.isawaitable(result):
+                    result = await result
+            return result
+        except BaseException as error:
+            for middleware in reversed(entered):
+                try:
+                    error_result = middleware.on_error(context, error)
+                    if inspect.isawaitable(error_result):
+                        await error_result
                 except Exception:
                     continue
             raise

@@ -18,7 +18,9 @@ from core.agent import Agent
 from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
+from core.middleware import MiddlewarePipeline
 from core.subsystem import SubsystemStatus
+from core.tool_catalog import ToolCatalog
 from core.tool_registry import ToolRegistry
 from knowledge.brain import Brain
 from knowledge.learner import Learner
@@ -39,7 +41,9 @@ class JarvisRuntime:
     llm: LLMClient
     engine: InferenceEngine
     agent: Agent
-    event_bus: EventBus = field(default_factory=EventBus)
+    event_bus: EventBus
+    middleware: MiddlewarePipeline
+    tool_catalog: ToolCatalog
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -310,7 +314,14 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
     else:
         logger.info("启动副作用已关闭: 跳过知识注入和后台服务")
 
-    registry = ToolRegistry(permission_level=_get_permission_level())
+    event_bus = EventBus()
+    middleware = MiddlewarePipeline()
+    registry = ToolRegistry(
+        permission_level=_get_permission_level(),
+        event_bus=event_bus,
+        middleware=middleware,
+    )
+    tool_catalog = ToolCatalog(registry)
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
     agent = Agent(llm, registry, brain=brain, learner=learner, engine=engine)
@@ -325,6 +336,9 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         llm=llm,
         engine=engine,
         agent=agent,
+        event_bus=event_bus,
+        middleware=middleware,
+        tool_catalog=tool_catalog,
     )
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     runtime.register_always_on_tools()
