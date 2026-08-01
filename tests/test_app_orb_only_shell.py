@@ -3,7 +3,8 @@ import json
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis/app/src")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT / "app" / "src"
 
 
 class AppOrbOnlyShellTests(unittest.TestCase):
@@ -57,7 +58,7 @@ class AppOrbOnlyShellTests(unittest.TestCase):
 
     def test_default_live_window_is_compact_and_borderless(self):
         mode = self.read("desktop/windowMode.ts")
-        config = json.loads(Path("D:/Javis/app/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+        config = json.loads((PROJECT_ROOT / "app" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
         window = config["app"]["windows"][0]
 
         self.assertIn("getLiveSurfaceSize", mode)

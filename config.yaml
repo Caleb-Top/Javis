@@ -46,10 +46,10 @@ agent:
   confirm_dangerous: true
   max_steps: 15
 paths:
-  model_dir: D:\Javis\ollama_models\models
-  workspace_dir: D:\Javis\workspace
-  output_dir: D:\Javis\uploads
-  backup_dir: D:\Javis\backups
+  model_dir: ollama_models/models
+  workspace_dir: workspace
+  output_dir: uploads
+  backup_dir: backups
 camera:
   device_id: 0
   resolution:

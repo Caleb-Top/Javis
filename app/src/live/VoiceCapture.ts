@@ -1,7 +1,16 @@
 import type { BackendClient } from "../bridge/backendClient";
+import { resolveBackendEndpoints } from "../bridge/backendEndpoints.ts";
 import type { LiveState } from "./liveState";
 
+export type VoiceNoiseProfile = "off" | "standard" | "strong";
+
 export type VoiceCaptureOptions = {
+  onBargeIn(): void | Promise<void>;
+  onPartial?(text: string): void;
+  onTranscript?(text: string): void;
+  onLevel?(level: number): void;
+  openStream?(url: string): WebSocket;
+  noiseProfile?(): VoiceNoiseProfile;
   onAudio(audioBase64: string): void;
   onState(state: LiveState): void;
   onError(message: string): void;
@@ -22,6 +31,11 @@ export type VoiceCapture = {
   toggle(): Promise<void>;
   stop(): Promise<void>;
   isRecording(): boolean;
+  startContinuous(): Promise<void>;
+  pauseContinuous(): Promise<void>;
+  isContinuous(): boolean;
+  setNoiseProfile(profile: VoiceNoiseProfile): Promise<void>;
+  resumeListeningState(): void;
   probeMicrophone(): Promise<AudioProbeResult>;
   probeSystemAudio(): Promise<AudioProbeResult>;
   selfTest(source?: "microphone" | "system"): Promise<AudioProbeResult>;
@@ -31,47 +45,137 @@ export function createVoiceCapture(
   client: BackendClient,
   options: VoiceCaptureOptions,
 ): VoiceCapture {
-  let recording = false;
+  let continuous = false;
+  let wantsContinuous = false;
+  let streamSocket: WebSocket | null = null;
+  let startResolve: (() => void) | null = null;
+  let startReject: ((error: Error) => void) | null = null;
+  let noiseProfile: VoiceNoiseProfile = options.noiseProfile?.() ?? "standard";
 
-  async function start(): Promise<void> {
-    try {
-      const result = await client.post<AudioProbeResult & { recording?: boolean }>(
-        "/api/voice/capture/start",
-        { source: "microphone" },
-      );
-      if (!result.ok) throw new Error(result.message);
-      recording = true;
+  function settleStart(error?: Error): void {
+    if (error) startReject?.(error);
+    else startResolve?.();
+    startResolve = null;
+    startReject = null;
+  }
+
+  function handleStreamEvent(message: Record<string, unknown>): void {
+    const type = String(message.type || "");
+    if (type === "audio.stream.ready") {
+      continuous = true;
       options.onState("listening");
-    } catch (error) {
-      recording = false;
+      settleStart();
+      return;
+    }
+    if (type === "audio.level") {
+      options.onLevel?.(Number(message.level || 0));
+      return;
+    }
+    if (type === "speech.start") {
+      void Promise.resolve(options.onBargeIn())
+        .then(() => options.onState("listening"))
+        .catch((error) => options.onError(
+          error instanceof Error ? error.message : "barge-in failed",
+        ));
+      return;
+    }
+    if (type === "transcript.partial") {
+      const text = String(message.text || "").trim();
+      if (text) options.onPartial?.(text);
+      return;
+    }
+    if (type === "transcript.final") {
+      const text = String(message.text || "").trim();
+      if (!text) return;
+      options.onState("thinking");
+      options.onTranscript?.(text);
+      return;
+    }
+    if (type === "audio.error") {
+      const error = new Error(String(message.message || "native audio stream failed"));
       options.onState("error");
-      options.onError(error instanceof Error ? error.message : "本机麦克风采集失败");
+      options.onError(error.message);
+      settleStart(error);
     }
   }
 
-  async function stop(): Promise<void> {
-    if (!recording) return;
-    recording = false;
-    try {
-      options.onState("thinking");
-      const result = await client.post<AudioProbeResult>(
-        "/api/voice/capture/stop",
-        {},
-      );
-      if (!result.ok || !result.audioBase64) throw new Error(result.message);
-      options.onAudio(result.audioBase64);
-    } catch (error) {
+  async function startContinuous(): Promise<void> {
+    if (wantsContinuous && streamSocket) return;
+    wantsContinuous = true;
+    options.onState("listening");
+    const endpoints = resolveBackendEndpoints();
+    const socket = options.openStream?.(`${endpoints.websocket}/ws_voice_stream`)
+      ?? new WebSocket(`${endpoints.websocket}/ws_voice_stream`);
+    streamSocket = socket;
+    const ready = new Promise<void>((resolve, reject) => {
+      startResolve = resolve;
+      startReject = reject;
+    });
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        type: "audio.stream.start",
+        payload: {
+          session_id: client.sessionId(),
+          noise_profile: noiseProfile,
+          protocol_version: 1,
+        },
+      }));
+    };
+    socket.onmessage = (event) => {
+      try {
+        handleStreamEvent(JSON.parse(event.data) as Record<string, unknown>);
+      } catch {
+        options.onError("invalid native audio event");
+      }
+    };
+    socket.onerror = () => {
+      const error = new Error("native audio stream connection failed");
       options.onState("error");
-      options.onError(error instanceof Error ? error.message : "本机录音发送失败");
+      settleStart(error);
+    };
+    socket.onclose = () => {
+      streamSocket = null;
+      continuous = false;
+      if (wantsContinuous) {
+        wantsContinuous = false;
+        options.onState("error");
+        options.onError("native audio stream disconnected");
+        settleStart(new Error("native audio stream disconnected"));
+      }
+    };
+    return ready;
+  }
+
+  async function pauseContinuous(): Promise<void> {
+    wantsContinuous = false;
+    continuous = false;
+    const socket = streamSocket;
+    streamSocket = null;
+    if (socket && socket.readyState === 1) {
+      socket.send(JSON.stringify({
+        type: "audio.stream.stop",
+        payload: { session_id: client.sessionId() },
+      }));
     }
+    socket?.close();
+    options.onState("idle");
   }
 
   async function toggle(): Promise<void> {
-    if (recording) {
-      await stop();
+    if (wantsContinuous) {
+      await pauseContinuous();
       return;
     }
-    await start();
+    await startContinuous();
+  }
+
+  async function setNoiseProfile(profile: VoiceNoiseProfile): Promise<void> {
+    if (!["off", "standard", "strong"].includes(profile)) return;
+    if (profile === noiseProfile) return;
+    noiseProfile = profile;
+    if (!wantsContinuous) return;
+    await pauseContinuous();
+    await startContinuous();
   }
 
   async function probe(source: "microphone" | "system"): Promise<AudioProbeResult> {
@@ -85,31 +189,24 @@ export function createVoiceCapture(
         ok: false,
         source,
         status: "error",
-        message: error instanceof Error ? error.message : "本机音频检测失败",
+        message: error instanceof Error ? error.message : "native audio probe failed",
       };
     }
   }
 
-  async function probeMicrophone(): Promise<AudioProbeResult> {
-    return probe("microphone");
-  }
-
-  async function probeSystemAudio(): Promise<AudioProbeResult> {
-    return probe("system");
-  }
-
-  async function selfTest(
-    source: "microphone" | "system" = "microphone",
-  ): Promise<AudioProbeResult> {
-    return probe(source);
-  }
-
   return {
     toggle,
-    stop,
-    isRecording: () => recording,
-    probeMicrophone,
-    probeSystemAudio,
-    selfTest,
+    stop: pauseContinuous,
+    isRecording: () => continuous,
+    startContinuous,
+    pauseContinuous,
+    isContinuous: () => continuous,
+    setNoiseProfile,
+    resumeListeningState: () => {
+      if (continuous) options.onState("listening");
+    },
+    probeMicrophone: () => probe("microphone"),
+    probeSystemAudio: () => probe("system"),
+    selfTest: (source = "microphone") => probe(source),
   };
 }

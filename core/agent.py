@@ -14,6 +14,7 @@ from core.hook_system import HookEvent, get_hook_manager
 from core.memory_kernel import get_core_memory_kernel
 from core.session_recall import build_session_recall_answer
 from core.action_policy import evaluate_action
+from core.cancellation import CancellationToken, RequestCancelled
 
 logger = logging.getLogger("agent")
 action_log = []
@@ -212,11 +213,12 @@ class AgentState:
 
 
 class Agent:
-    def __init__(self, llm, tools, brain=None, learner=None, engine=None):
+    def __init__(self, llm, tools, brain=None, learner=None, engine=None, tool_catalog=None):
         self.llm = llm
         self.tools = tools
         self.state = AgentState()
         self.engine = engine
+        self.tool_catalog = tool_catalog
         self.planner = Planner()
         self.reflector = Reflector(brain=brain)
         self._current_episode = None
@@ -336,6 +338,63 @@ class Agent:
         if hasattr(self, 'prompt_builder'):
             self.prompt_builder.invalidate_cache()
 
+    def _conversation_history(
+        self,
+        conversation_cards: list[dict] | None,
+        limit: int = 40,
+    ) -> list[dict]:
+        history = []
+        for card in (conversation_cards or [])[-max(1, int(limit)):]:
+            if not isinstance(card, dict) or card.get("status") == "interrupted":
+                continue
+            role = str(card.get("role") or "").strip()
+            content = str(card.get("content") or card.get("text") or "").strip()
+            if role in {"user", "assistant"} and content:
+                history.append({"role": role, "content": content[:4000]})
+        return history
+
+    def _completion_event(
+        self,
+        success: bool | None = None,
+        detail: str = "",
+    ) -> dict:
+        if success is None:
+            success = (
+                not self._action_history
+                or self._action_history[-1].get("result") == "success"
+            )
+        event = {"type": "done", "success": bool(success)}
+        if detail:
+            event["detail"] = detail
+        elif not success:
+            event["detail"] = "No verified fallback succeeded"
+        return event
+
+    def _select_tool_schemas(self, user_input: str) -> list[dict]:
+        if self.tool_catalog is None:
+            return self.tools.get_schemas()
+        selected = self.tool_catalog.schemas_for(user_input, limit=12)
+        selected_names = {
+            schema.get("function", {}).get("name")
+            for schema in selected
+        }
+        for name in ("tool_search", "tool_inspect", "end_turn"):
+            if name in selected_names:
+                continue
+            tool = self.tools.get(name)
+            if tool is None:
+                continue
+            selected.append({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            })
+            selected_names.add(name)
+        return selected
+
     def _build_system_prompt(self, force: bool = False) -> str:
         """构建完整 System Prompt（三层架构: 身份 + 记忆 + 阶段）
 
@@ -365,16 +424,21 @@ class Agent:
         session_id: str = "",
         conversation_cards: list[dict] | None = None,
         interaction_mode: str = "",
+        cancellation: CancellationToken | None = None,
     ) -> AsyncGenerator[dict, None]:
+        token = cancellation or CancellationToken()
+        self._action_history = []
+        await token.checkpoint()
         core_answer = get_core_memory_kernel().answer_if_core_query(user_input)
         if core_answer:
+            await token.checkpoint()
             self.state.messages.append({"role": "user", "content": user_input[:500]})
             self.state.messages.append({"role": "assistant", "content": core_answer})
             _log("core_memory", core_answer[:100])
             if self.brain:
                 self.brain.learn_fact("会话主题: " + user_input[:80], category="session.topic", source="self", priority=3)
             yield {"type": "text_delta", "text": core_answer}
-            yield {"type": "done"}
+            yield self._completion_event(True)
             return
 
         session_answer = build_session_recall_answer(
@@ -384,57 +448,74 @@ class Agent:
             session_id=session_id,
         )
         if session_answer:
+            await token.checkpoint()
             self.state.messages.append({"role": "user", "content": user_input[:500]})
             self.state.messages.append({"role": "assistant", "content": session_answer})
             _log("session_recall", session_answer[:100])
             if self.brain:
                 self.brain.learn_fact("会话主题: 当前会话召回", category="session.topic", source="self", priority=3)
             yield {"type": "text_delta", "text": session_answer}
-            yield {"type": "done"}
+            yield self._completion_event(True)
             return
 
         if interaction_mode == "live" and _is_live_fast_dialogue(user_input):
             exact_reply = _extract_live_exact_reply(user_input)
             if exact_reply is not None:
+                await token.checkpoint()
                 self.state.messages.append({"role": "user", "content": user_input[:500]})
                 self.state.messages.append({"role": "assistant", "content": exact_reply})
                 _log("live_exact", exact_reply[:100])
                 yield {"type": "text_delta", "text": exact_reply}
-                yield {"type": "done"}
+                yield self._completion_event(True)
                 return
-            history = []
-            for card in (conversation_cards or [])[-12:]:
-                role = str(card.get("role", "") or "")
-                text = str(card.get("text", "") or "").strip()
-                if role in {"user", "assistant"} and text:
-                    history.append({"role": role, "content": text[:800]})
+            history_source = (
+                conversation_cards
+                if conversation_cards is not None
+                else self.state.messages
+            )
+            history = self._conversation_history(history_source, limit=12)
             if history and history[-1].get("role") == "user" and history[-1].get("content") == user_input:
                 history.pop()
             messages = history + [{"role": "user", "content": user_input}]
-            yield {"type": "thinking", "content": "正在快速理解"}
+            yield {
+                "type": "activity",
+                "activity": "understanding",
+                "detail": "Understanding the request",
+            }
             try:
                 if self.engine:
-                    response, route = await self.engine.chat_brief_with_fallback(
-                        messages,
-                        LIVE_BRIEF_SYSTEM,
-                        max_tokens=256,
+                    response, route = await token.race(
+                        self.engine.chat_brief_with_fallback(
+                            messages,
+                            LIVE_BRIEF_SYSTEM,
+                            max_tokens=256,
+                        )
                     )
                     _log("live_fast", f"{route.provider}/{route.model} {route.latency_ms:.0f}ms")
                 else:
-                    response = await self.llm.chat_brief(messages, LIVE_BRIEF_SYSTEM, max_tokens=256)
+                    response = await token.race(
+                        self.llm.chat_brief(messages, LIVE_BRIEF_SYSTEM, max_tokens=256)
+                    )
                 answer = str(response.text or "").strip()
                 if not answer:
                     raise RuntimeError("empty live response")
+                await token.checkpoint()
                 self.state.messages.append({"role": "user", "content": user_input[:500]})
                 self.state.messages.append({"role": "assistant", "content": answer[:2000]})
                 self._after_learn(user_input)
                 yield {"type": "text_delta", "text": answer}
-                yield {"type": "done"}
+                yield self._completion_event(True)
                 return
+            except RequestCancelled:
+                raise
             except Exception as exc:
                 logger.warning("Live fast path fallback: %s", str(exc)[:120])
 
-        window = list(self.state.messages[-40:])
+        window = (
+            self._conversation_history(conversation_cards, limit=40)
+            if conversation_cards is not None
+            else self._conversation_history(self.state.messages, limit=40)
+        )
         try:
             from memory.episodic import Episode, extract_fingerprint
             self._current_episode = Episode(user_input, session_id=str(time.time()))
@@ -477,12 +558,22 @@ class Agent:
             pass
         # ── End UserPromptSubmit Hook ──
 
-        yield {"type": "thinking", "content": "思考中..."}
+        yield {
+            "type": "activity",
+            "activity": "understanding",
+            "detail": "Understanding the request",
+        }
+        yield {
+            "type": "activity",
+            "activity": "executing" if self.state.phase == "executing" else "planning",
+            "detail": "Preparing the next step",
+        }
 
         recent_calls = []
         has_executed = False
 
         for _ in range(self.max_steps):
+            await token.checkpoint()
             self.state.step += 1
             intf = Path(__file__).parent.parent / "data" / "interrupt.flg"
             if intf.exists():
@@ -490,7 +581,7 @@ class Agent:
                 except: pass
                 yield {"type": "text_delta", "text": "已中断"}
                 self._after_learn(user_input)
-                yield {"type": "done"}
+                yield self._completion_event(False, "Interrupted")
                 return
 
             # 每轮使用动态 System Prompt（含经验注入 + 阶段指引）
@@ -500,15 +591,22 @@ class Agent:
             if self.engine:
                 for r in range(self.max_retries + 1):
                     try:
-                        resp, route = await self.engine.chat_with_fallback(
-                            messages, self.tools.get_schemas(), sys_prompt)
+                        resp, route = await token.race(
+                            self.engine.chat_with_fallback(
+                                messages,
+                                self._select_tool_schemas(user_input),
+                                sys_prompt,
+                            )
+                        )
                         if route.is_fallback:
                             logger.info(f"⚠️ 使用备用算力: local/{route.model}")
                         break
+                    except RequestCancelled:
+                        raise
                     except Exception as e:
                         if r < self.max_retries:
                             logger.warning(f"引擎重试 {r+1}/{self.max_retries}: {str(e)[:80]}")
-                            await asyncio.sleep(0.5)
+                            await token.race(asyncio.sleep(0.5))
                         else:
                             yield {"type": "error", "message": "算力全部不可用"}
                             self._after_learn(user_input)
@@ -516,13 +614,20 @@ class Agent:
             else:
                 for r in range(self.max_retries + 1):
                     try:
-                        resp = await self.llm.chat_with_tools(
-                            messages=messages, tools=self.tools.get_schemas(), system=sys_prompt)
+                        resp = await token.race(
+                            self.llm.chat_with_tools(
+                                messages=messages,
+                                tools=self._select_tool_schemas(user_input),
+                                system=sys_prompt,
+                            )
+                        )
                         break
+                    except RequestCancelled:
+                        raise
                     except Exception as e:
                         if r < self.max_retries:
                             logger.warning(f"LLM重试 {r+1}: {str(e)[:80]}")
-                            await asyncio.sleep(0.5)
+                            await token.race(asyncio.sleep(0.5))
                         else:
                             yield {"type": "error", "message": f"LLM失败"}
                             self._after_learn(user_input)
@@ -556,6 +661,7 @@ class Agent:
                     self._action_count += 1
                     tn = tc.get("name", "?")
                     tp = tc.get("params", {})
+                    await token.checkpoint()
 
                     if tn == "end_turn":
                         _log("end_turn", str(tp)[:80])
@@ -565,7 +671,7 @@ class Agent:
                         self.planner.complete_plan(summary="完成")
                         yield {"type": "text_delta", "text": "✅ 任务完成。"}
                         self._after_learn(user_input)
-                        yield {"type": "done"}
+                        yield self._completion_event()
                         return
 
                     ck = f"{tn}:{json.dumps(tp, sort_keys=True, ensure_ascii=False)}"
@@ -574,7 +680,7 @@ class Agent:
                         yield {"type": "tool_result", "tool": tn, "success": False, "data": "循环检测"}
                         self.state.messages.append({"role": "assistant", "content": f"[循环中止: {tn}]"})
                         self._after_learn(user_input)
-                        yield {"type": "done"}
+                        yield self._completion_event(False, "Repeated tool loop detected")
                         return
 
                     yield {"type": "tool_start", "tool": tn, "params": tp}
@@ -599,7 +705,7 @@ class Agent:
                                "permission_level": self._permission_level,
                                "permission_label": perm_info.get("label", ""),
                                "permission_icon": perm_info.get("icon", "")}
-                        confirmed = await self.wait_for_confirm()
+                        confirmed = await token.race(self.wait_for_confirm())
                         if not confirmed:
                             yield {"type": "tool_result", "tool": tn, "success": False, "data": "用户已取消"}
                             messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
@@ -624,6 +730,8 @@ class Agent:
                     t0 = time.time()
                     try:
                         result = await self.tools.execute(tn, tp, confirmed=action_confirmed)
+                    except RequestCancelled:
+                        raise
                     except Exception as e:
                         result = ToolResult.failure(str(e))
                     elapsed_ms = (time.time() - t0) * 1000
@@ -666,11 +774,28 @@ class Agent:
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", f"c{self.state.step}"),
                                      "content": raw})
                     self.state.messages.append({"role": "assistant", "content": f"[{tn}: {'ok' if result.success else 'fail'}]"})
+                    await token.checkpoint()
+                    if not result.success:
+                        yield {
+                            "type": "activity",
+                            "activity": "fallback",
+                            "detail": f"{tn} failed; choosing another path",
+                        }
                 continue
 
+            completion = self._completion_event()
             text = resp.text or ""
+            if not completion["success"]:
+                text = "\u4efb\u52a1\u672a\u5b8c\u6210\uff1a\u6ca1\u6709\u9a8c\u8bc1\u6210\u529f\u7684\u66ff\u4ee3\u8def\u5f84\u3002"
             if text:
+                await token.checkpoint()
                 self.state.phase = "verifying" if has_executed else "planning"
+                if has_executed:
+                    yield {
+                        "type": "activity",
+                        "activity": "verifying",
+                        "detail": "Verifying the result",
+                    }
                 # 从LLM输出中提取计划步骤, 自动注册到Planner
                 if not has_executed and not self._action_history:
                     self._parse_plan_from_text(text)
@@ -690,7 +815,7 @@ class Agent:
             if self.brain:
                 topic = user_input[:80]
                 self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
-            yield {"type": "done"}
+            yield completion
             return
 
         if not any(m.get("role") == "assistant" and m.get("content") for m in self.state.messages[-5:]):
@@ -702,7 +827,7 @@ class Agent:
         if self.brain:
             topic = user_input[:80]
             self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
-        yield {"type": "done"}
+        yield self._completion_event(False, "Maximum execution steps reached")
 
     def _parse_plan_from_text(self, text: str):
         """从LLM回复中提取计划步骤, 自动注册到Planner"""

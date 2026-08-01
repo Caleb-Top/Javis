@@ -422,10 +422,17 @@ def get_path_settings() -> dict[str, str]:
     configured = load_config().get("paths", {})
     if not isinstance(configured, dict):
         return defaults
+    root = CONFIG_PATH.parent.resolve()
     result = {}
     for key in PATH_SETTING_KEYS:
         raw = str(configured.get(key, "") or "").strip()
-        result[key] = str(Path(raw).expanduser().resolve()) if raw else defaults[key]
+        if not raw:
+            result[key] = defaults[key]
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = root / path
+        result[key] = str(path.resolve())
     return result
 
 

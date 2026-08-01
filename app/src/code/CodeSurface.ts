@@ -3,15 +3,21 @@ import { resolveBackendEndpoints } from "../bridge/backendEndpoints.ts";
 const LIVE_SURFACE_MARKER = 'data-surface="live"';
 
 let legacyFrame: HTMLIFrameElement | null = null;
+let activeSessionId = "";
 
-function loadLegacyWeb(force = false): void {
-  if (!legacyFrame) return;
-  if (!force && legacyFrame.dataset.loaded === "true") return;
-  legacyFrame.dataset.loaded = "true";
+export function buildCodeSurfaceUrl(sessionId: string, force = false): string {
   const url = new URL("/", resolveBackendEndpoints().http);
   url.searchParams.set("app_embed", "1");
+  url.searchParams.set("session_id", sessionId);
   if (force) url.searchParams.set("reload", String(Date.now()));
-  legacyFrame.src = url.toString();
+  return url.toString();
+}
+
+function loadLegacyWeb(force = false): void {
+  if (!legacyFrame || !activeSessionId) return;
+  if (!force && legacyFrame.dataset.loaded === "true") return;
+  legacyFrame.dataset.loaded = "true";
+  legacyFrame.src = buildCodeSurfaceUrl(activeSessionId, force);
 }
 
 export function mountCodeSurface(root: HTMLElement): void {
@@ -40,7 +46,8 @@ export function mountCodeSurface(root: HTMLElement): void {
   root.querySelector<HTMLButtonElement>(".code-web-refresh")!.addEventListener("click", () => loadLegacyWeb(true));
 }
 
-export function openCodeSurface(): void {
+export function openCodeSurface(sessionId: string): void {
+  activeSessionId = sessionId;
   document.body.dataset.surface = "code";
   loadLegacyWeb();
 }

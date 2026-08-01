@@ -50,3 +50,13 @@ test("Live and Pet both render the shared process status", () => {
   assert.match(mainSource, /petSurface\.setSnapshot\(snapshot\)/);
   assert.match(petSource, /formatSurfaceStatus\(snapshot\)/);
 });
+
+test("fallback activity stays concise and never reads as completed", () => {
+  assert.equal(
+    runtimeStateTypes.formatSurfaceStatus({
+      state: "thinking",
+      detail: "camera failed; choosing another path",
+    }),
+    "\u601d\u8003\u4e2d \u00b7 \u6b63\u5728\u5c1d\u8bd5\u66ff\u4ee3\u65b9\u6848",
+  );
+});

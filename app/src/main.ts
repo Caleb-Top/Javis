@@ -6,9 +6,15 @@ import { installAppErrorBoundary } from "./app/AppErrorBoundary";
 import { createFirstRunPanel } from "./app/FirstRunPanel";
 import { getStartupDesktopMode } from "./app/startupMode.ts";
 import { AppLogger } from "./app/AppLogger";
+import { readStringPreference, writeStringPreference } from "./app/AppPreferences.ts";
 import { createBackendClient, type ConnectionSnapshot } from "./bridge/backendClient";
 import { createSidecarClient, isTauriRuntime, type SidecarSnapshot } from "./bridge/sidecarClient";
 import { openCodeSurface, closeCodeSurface, mountCodeSurface } from "./code/CodeSurface";
+import {
+  ConversationEventReducer,
+  isConversationEvent,
+} from "./conversation/ConversationEventReducer.ts";
+import { getOrCreateConversationId } from "./conversation/conversationSession.ts";
 import { activateLiveOrb } from "./live/LiveOrb";
 import { createCommandComposer } from "./live/CommandComposer";
 import { createLiveCaption } from "./live/LiveCaption";
@@ -85,6 +91,16 @@ const petModeButton = document.querySelector<HTMLButtonElement>(".pet-mode-contr
 const drawerManager = createDrawerManager(document.querySelector<HTMLElement>("#drawer-root")!);
 const statusRail = createStatusRail(document.querySelector<HTMLElement>(".status-rail")!);
 const liveCaption = createLiveCaption(caption, () => document.dispatchEvent(new CustomEvent("javis:open-conversations")));
+const conversationId = getOrCreateConversationId(localStorage);
+const conversationCursorKey = `conversation.${conversationId}.cursor`;
+const storedConversationCursor = Number.parseInt(
+  readStringPreference(conversationCursorKey, "0"),
+  10,
+);
+const conversationEvents = new ConversationEventReducer(
+  conversationId,
+  Number.isFinite(storedConversationCursor) ? storedConversationCursor : 0,
+);
 const liveSurfaceStatus = createSurfaceStatus(
   document.querySelector<HTMLElement>(".live-surface-status")!,
 );
@@ -94,6 +110,8 @@ let controlDrawer: ReturnType<typeof createControlDrawer> | null = null;
 let settingsSurface: ReturnType<typeof createSettingsSurface> | null = null;
 let diagnostics: ReturnType<typeof createDiagnosticsPanel>;
 let diagnosticsReturnMode: DesktopMode = "live";
+let voiceCapture!: ReturnType<typeof createVoiceCapture>;
+const voiceRequestIds = new Set<string>();
 const sidecar = createSidecarClient();
 let backendConnection: ConnectionSnapshot = { http: false, websocket: false };
 let desktopSidecar: SidecarSnapshot = { state: isTauriRuntime() ? "unknown" : "offline" };
@@ -113,12 +131,57 @@ function mergeConnectionDetails(): void {
 }
 
 const client = createBackendClient({
+  sessionId: conversationId,
+  afterSequence: () => conversationEvents.current().lastSequence,
   onConnection: (snapshot) => {
     backendConnection = snapshot;
     mergeConnectionDetails();
   },
   onEvent: (event) => {
-    if (event.type === "text_delta") liveCaption.append(String(event.text || ""), String(event.request_id || ""));
+    if (isConversationEvent(event)) {
+      const previous = conversationEvents.current();
+      const snapshot = conversationEvents.accept(event);
+      if (snapshot.lastSequence !== previous.lastSequence) {
+        writeStringPreference(conversationCursorKey, String(snapshot.lastSequence));
+      }
+      if (event.type === "request.accepted" && snapshot.activeRequestId === event.request_id) {
+        liveCaption.begin(event.request_id, "正在理解");
+      } else if (
+        event.type === "response.delta"
+        && previous.activeRequestId === event.request_id
+        && snapshot.response !== previous.response
+      ) {
+        liveCaption.setText(snapshot.response, event.request_id);
+      } else if (event.type === "request.cancelled" && previous.activeRequestId === event.request_id) {
+        liveCaption.setText("已中断", event.request_id);
+      }
+      if (
+        event.type === "request.completed"
+        || event.type === "request.cancelled"
+        || event.type === "request.failed"
+      ) {
+        const voiceTurn = voiceRequestIds.delete(event.request_id);
+        if (event.type === "request.completed" && voiceTurn && snapshot.response.trim()) {
+          void client.post<{
+            ok: boolean;
+            active: boolean;
+            duration_ms?: number;
+          }>("/api/voice/playback/speak", { text: snapshot.response.trim() })
+            .then((playback) => {
+              if (!playback.ok || !playback.active) return;
+              runtimeStateCoordinator.signal({
+                source: "voice",
+                state: "speaking",
+                timestamp: Date.now(),
+                detail: "正在回答",
+              });
+              window.setTimeout(() => voiceCapture.resumeListeningState(), playback.duration_ms ?? 0);
+            })
+            .catch(() => undefined);
+        }
+        queueMicrotask(() => voiceCapture.resumeListeningState());
+      }
+    }
     if (event.type === "app_action") {
       document.dispatchEvent(new CustomEvent("javis:surface-command", {
         detail: event.action,
@@ -143,7 +206,7 @@ const firstRun = createFirstRunPanel({
 });
 const showCodeSurface = (): void => {
   const transition = setDesktopMode("code");
-  openCodeSurface();
+  openCodeSurface(conversationId);
   void transition;
 };
 const showSettingsSurface = (): void => {
@@ -224,7 +287,35 @@ composer = createCommandComposer(form, input, (text) => {
   if (/code|代码|编程|项目|文件|终端/i.test(text)) showCodeSurface();
   return Boolean(client.send(text));
 });
-const voiceCapture = createVoiceCapture(client, {
+const stopAudioPlayback = (): void => {
+  document.querySelectorAll<HTMLAudioElement>("audio").forEach((audio) => {
+    audio.pause();
+    audio.currentTime = 0;
+  });
+  window.speechSynthesis?.cancel();
+  document.dispatchEvent(new CustomEvent("javis:stop-audio"));
+};
+voiceCapture = createVoiceCapture(client, {
+  noiseProfile: () => {
+    const profile = readStringPreference("voice.noiseProfile", "standard");
+    return profile === "off" || profile === "strong" ? profile : "standard";
+  },
+  onBargeIn: async () => {
+    stopAudioPlayback();
+    await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
+    client.cancel("voice barge-in");
+  },
+  onPartial: (text) => {
+    liveCaption.setText(text);
+  },
+  onLevel: (level) => {
+    liveOrb.setAudioLevel(level);
+  },
+  onTranscript: (text) => {
+    liveCaption.setText(text);
+    const requestId = client.send(text);
+    if (requestId) voiceRequestIds.add(requestId);
+  },
   onAudio: (audioBase64) => client.sendVoice(audioBase64),
   onState: (state) => runtimeStateCoordinator.signal({ source: "voice", state, timestamp: Date.now(), detail: state === "listening" ? "我在听" : "正在理解" }),
   onError: (message) => {
@@ -234,7 +325,7 @@ const voiceCapture = createVoiceCapture(client, {
 diagnostics = createDiagnosticsPanel(client, sidecar, voiceCapture, {
   onClose: () => {
     if (diagnosticsReturnMode === "code") {
-      void setDesktopMode("code").then(() => openCodeSurface());
+      void setDesktopMode("code").then(() => openCodeSurface(conversationId));
       return;
     }
     if (diagnosticsReturnMode !== "settings") {
@@ -255,7 +346,7 @@ settingsSurface = createSettingsSurface({
   root: document.querySelector<HTMLElement>("#settings-root")!,
   onClose: (mode) => {
     if (mode === "code") {
-      void setDesktopMode("code").then(() => openCodeSurface());
+      void setDesktopMode("code").then(() => openCodeSurface(conversationId));
       return;
     }
     closeCodeSurface();
@@ -383,6 +474,12 @@ document.addEventListener("javis:surface-command", (event) => {
 });
 document.addEventListener("javis:open-first-run", () => firstRun.open());
 document.addEventListener("javis:open-settings", showSettingsSurface);
+document.addEventListener("javis:voice-profile-changed", (event) => {
+  const profile = (event as CustomEvent<unknown>).detail;
+  if (profile === "off" || profile === "standard" || profile === "strong") {
+    void voiceCapture.setNoiseProfile(profile);
+  }
+});
 const firstRunRequired = firstRun.showOnFirstRun();
 void setDesktopMode(getStartupDesktopMode(firstRunRequired));
 

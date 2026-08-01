@@ -1,4 +1,5 @@
 export type LiveCaption = {
+  begin(requestId: string, text?: string): void;
   setText(text: string, requestId?: string): void;
   append(delta: string, requestId?: string): void;
 };
@@ -6,6 +7,7 @@ export type LiveCaption = {
 export function createLiveCaption(element: HTMLElement, onExpand: () => void): LiveCaption {
   let activeRequest = "";
   let fullText = "";
+  let hasResponse = false;
   element.classList.add("line-clamp");
   element.addEventListener("click", () => {
     if (fullText.length > 120) onExpand();
@@ -18,17 +20,23 @@ export function createLiveCaption(element: HTMLElement, onExpand: () => void): L
   }
 
   return {
+    begin(requestId, text = "正在理解") {
+      activeRequest = requestId;
+      fullText = text;
+      hasResponse = false;
+      render();
+    },
     setText(text, requestId = "") {
       activeRequest = requestId;
       fullText = text;
+      hasResponse = Boolean(requestId);
       render();
     },
     append(delta, requestId = "") {
-      if (requestId && requestId !== activeRequest) {
-        activeRequest = requestId;
-        fullText = "";
-      }
+      if (requestId && requestId !== activeRequest) return;
+      if (!hasResponse) fullText = "";
       fullText += delta;
+      hasResponse = true;
       render();
     },
   };

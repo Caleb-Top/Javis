@@ -44,7 +44,7 @@
               <main class="editor-pane"><header><span class="editor-title">README.md</span><span class="editor-state">已保存</span><button class="text-command editor-save">保存</button></header><textarea class="editor-text"># Javis Workspace
 
 Code Surface 通过受控 API 读取和保存文件。</textarea><div class="binary-metadata" hidden></div></main>
-              <section class="terminal-pane"><header><strong>受审计终端</strong><span class="terminal-status">completed · safe · exit 0</span></header><pre class="terminal-output">PS D:\Javis&gt; git status --short\n命令输出由 Control 层审计。</pre><form class="terminal-command"><select><option>PowerShell</option></select><input class="terminal-cwd" value="."><input placeholder="输入受控命令"><button class="text-command">运行</button><button class="text-command" disabled>停止</button></form></section>
+              <section class="terminal-pane"><header><strong>受审计终端</strong><span class="terminal-status">completed · safe · exit 0</span></header><pre class="terminal-output">PS [workspace]&gt; git status --short\n命令输出由 Control 层审计。</pre><form class="terminal-command"><select><option>PowerShell</option></select><input class="terminal-cwd" value="."><input placeholder="输入受控命令"><button class="text-command">运行</button><button class="text-command" disabled>停止</button></form></section>
             </div>
           </section>
         </div>
@@ -53,7 +53,7 @@ Code Surface 通过受控 API 读取和保存文件。</textarea><div class="bin
     </div>
     <section class="first-run-panel" role="dialog" aria-modal="true" aria-label="Javis 首次启动" tabindex="-1" hidden>
       <header class="first-run-header"><div><small>FIRST RUN</small><h1>本地数据与隐私</h1></div><button class="icon-button first-run-later" type="button" aria-label="稍后确认">×</button></header>
-      <div class="first-run-body"><p class="first-run-intro">Javis 在本机运行。确认下面的存储边界后即可进入 Live。</p><dl class="first-run-grid"><div><dt>配置、记忆与日志</dt><dd>%APPDATA%\Javis</dd></div><div><dt>本地模型</dt><dd>D:\JavisModels</dd></div><div><dt>授权工作区</dt><dd>D:\JavisWorkspace</dd></div><div><dt>麦克风</dt><dd>默认不保存原始麦克风音频，只处理当前转写请求。</dd></div><div><dt>屏幕与相机</dt><dd>屏幕和相机原始画面默认不落盘，只保留明确授权的结构化结果。</dd></div><div><dt>依赖</dt><dd>不会自动安装或下载依赖、模型或工具链。</dd></div></dl><div class="first-run-actions"><button class="text-command first-run-complete" type="button">确认并进入 Live</button></div></div>
+      <div class="first-run-body"><p class="first-run-intro">Javis 在本机运行。确认下面的存储边界后即可进入 Live。</p><dl class="first-run-grid"><div><dt>配置、记忆与日志</dt><dd>%APPDATA%\Javis</dd></div><div><dt>本地模型</dt><dd>models</dd></div><div><dt>授权工作区</dt><dd>workspace</dd></div><div><dt>麦克风</dt><dd>默认不保存原始麦克风音频，只处理当前转写请求。</dd></div><div><dt>屏幕与相机</dt><dd>屏幕和相机原始画面默认不落盘，只保留明确授权的结构化结果。</dd></div><div><dt>依赖</dt><dd>不会自动安装或下载依赖、模型或工具链。</dd></div></dl><div class="first-run-actions"><button class="text-command first-run-complete" type="button">确认并进入 Live</button></div></div>
     </section>
     <section class="diagnostics-panel" role="dialog" aria-modal="true" aria-label="Javis 诊断" hidden>
       <header class="diagnostics-header"><div><small>DIAGNOSTICS</small><h2>Javis 诊断</h2></div><button class="icon-button diagnostics-close" type="button" aria-label="关闭">×</button></header>

@@ -14,6 +14,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
+from utils.config_api import get_path_settings
+
 logger = logging.getLogger("engine")
 
 # ── 配置 ──
@@ -155,7 +157,7 @@ class InferenceEngine:
             "fallback": f"local/{LOCAL_MODEL}" if not self._fallback_active else "当前在用",
             "active": "fallback" if self._fallback_active else "primary",
             "consecutive_failures": self._consecutive_failures,
-            "local_model_path": os.environ.get("OLLAMA_MODELS", LOCAL_MODEL_PATH),
+            "local_model_path": get_path_settings()["model_dir"],
         }
 
     def _switch_to_local(self):

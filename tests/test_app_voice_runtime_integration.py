@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackagedVoiceRuntimeTests(unittest.TestCase):
@@ -145,17 +145,19 @@ class PackagedVoiceRuntimeTests(unittest.TestCase):
 
     def test_backend_and_app_preserve_tts_mime(self):
         main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        gateway_source = (ROOT / "gateway/conversation_ws.py").read_text(encoding="utf-8")
         diagnostics = (ROOT / "app/src/panels/DiagnosticsPanel.ts").read_text(encoding="utf-8")
 
         self.assertIn('"mime": mime', main_source)
         self.assertIn('response.mime || "audio/mpeg"', diagnostics)
-        self.assertIn("await asyncio.to_thread(transcribe, ab)", main_source)
+        self.assertIn("await asyncio.to_thread(self.transcribe, audio)", gateway_source)
 
     def test_app_uses_native_audio_and_backend_screen_capture(self):
         voice_capture = (ROOT / "app/src/live/VoiceCapture.ts").read_text(encoding="utf-8")
         control = (ROOT / "app/src/panels/ControlDrawer.ts").read_text(encoding="utf-8")
 
         self.assertIn('"/api/voice/capture/probe"', voice_capture)
+        self.assertIn("/ws_voice_stream", voice_capture)
         self.assertNotIn("navigator.mediaDevices", voice_capture)
         self.assertIn('"/api/perception/screen/analyze"', control)
 

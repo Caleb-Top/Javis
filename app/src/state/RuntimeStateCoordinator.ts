@@ -1,5 +1,5 @@
-import type { LiveState } from "../live/liveState";
-import type { RuntimeSnapshot, RuntimeStateListener, StateSignal } from "./runtimeStateTypes";
+import type { LiveState } from "../live/liveState.ts";
+import type { RuntimeSnapshot, RuntimeStateListener, StateSignal } from "./runtimeStateTypes.ts";
 
 export const STATE_PRIORITY: Record<LiveState, number> = {
   idle: 0,

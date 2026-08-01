@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis/app")
+ROOT = Path(__file__).resolve().parents[1] / "app"
 
 
 class AppFirstRunTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class AppFirstRunTests(unittest.TestCase):
     def test_first_run_surface_explains_paths_and_privacy_defaults(self):
         panel = (ROOT / "src" / "app" / "FirstRunPanel.ts").read_text(encoding="utf-8")
 
-        for text in ["%APPDATA%\\Javis", "D:\\JavisModels", "D:\\JavisWorkspace"]:
+        for text in ["%APPDATA%\\Javis", "models", "workspace"]:
             self.assertIn(text, panel)
         self.assertIn("默认不保存原始麦克风音频", panel)
         self.assertIn("屏幕和相机原始画面默认不落盘", panel)

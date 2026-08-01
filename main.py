@@ -1,5 +1,6 @@
 ﻿"""JARVIS Web 版入口"""
 import os,sys,json,logging,asyncio
+from contextlib import asynccontextmanager
 sys.excepthook=lambda t,v,tb:print(f"FATAL: {t.__name__}: {v}",file=sys.stderr,flush=True)
 from pathlib import Path
 ROOT=Path(__file__).parent;sys.path.insert(0,str(ROOT))
@@ -16,6 +17,8 @@ _TEST_MODE = _env_flag("JAVIS_TEST_MODE")
 _STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_SIDE_EFFECTS")
 
 from core.runtime import create_runtime
+from core.agent_run_recorder import AgentRunRecorder
+from gateway.conversation_ws import ConversationWebSocketGateway
 from control.command_tasks import CommandTaskRunner
 from evolution.service import EvolutionService
 from memory.session_db import SessionEventStore
@@ -30,6 +33,10 @@ from voice.native_capture import (
     start_capture,
     stop_capture,
 )
+from voice.continuous_capture import continuous_capture_manager
+from voice.native_playback import NativePlaybackManager
+from voice.stt import preload_model
+from voice.streaming_ws import serve_continuous_voice_stream
 from utils.local_surface_commands import match_local_surface_command
 
 def _event_store_path() -> Path:
@@ -100,6 +107,7 @@ engine = runtime.engine
 agent = runtime.agent
 SKILL_LIST = runtime.skill_list
 CURRENT_SKILL = runtime.current_skill
+native_playback_manager = NativePlaybackManager(service=continuous_capture_manager.service)
 
 def _register_always_on_tools():
     runtime.register_always_on_tools()
@@ -118,7 +126,27 @@ def _discover():
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
 from utils.app_cors import install_desktop_cors
-app=FastAPI(title="JARVIS",version="2.0")
+
+
+@asynccontextmanager
+async def _app_lifespan(_app):
+    warmup_task = None
+    if _STARTUP_SIDE_EFFECTS:
+        warmup_task = asyncio.create_task(asyncio.to_thread(preload_model))
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(native_playback_manager.stop)
+        await asyncio.to_thread(continuous_capture_manager.stop)
+        if warmup_task is not None and warmup_task.done():
+            try:
+                warmup_task.result()
+            except Exception as error:
+                logger.warning("STT model warmup failed: %s", error)
+        await runtime.aclose()
+
+
+app=FastAPI(title="JARVIS",version="2.0",lifespan=_app_lifespan)
 install_desktop_cors(app)
 
 @app.get("/")
@@ -139,142 +167,90 @@ def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
     full.write_text((content or "")[:100000], encoding="utf-8")
     return full
 
-@app.websocket("/ws")
-async def ws(ws:WebSocket):
-    await ws.accept()
-    async def _dispatch_local_surface_action(text: str, payload: dict) -> bool:
-        if str(payload.get("interaction_mode", "") or "") != "live":
-            return False
-        action = match_local_surface_command(text)
-        if not action:
-            return False
-        request_id = str(payload.get("request_id", "") or "")
-        await ws.send_json({
-            "type": "app_action",
-            "action": action,
-            "request_id": request_id,
-        })
-        await ws.send_json({
-            "type": "done",
-            "detail": f"{action} opened",
-            "request_id": request_id,
-        })
-        return True
+def _resolve_local_surface_action(text: str, payload: dict):
+    return match_local_surface_command(text)
 
-    async def _agent_loop(
-        text: str,
-        session_id: str = "",
-        cards: list | None = None,
-        interaction_mode: str = "",
-    ):
-        """并发运行 agent, 同时监听 WS 消息 (解决 confirm 死锁)"""
-        q = asyncio.Queue()
-        async def _run():
-            try:
-                async for msg in agent.chat(
-                    text,
-                    session_id=session_id,
-                    conversation_cards=cards or [],
-                    interaction_mode=interaction_mode,
-                ):
-                    await q.put(msg)
-            finally:
-                await q.put(None)
-        task = asyncio.create_task(_run())
-        running = True
-        while running:
-            gq = asyncio.create_task(q.get())
-            rw = asyncio.create_task(ws.receive_text())
-            done, pend = await asyncio.wait([gq, rw], return_when=asyncio.FIRST_COMPLETED)
-            for t in pend: t.cancel()
-            for t in done:
-                try: r = t.result()
-                except: continue
-                if t == gq:
-                    if r is None: running = False
-                    else: await ws.send_json(r)
-                else:
-                    m2=json.loads(r);t2=m2.get("type","")
-                    if t2=="confirm" and hasattr(agent,'resolve_confirm'):
-                        agent.resolve_confirm(m2.get("payload",{}).get("confirmed",False))
-                    elif t2=="permission_change":
-                        perm = m2.get("payload",{}).get("permission","quick_auth")
-                        try:
-                            r = set_permission_level(perm)
-                            runtime.sync_permission(perm)
-                        except: pass
-                    elif t2=="ping":
-                        await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
+
+def _transcribe_voice_payload(audio: str) -> str:
+    from voice.stt import transcribe
+
+    return transcribe(audio)
+
+
+async def _handle_ws_folder_file(command, ws):
+    path = str(command.payload.get("path") or "")
+    if not path:
+        return
     try:
-        while True:
-            d=await ws.receive_text();m=json.loads(d);t=m.get("type","message")
-            if t=="message":
-                payload = m.get("payload",{})
-                u=payload.get("text","").strip()
-                if not u:continue
-                if await _dispatch_local_surface_action(u, payload):
-                    continue
-                await _agent_loop(
-                    u,
-                    session_id=str(payload.get("session_id","") or ""),
-                    cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
-                    interaction_mode=str(payload.get("interaction_mode", "") or ""),
-                )
-                continue
-            elif t=="folder_file":
-                p=m.get("payload",{}); path=p.get("path",""); content=p.get("content","")
-                if path:
-                    try:
-                        full = _save_uploaded_file_for_ws(path, content)
-                        logger.info(f"📁 已保存上传文件: {full.name} ({len(content)}字符)")
-                    except ValueError:
-                        logger.warning(f'路径遍历拦截: {path}')
-                        continue
-            elif t=="voice":
-                payload=m.get("payload",{})
-                ab=payload.get("audio","")
-                request_id = str(payload.get("request_id", "") or "")
-                if ab:
-                    from voice.stt import transcribe
-                    txt = await asyncio.to_thread(transcribe, ab)
-                    if txt:
-                        await ws.send_json({
-                            "type": "voice_transcript",
-                            "text": txt,
-                            "request_id": request_id,
-                        })
-                        if await _dispatch_local_surface_action(txt, payload):
-                            continue
-                        await _agent_loop(
-                            txt,
-                            session_id=str(payload.get("session_id","") or ""),
-                            cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
-                            interaction_mode=str(payload.get("interaction_mode", "") or ""),
-                        )
-                    else:
-                        await ws.send_json({
-                            "type": "done",
-                            "detail": "未识别到语音",
-                            "request_id": request_id,
-                        })
-                else:
-                    await ws.send_json({
-                        "type": "done",
-                        "detail": "录音为空",
-                        "request_id": request_id,
-                    })
-            elif t=="confirm":
-                confirmed=m.get("payload",{}).get("confirmed",False)
-                if hasattr(agent,'resolve_confirm'):
-                    agent.resolve_confirm(confirmed)
-            elif t=="tool":
-                tn=m.get("payload",{}).get("name","");tp=m.get("payload",{}).get("params",{})
-                if tn:
-                    r=await registry.execute(tn,tp)
-                    await ws.send_json({"type":"tool_result","tool":tn,"success":r.success,"data":(r.data or r.error or "")[:500],"image":r.image or ""})
-                    await ws.send_json({"type":"done"})
-            elif t=="ping":await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
-    except WebSocketDisconnect:pass
+        full = _save_uploaded_file_for_ws(path, str(command.payload.get("content") or ""))
+        await ws.send_json({"type": "folder_file_saved", "path": str(full)})
+    except ValueError as exc:
+        await ws.send_json({
+            "type": "protocol.error",
+            "payload": {"code": "invalid_upload_path", "message": str(exc)},
+        })
+
+
+async def _handle_ws_tool(command, ws):
+    tool_name = str(command.payload.get("name") or "")
+    params = command.payload.get("params")
+    params = params if isinstance(params, dict) else {}
+    if not tool_name:
+        return
+    recorder = AgentRunRecorder(
+        runtime.agent_runs,
+        f"Execute tool: {tool_name}",
+        interaction_mode="tool",
+    )
+    recorder.record({"type": "tool_start", "tool": tool_name, "params": params})
+    result = await registry.execute(tool_name, params)
+    event = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "success": result.success,
+        "data": (result.data or result.error or "")[:500],
+        "image": result.image or "",
+    }
+    recorder.record(event)
+    recorder.record({"type": "done"})
+    await ws.send_json(event)
+    await ws.send_json({"type": "done"})
+
+
+async def _handle_ws_permission_change(command, ws):
+    permission = str(command.payload.get("permission") or "quick_auth")
+    try:
+        result = set_permission_level(permission)
+        runtime.sync_permission(permission)
+        await ws.send_json({"type": "permission_changed", "payload": result})
+    except Exception as exc:
+        await ws.send_json({
+            "type": "protocol.error",
+            "payload": {"code": "permission_change_failed", "message": str(exc)[:200]},
+        })
+
+
+conversation_gateway = ConversationWebSocketGateway(
+    runtime,
+    transcribe=_transcribe_voice_payload,
+    local_action_resolver=_resolve_local_surface_action,
+    command_handlers={
+        "folder_file": _handle_ws_folder_file,
+        "tool": _handle_ws_tool,
+        "permission_change": _handle_ws_permission_change,
+    },
+)
+
+
+@app.websocket("/ws")
+async def ws(ws: WebSocket):
+    await conversation_gateway.serve(ws)
+
+
+@app.websocket("/ws_voice_stream")
+async def ws_voice_stream(ws: WebSocket):
+    await serve_continuous_voice_stream(ws, continuous_capture_manager)
+
 
 from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,_get_api_key
 from core.agent import action_log
@@ -282,7 +258,7 @@ from utils.memory import save_conversation,load_conversation,list_conversations,
 
 @app.get("/api/status")
 async def api_status():
-    s=get_status();s["service"]="javis";s["skill"]=CURRENT_SKILL;s["skill_count"]=registry.count;s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
+    s=get_status();s["service"]="javis";s["skill"]=CURRENT_SKILL;s["tool_count"]=registry.count;s["skill_count"]=runtime.skill_catalog.stats()["total"];s["operational_skill_count"]=len(runtime.skill_list);s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
     try:s["engine"]=engine.get_power_status()
     except Exception as e:logger.debug(f"引擎状态获取异常: {e}")
     return s
@@ -294,9 +270,49 @@ async def api_voice_diagnostics():
 
     return {
         "capture": get_capture_diagnostics(),
+        "continuous": continuous_capture_manager.status(),
+        "playback": native_playback_manager.status(),
         "stt": get_stt_diagnostics(),
         "tts": get_tts_diagnostics(),
     }
+
+@app.post("/api/voice/playback/speak")
+async def api_voice_playback_speak(data: dict = Body(default={})):
+    text = str(data.get("text", "") or "").strip()[:3000]
+    if not text:
+        return {"ok": False, "error": "text is required", "active": False}
+    reservation = await asyncio.to_thread(native_playback_manager.reserve)
+    from voice.tts import synthesize
+
+    audio, mime = await synthesize(text)
+    if not audio:
+        return {"ok": False, "error": "speech synthesis failed", "active": False}
+    if mime != "audio/wav":
+        return {
+            "ok": False,
+            "error": "native playback currently requires local PCM WAV speech",
+            "mime": mime,
+            "active": False,
+        }
+    import base64
+
+    try:
+        wav_bytes = base64.b64decode(audio, validate=True)
+        result = await asyncio.to_thread(
+            native_playback_manager.play_reserved_wav,
+            wav_bytes,
+            None,
+            None,
+            None,
+            reservation,
+        )
+    except Exception as error:
+        return {"ok": False, "error": str(error), "active": False}
+    return {**result, "mime": mime}
+
+@app.post("/api/voice/playback/stop")
+async def api_voice_playback_stop():
+    return await asyncio.to_thread(native_playback_manager.stop)
 
 @app.post("/api/voice/capture/start")
 async def api_voice_capture_start(data: dict = Body(default={})):
@@ -374,6 +390,171 @@ async def api_voice_tts_test(data: dict = Body(default={})):
 @app.get("/api/runtime/status")
 async def api_runtime_status():
     return runtime.get_runtime_status()
+
+def _catalog_error(code: str, message: str) -> dict:
+    return {"ok": False, "error": {"code": code, "message": str(message)[:500]}}
+
+@app.get("/api/tool-catalog")
+async def api_tool_catalog(
+    q: str = "",
+    preset: str = "",
+    category: str = "",
+    tag: str = "",
+    max_risk: str = "",
+    limit: int = 50,
+):
+    try:
+        bounded_limit = max(1, min(int(limit), 100))
+        if q.strip():
+            tools = runtime.tool_catalog.search(
+                q,
+                preset=preset or None,
+                max_risk=max_risk or None,
+                limit=bounded_limit,
+            )
+        else:
+            categories = tuple(value.strip() for value in category.split(",") if value.strip())
+            tags = tuple(value.strip() for value in tag.split(",") if value.strip())
+            tools = runtime.tool_catalog.list_tools(
+                preset=preset or None,
+                categories=categories,
+                tags=tags,
+                max_risk=max_risk or None,
+            )[:bounded_limit]
+        return {"ok": True, "tools": tools, "count": len(tools)}
+    except (KeyError, TypeError, ValueError) as error:
+        return _catalog_error("invalid_tool_query", str(error))
+
+@app.get("/api/tool-catalog/{name}")
+async def api_tool_catalog_inspect(name: str):
+    tool = runtime.tool_catalog.inspect(name)
+    if tool is None:
+        return _catalog_error("tool_not_found", f"Unknown tool: {name}")
+    return {"ok": True, "tool": tool, "health": runtime.tool_catalog.health(name)[0]}
+
+@app.get("/api/skill-catalog")
+async def api_skill_catalog(
+    q: str = "",
+    status: str = "",
+    source: str = "",
+    limit: int = 50,
+):
+    try:
+        bounded_limit = max(1, min(int(limit), 100))
+        if q.strip():
+            skills = runtime.skill_catalog.search(q, limit=bounded_limit)
+            if status:
+                skills = [skill for skill in skills if skill["status"] == status]
+            if source:
+                skills = [skill for skill in skills if skill["source"] == source]
+        else:
+            skills = runtime.skill_catalog.list_skills(
+                status=status or None,
+                source=source or None,
+            )[:bounded_limit]
+        return {"ok": True, "skills": skills, "count": len(skills)}
+    except (TypeError, ValueError) as error:
+        return _catalog_error("invalid_skill_query", str(error))
+
+@app.get("/api/skill-catalog/{name}")
+async def api_skill_catalog_inspect(name: str):
+    skill = runtime.skill_catalog.get(name)
+    if skill is None:
+        return _catalog_error("skill_not_found", f"Unknown skill: {name}")
+    return {"ok": True, "skill": skill}
+
+@app.post("/api/skill-catalog/evaluate")
+async def api_skill_catalog_evaluate(data: dict = Body(...)):
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return _catalog_error("invalid_skill", "name is required")
+    try:
+        skill = runtime.skill_catalog.record_evaluation(
+            name,
+            str(data.get("status", "untested")),
+            score=data.get("score"),
+            details=data.get("details") if isinstance(data.get("details"), dict) else {},
+        )
+        return {"ok": True, "skill": skill}
+    except KeyError:
+        return _catalog_error("skill_not_found", f"Unknown skill: {name}")
+    except (TypeError, ValueError) as error:
+        return _catalog_error("skill_evaluation_rejected", str(error))
+
+@app.post("/api/skill-catalog/status")
+async def api_skill_catalog_status(data: dict = Body(...)):
+    name = str(data.get("name", "")).strip()
+    target = str(data.get("status", "")).strip()
+    if not name or not target:
+        return _catalog_error("invalid_skill", "name and status are required")
+    try:
+        skill = runtime.skill_catalog.promote(name, target)
+        return {"ok": True, "skill": skill}
+    except KeyError:
+        return _catalog_error("skill_not_found", f"Unknown skill: {name}")
+    except (TypeError, ValueError) as error:
+        return _catalog_error("skill_transition_rejected", str(error))
+
+@app.get("/api/agent-runs")
+async def api_agent_runs(status: str = "", limit: int = 50):
+    runs = runtime.agent_runs.list_runs(status=status or None, limit=max(1, min(int(limit), 100)))
+    return {"ok": True, "runs": runs, "count": len(runs)}
+
+@app.post("/api/agent-runs")
+async def api_agent_run_create(data: dict = Body(...)):
+    objective = str(data.get("objective", "")).strip()
+    if not objective:
+        return _catalog_error("invalid_run", "objective is required")
+    try:
+        run = runtime.agent_runs.create_run(
+            objective,
+            metadata=data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
+            parent_run_id=str(data.get("parent_run_id") or "") or None,
+        )
+        return {"ok": True, "run": run}
+    except (KeyError, TypeError, ValueError) as error:
+        return _catalog_error("run_create_failed", str(error))
+
+@app.get("/api/agent-runs/{run_id}")
+async def api_agent_run_get(run_id: str):
+    run = runtime.agent_runs.get_run(run_id, include_graph=True)
+    if run is None:
+        return _catalog_error("run_not_found", f"Unknown run: {run_id}")
+    return {"ok": True, "run": run}
+
+@app.post("/api/agent-runs/{run_id}/cancel")
+async def api_agent_run_cancel(run_id: str, data: dict = Body(default={})):
+    try:
+        run = runtime.agent_runs.cancel_run(run_id, reason=str(data.get("reason", "")))
+        return {"ok": True, "run": run}
+    except KeyError:
+        return _catalog_error("run_not_found", f"Unknown run: {run_id}")
+    except (TypeError, ValueError, RuntimeError) as error:
+        return _catalog_error("run_transition_rejected", str(error))
+
+@app.post("/api/agent-runs/{run_id}/resume")
+async def api_agent_run_resume(run_id: str):
+    try:
+        result = runtime.agent_runs.resume_run(run_id)
+        return {"ok": True, **result}
+    except KeyError:
+        return _catalog_error("run_not_found", f"Unknown run: {run_id}")
+    except (TypeError, ValueError, RuntimeError) as error:
+        return _catalog_error("run_transition_rejected", str(error))
+
+@app.post("/api/agent-runs/approvals/{approval_id}")
+async def api_agent_approval_resolve(approval_id: str, data: dict = Body(...)):
+    try:
+        approval = runtime.agent_runs.resolve_approval(
+            approval_id,
+            approved=bool(data.get("approved", False)),
+            response=data.get("response") if isinstance(data.get("response"), dict) else {},
+        )
+        return {"ok": True, "approval": approval}
+    except KeyError:
+        return _catalog_error("approval_not_found", f"Unknown approval: {approval_id}")
+    except (TypeError, ValueError, RuntimeError) as error:
+        return _catalog_error("approval_transition_rejected", str(error))
 
 @app.get("/api/blueprint/coverage")
 async def api_blueprint_coverage():

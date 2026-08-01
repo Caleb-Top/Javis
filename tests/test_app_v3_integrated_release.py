@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis")
+ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
 
 
@@ -112,6 +112,34 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
         )
         self.assertNotIn('taskkill.exe").args(["/F", "/IM", "python.exe"]', runtime)
 
+    def test_runtime_extraction_ignores_nonportable_zip_timestamps(self):
+        runtime = self.read("app/src-tauri/src/runtime_bundle.rs")
+
+        self.assertIn('Command::new("tar.exe")', runtime)
+        self.assertIn('.args(["-m", "-xf"])', runtime)
+
+    def test_webview2_loader_is_bundled_beside_the_app_executable(self):
+        tauri = json.loads(
+            (APP / "src-tauri/tauri.conf.json").read_text(encoding="utf-8")
+        )
+        build = self.read("scripts/build_javis_app_v3.ps1")
+        installer_verify = self.read("scripts/verify_javis_v3_installer.ps1")
+
+        self.assertIsInstance(tauri["bundle"]["resources"], dict)
+        self.assertEqual(
+            tauri["bundle"]["resources"]["resources/WebView2Loader.dll"],
+            "WebView2Loader.dll",
+        )
+        for contract in (
+            "webview2-com-sys-*",
+            'x64\\WebView2Loader.dll',
+            '$JavisWebView2LoaderResource',
+            "Get-FileHash",
+        ):
+            self.assertIn(contract, build)
+        self.assertIn('Join-Path $AppExe.DirectoryName "WebView2Loader.dll"', installer_verify)
+        self.assertIn('"Installed WebView2 loader"', installer_verify)
+
     def test_v3_build_is_offline_and_produces_verified_desktop_zip(self):
         build = self.read("scripts/build_javis_app_v3.ps1")
         installer_verify = self.read("scripts/verify_javis_v3_installer.ps1")
@@ -122,7 +150,9 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "verify_javis_release.py",
             "verify_javis_v3_installer.ps1",
             "Javis-v3.0.0-test",
+            "Javis-v3.0.0-Verified",
             "Javis-v3.0.0-Windows-x64.zip",
+            "ZIP-SHA256.txt",
             "SHA256SUMS.txt",
         ):
             self.assertIn(contract, build)
@@ -150,6 +180,17 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "$DataRoot",
         ):
             self.assertIn(contract, installer_verify)
+
+    def test_v3_build_uses_the_installed_rust_toolchain_without_rustup_sync(self):
+        build = self.read("scripts/build_javis_app_v3.ps1")
+
+        self.assertIn("$JavisRustToolchainBin", build)
+        self.assertIn('Join-Path $JavisRustToolchainBin "cargo.exe"', build)
+        self.assertIn('Join-Path $JavisRustToolchainBin "rustc.exe"', build)
+        self.assertNotIn("$env:RUSTUP_TOOLCHAIN", build)
+        self.assertNotIn("$env:CARGO_BUILD_TARGET", build)
+        self.assertNotIn("build --target", build)
+        self.assertIn('"src-tauri\\target\\release"', build)
 
 
 if __name__ == "__main__":

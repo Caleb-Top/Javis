@@ -22,8 +22,8 @@ export function createFirstRunPanel(options: FirstRunPanelOptions = {}) {
       <p class="first-run-intro">Javis 在本机运行。确认下面的存储边界后即可进入 Live。</p>
       <dl class="first-run-grid">
         <div><dt>配置、记忆与日志</dt><dd>%APPDATA%\Javis</dd></div>
-        <div><dt>本地模型</dt><dd>D:\JavisModels</dd></div>
-        <div><dt>授权工作区</dt><dd>D:\JavisWorkspace</dd></div>
+        <div><dt>本地模型</dt><dd>models</dd></div>
+        <div><dt>授权工作区</dt><dd>workspace</dd></div>
         <div><dt>麦克风</dt><dd>默认不保存原始麦克风音频，只处理当前转写请求。</dd></div>
         <div><dt>屏幕与相机</dt><dd>屏幕和相机原始画面默认不落盘，只保留明确授权的结构化结果。</dd></div>
         <div><dt>依赖</dt><dd>不会自动安装或下载依赖、模型或工具链。</dd></div>
