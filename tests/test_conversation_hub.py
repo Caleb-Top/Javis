@@ -247,6 +247,39 @@ class ConversationHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(token.cancelled)
         self.assertEqual(captured.exception.reason, "replacement")
 
+    async def test_cancelled_request_records_in_flight_tool_completion_before_stopping(self):
+        release = asyncio.Event()
+        tool_started = asyncio.Event()
+
+        async def runner(request, token):
+            yield {"type": "tool_start", "tool": "system_info", "params": {}}
+            tool_started.set()
+            await release.wait()
+            yield {
+                "type": "tool_result",
+                "tool": "system_info",
+                "success": True,
+                "data": "finished safely",
+            }
+            await token.checkpoint()
+
+        await self.hub.submit(
+            ConversationRequest("session-1", "request-1", "inspect", "live", "message-1"),
+            runner,
+        )
+        await asyncio.wait_for(tool_started.wait(), timeout=2)
+        await self.hub.cancel("session-1", "request-1", reason="voice barge-in")
+        release.set()
+        terminal = await self.hub.wait_for_terminal("request-1")
+        events = self.store.events_after("session-1")
+
+        completed = next(
+            event for event in events if event["type"] == "activity.tool_completed"
+        )
+        cancelled = next(event for event in events if event["type"] == "request.cancelled")
+        self.assertTrue(completed["payload"]["success"])
+        self.assertLess(completed["sequence"], cancelled["sequence"])
+
     async def test_shutdown_does_not_cancel_requests_that_are_already_terminal(self):
         async def runner(request, token):
             yield {"type": "text_delta", "text": "done"}

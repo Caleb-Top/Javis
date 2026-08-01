@@ -265,9 +265,10 @@ class ConversationHub:
         try:
             await active.token.checkpoint()
             async for message in runner(request, active.token):
-                await active.token.checkpoint()
-                recorder.record(message)
                 message_type = str(message.get("type", ""))
+                if message_type != "tool_result":
+                    await active.token.checkpoint()
+                recorder.record(message)
                 if message_type == "thinking":
                     await self._publish(
                         request.session_id,
@@ -306,6 +307,7 @@ class ConversationHub:
                             "data": str(message.get("data") or "")[:2000],
                         },
                     )
+                    await active.token.checkpoint()
                 elif message_type == "confirm_required":
                     approval_id = recorder.pending_approval_id
                     if approval_id is None:
