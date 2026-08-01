@@ -21,7 +21,7 @@ from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
 from core.middleware import MiddlewarePipeline
-from core.skill_catalog import SkillCatalog
+from core.skill_catalog import SkillCatalog, SkillGovernanceError
 from core.subsystem import SubsystemStatus
 from core.tool_catalog import ToolCatalog
 from core.tool_registry import ToolRegistry
@@ -459,6 +459,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
     )
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     runtime.register_always_on_tools()
+    _discover_external_skill_imports(runtime)
 
     if startup_side_effects:
         _connect_code_exec(registry, brain)
@@ -469,3 +470,17 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         runtime.load_skill("全功能")
 
     return runtime
+
+
+def _discover_external_skill_imports(runtime: JarvisRuntime) -> None:
+    external_root = runtime.root / "skills" / "external"
+    if not external_root.is_dir():
+        return
+    for manifest_path in sorted(
+        external_root.rglob("PROVENANCE.json"),
+        key=lambda value: str(value).casefold(),
+    ):
+        try:
+            runtime.skill_catalog.discover_manifest(manifest_path)
+        except (SkillGovernanceError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("External skill import rejected (%s): %s", manifest_path, exc)

@@ -116,6 +116,82 @@ class SkillCatalog:
             discovered.append(skill["name"])
         return discovered
 
+    def discover_manifest(self, manifest_path: str | Path) -> list[str]:
+        """Verify a governed import manifest before indexing any skill documents."""
+        manifest_file = Path(manifest_path).expanduser().resolve()
+        import_root = manifest_file.parent
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SkillGovernanceError(f"invalid provenance manifest: {exc}") from exc
+
+        if not isinstance(manifest, dict):
+            raise SkillGovernanceError("provenance manifest must be an object")
+        if manifest.get("schema_version") != 1:
+            raise SkillGovernanceError("unsupported provenance manifest schema")
+        if manifest.get("default_status") != "candidate":
+            raise SkillGovernanceError("external imports must default to candidate")
+
+        license_name = _normalize_license(manifest.get("license"))
+        if license_name not in ALLOWED_LICENSES:
+            raise SkillGovernanceError(f"license is not approved: {license_name}")
+
+        entries = manifest.get("files")
+        if not isinstance(entries, list) or not entries:
+            raise SkillGovernanceError("provenance manifest must list imported files")
+
+        listed_paths: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise SkillGovernanceError("invalid provenance file entry")
+            raw_path = entry.get("path")
+            expected_hash = str(entry.get("sha256") or "").lower()
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise SkillGovernanceError("provenance file path is required")
+            relative = Path(raw_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise SkillGovernanceError(f"unsafe provenance file path: {raw_path}")
+            resolved = (import_root / relative).resolve()
+            try:
+                resolved.relative_to(import_root)
+            except ValueError as exc:
+                raise SkillGovernanceError(
+                    f"provenance file escapes import root: {raw_path}"
+                ) from exc
+            if not resolved.is_file():
+                raise SkillGovernanceError(f"provenance file is missing: {raw_path}")
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                raise SkillGovernanceError(f"invalid provenance hash: {raw_path}")
+            actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if actual_hash != expected_hash:
+                raise SkillGovernanceError(f"provenance hash mismatch: {raw_path}")
+            listed_paths.append(relative.as_posix())
+
+        if len(listed_paths) != len(set(listed_paths)):
+            raise SkillGovernanceError("provenance manifest contains duplicate file paths")
+        actual_paths = sorted(
+            (
+                path.relative_to(import_root).as_posix()
+                for path in import_root.rglob("*")
+                if path.is_file() and path != manifest_file
+            ),
+            key=str.casefold,
+        )
+        if sorted(listed_paths, key=str.casefold) != actual_paths:
+            raise SkillGovernanceError("provenance manifest does not cover the import exactly")
+
+        skill_count = sum(path.casefold().endswith("/skill.md") for path in actual_paths)
+        if manifest.get("skill_count") != skill_count:
+            raise SkillGovernanceError("provenance skill count does not match imported files")
+
+        upstream = str(manifest.get("upstream") or "unknown").strip()
+        source_ref = str(manifest.get("source_ref") or "unknown").strip()
+        return self.discover(
+            import_root / "skills",
+            source=f"github:{upstream}@{source_ref}",
+            default_license=license_name,
+        )
+
     def register_document(
         self,
         path: str | Path,

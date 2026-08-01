@@ -1,10 +1,12 @@
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
-from core.skill_catalog import SkillCatalog
+from core.runtime import create_runtime
+from core.skill_catalog import SkillCatalog, SkillGovernanceError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +67,52 @@ class ExternalAgentSkillsTests(unittest.TestCase):
         self.assertTrue(all(skill["status"] == "candidate" for skill in skills))
         self.assertTrue(all(skill["evaluation_status"] == "untested" for skill in skills))
         self.assertTrue(all(skill["license"] == "MIT" for skill in skills))
+
+    def test_manifest_discovery_verifies_integrity_before_registering(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            imported = root / "agent-skills"
+            shutil.copytree(IMPORT_ROOT, imported)
+            catalog = SkillCatalog(root / "catalog.sqlite3")
+            try:
+                names = catalog.discover_manifest(imported / "PROVENANCE.json")
+            finally:
+                catalog.close()
+
+        self.assertEqual(len(names), 24)
+
+    def test_manifest_discovery_rejects_a_tampered_import_atomically(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            imported = root / "agent-skills"
+            shutil.copytree(IMPORT_ROOT, imported)
+            document = next((imported / "skills").rglob("SKILL.md"))
+            document.write_text(document.read_text(encoding="utf-8") + "\nTampered.\n", encoding="utf-8")
+            catalog = SkillCatalog(root / "catalog.sqlite3")
+            try:
+                with self.assertRaises(SkillGovernanceError):
+                    catalog.discover_manifest(imported / "PROVENANCE.json")
+                stats = catalog.stats()
+            finally:
+                catalog.close()
+
+        self.assertEqual(stats["total"], 0)
+
+    def test_runtime_auto_indexes_verified_external_imports_as_candidates(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            destination = root / "skills" / "external" / "agent-skills"
+            destination.parent.mkdir(parents=True)
+            shutil.copytree(IMPORT_ROOT, destination)
+            runtime = create_runtime(root, startup_side_effects=False)
+            try:
+                stats = runtime.skill_catalog.stats()
+                skills = runtime.skill_catalog.list_skills()
+            finally:
+                runtime.close()
+
+        self.assertEqual(stats["total"], 24)
+        self.assertTrue(all(skill["status"] == "candidate" for skill in skills))
 
 
 if __name__ == "__main__":
