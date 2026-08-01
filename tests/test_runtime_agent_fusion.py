@@ -40,6 +40,9 @@ class RuntimeAgentFusionTests(unittest.TestCase):
         self.assertLess(len(names), len(all_names))
         self.assertEqual(status["catalogs"]["tools"]["count"], len(all_names))
         self.assertEqual(status["catalogs"]["skills"]["total"], 0)
+        self.assertEqual(status["tool_count"], len(all_names))
+        self.assertEqual(status["skill_count"], status["catalogs"]["skills"]["total"])
+        self.assertEqual(status["operational_skill_count"], 0)
         self.assertEqual(status["agent_runs"]["active"], 0)
 
     def test_recorder_maps_existing_agent_messages_without_changing_them(self):
@@ -83,6 +86,7 @@ class RuntimeAgentFusionTests(unittest.TestCase):
         main = importlib.import_module("main")
 
         tools = asyncio.run(main.api_tool_catalog(q="web search", limit=10))
+        status = asyncio.run(main.api_status())
         inspected = asyncio.run(main.api_tool_catalog_inspect("tool_search"))
         missing = asyncio.run(main.api_tool_catalog_inspect("missing-tool"))
         created = asyncio.run(main.api_agent_run_create({"objective": "API contract test"}))
@@ -90,6 +94,12 @@ class RuntimeAgentFusionTests(unittest.TestCase):
         cancelled = asyncio.run(main.api_agent_run_cancel(created["run"]["id"], {"reason": "done"}))
 
         self.assertTrue(tools["ok"])
+        self.assertEqual(status["tool_count"], main.runtime.registry.count)
+        self.assertEqual(
+            status["skill_count"],
+            main.runtime.skill_catalog.stats()["total"],
+        )
+        self.assertEqual(status["operational_skill_count"], len(main.runtime.skill_list))
         self.assertNotIn("parameters", tools["tools"][0])
         self.assertTrue(inspected["ok"])
         self.assertIn("parameters", inspected["tool"])

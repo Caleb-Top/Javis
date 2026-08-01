@@ -108,11 +108,14 @@ class ExternalAgentSkillsTests(unittest.TestCase):
             try:
                 stats = runtime.skill_catalog.stats()
                 skills = runtime.skill_catalog.list_skills()
+                runtime_status = runtime.get_runtime_status()
             finally:
                 runtime.close()
 
         self.assertEqual(stats["total"], 24)
         self.assertTrue(all(skill["status"] == "candidate" for skill in skills))
+        self.assertEqual(runtime_status["skill_count"], stats["total"])
+        self.assertEqual(runtime_status["operational_skill_count"], 0)
 
 
 if __name__ == "__main__":

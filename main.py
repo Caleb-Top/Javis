@@ -333,7 +333,7 @@ from utils.memory import save_conversation,load_conversation,list_conversations,
 
 @app.get("/api/status")
 async def api_status():
-    s=get_status();s["service"]="javis";s["skill"]=CURRENT_SKILL;s["skill_count"]=registry.count;s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
+    s=get_status();s["service"]="javis";s["skill"]=CURRENT_SKILL;s["tool_count"]=registry.count;s["skill_count"]=runtime.skill_catalog.stats()["total"];s["operational_skill_count"]=len(runtime.skill_list);s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
     try:s["engine"]=engine.get_power_status()
     except Exception as e:logger.debug(f"引擎状态获取异常: {e}")
     return s

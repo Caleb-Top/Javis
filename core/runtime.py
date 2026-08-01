@@ -200,6 +200,7 @@ class JarvisRuntime:
 
     def get_runtime_status(self) -> dict[str, Any]:
         events = self.event_bus.history()
+        skill_stats = self.skill_catalog.stats()
         subsystem_status: dict[str, Any] = {}
         for name, subsystem in sorted(self.subsystems.items()):
             status = getattr(subsystem, "status", None)
@@ -217,8 +218,10 @@ class JarvisRuntime:
             "startup_side_effects": self.startup_side_effects,
             "model": self.llm.model,
             "tools": self.registry.count,
+            "tool_count": self.registry.count,
             "skill": self.current_skill,
-            "skill_count": len(self.skill_list),
+            "skill_count": skill_stats["total"],
+            "operational_skill_count": len(self.skill_list),
             "subsystems": sorted(self.subsystems),
             "subsystem_status": subsystem_status,
             "event_count": len(events),
@@ -226,7 +229,7 @@ class JarvisRuntime:
             "event_store": self._event_store_status(),
             "catalogs": {
                 "tools": {"count": self.registry.count},
-                "skills": self.skill_catalog.stats(),
+                "skills": skill_stats,
             },
             "agent_runs": self.agent_runs.stats(),
         }
