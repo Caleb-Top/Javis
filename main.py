@@ -1,5 +1,6 @@
 ﻿"""JARVIS Web 版入口"""
 import os,sys,json,logging,asyncio
+from contextlib import asynccontextmanager
 sys.excepthook=lambda t,v,tb:print(f"FATAL: {t.__name__}: {v}",file=sys.stderr,flush=True)
 from pathlib import Path
 ROOT=Path(__file__).parent;sys.path.insert(0,str(ROOT))
@@ -17,6 +18,7 @@ _STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_
 
 from core.runtime import create_runtime
 from core.agent_run_recorder import AgentRunRecorder
+from gateway.conversation_ws import ConversationWebSocketGateway
 from control.command_tasks import CommandTaskRunner
 from evolution.service import EvolutionService
 from memory.session_db import SessionEventStore
@@ -119,7 +121,17 @@ def _discover():
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
 from utils.app_cors import install_desktop_cors
-app=FastAPI(title="JARVIS",version="2.0")
+
+
+@asynccontextmanager
+async def _app_lifespan(_app):
+    try:
+        yield
+    finally:
+        await runtime.aclose()
+
+
+app=FastAPI(title="JARVIS",version="2.0",lifespan=_app_lifespan)
 install_desktop_cors(app)
 
 @app.get("/")
@@ -140,192 +152,85 @@ def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
     full.write_text((content or "")[:100000], encoding="utf-8")
     return full
 
-@app.websocket("/ws")
-async def ws(ws:WebSocket):
-    await ws.accept()
-    async def _dispatch_local_surface_action(text: str, payload: dict) -> bool:
-        if str(payload.get("interaction_mode", "") or "") != "live":
-            return False
-        action = match_local_surface_command(text)
-        if not action:
-            return False
-        request_id = str(payload.get("request_id", "") or "")
-        await ws.send_json({
-            "type": "app_action",
-            "action": action,
-            "request_id": request_id,
-        })
-        await ws.send_json({
-            "type": "done",
-            "detail": f"{action} opened",
-            "request_id": request_id,
-        })
-        return True
+def _resolve_local_surface_action(text: str, payload: dict):
+    return match_local_surface_command(text)
 
-    async def _agent_loop(
-        text: str,
-        session_id: str = "",
-        cards: list | None = None,
-        interaction_mode: str = "",
-    ):
-        """并发运行 agent, 同时监听 WS 消息 (解决 confirm 死锁)"""
-        recorder = None
-        try:
-            recorder = AgentRunRecorder(
-                runtime.agent_runs,
-                text,
-                session_id=session_id,
-                interaction_mode=interaction_mode,
-            )
-        except Exception as error:
-            logger.warning("Agent run recorder unavailable: %s", str(error)[:160])
-        q = asyncio.Queue()
-        async def _run():
-            try:
-                async for msg in agent.chat(
-                    text,
-                    session_id=session_id,
-                    conversation_cards=cards or [],
-                    interaction_mode=interaction_mode,
-                ):
-                    if recorder is not None:
-                        try:
-                            recorder.record(msg)
-                        except Exception as error:
-                            logger.warning("Agent run record skipped: %s", str(error)[:160])
-                    await q.put(msg)
-            finally:
-                if recorder is not None:
-                    try:
-                        recorder.finalize("completed")
-                    except Exception as error:
-                        logger.warning("Agent run finalization skipped: %s", str(error)[:160])
-                await q.put(None)
-        task = asyncio.create_task(_run())
-        running = True
-        while running:
-            gq = asyncio.create_task(q.get())
-            rw = asyncio.create_task(ws.receive_text())
-            done, pend = await asyncio.wait([gq, rw], return_when=asyncio.FIRST_COMPLETED)
-            for t in pend: t.cancel()
-            for t in done:
-                try: r = t.result()
-                except: continue
-                if t == gq:
-                    if r is None: running = False
-                    else: await ws.send_json(r)
-                else:
-                    m2=json.loads(r);t2=m2.get("type","")
-                    if t2=="confirm" and hasattr(agent,'resolve_confirm'):
-                        confirmed = m2.get("payload",{}).get("confirmed",False)
-                        if recorder is not None:
-                            try:
-                                recorder.resolve_confirmation(
-                                    confirmed,
-                                    response={"source": "websocket"},
-                                )
-                            except Exception as error:
-                                logger.warning("Approval record skipped: %s", str(error)[:160])
-                        agent.resolve_confirm(confirmed)
-                    elif t2=="permission_change":
-                        perm = m2.get("payload",{}).get("permission","quick_auth")
-                        try:
-                            r = set_permission_level(perm)
-                            runtime.sync_permission(perm)
-                        except: pass
-                    elif t2=="ping":
-                        await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
+
+def _transcribe_voice_payload(audio: str) -> str:
+    from voice.stt import transcribe
+
+    return transcribe(audio)
+
+
+async def _handle_ws_folder_file(command, ws):
+    path = str(command.payload.get("path") or "")
+    if not path:
+        return
     try:
-        while True:
-            d=await ws.receive_text();m=json.loads(d);t=m.get("type","message")
-            if t=="message":
-                payload = m.get("payload",{})
-                u=payload.get("text","").strip()
-                if not u:continue
-                if await _dispatch_local_surface_action(u, payload):
-                    continue
-                await _agent_loop(
-                    u,
-                    session_id=str(payload.get("session_id","") or ""),
-                    cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
-                    interaction_mode=str(payload.get("interaction_mode", "") or ""),
-                )
-                continue
-            elif t=="folder_file":
-                p=m.get("payload",{}); path=p.get("path",""); content=p.get("content","")
-                if path:
-                    try:
-                        full = _save_uploaded_file_for_ws(path, content)
-                        logger.info(f"📁 已保存上传文件: {full.name} ({len(content)}字符)")
-                    except ValueError:
-                        logger.warning(f'路径遍历拦截: {path}')
-                        continue
-            elif t=="voice":
-                payload=m.get("payload",{})
-                ab=payload.get("audio","")
-                request_id = str(payload.get("request_id", "") or "")
-                if ab:
-                    from voice.stt import transcribe
-                    txt = await asyncio.to_thread(transcribe, ab)
-                    if txt:
-                        await ws.send_json({
-                            "type": "voice_transcript",
-                            "text": txt,
-                            "request_id": request_id,
-                        })
-                        if await _dispatch_local_surface_action(txt, payload):
-                            continue
-                        await _agent_loop(
-                            txt,
-                            session_id=str(payload.get("session_id","") or ""),
-                            cards=payload.get("recent_cards",[]) if isinstance(payload.get("recent_cards",[]), list) else [],
-                            interaction_mode=str(payload.get("interaction_mode", "") or ""),
-                        )
-                    else:
-                        await ws.send_json({
-                            "type": "done",
-                            "detail": "未识别到语音",
-                            "request_id": request_id,
-                        })
-                else:
-                    await ws.send_json({
-                        "type": "done",
-                        "detail": "录音为空",
-                        "request_id": request_id,
-                    })
-            elif t=="confirm":
-                confirmed=m.get("payload",{}).get("confirmed",False)
-                if hasattr(agent,'resolve_confirm'):
-                    agent.resolve_confirm(confirmed)
-            elif t=="tool":
-                tn=m.get("payload",{}).get("name","");tp=m.get("payload",{}).get("params",{})
-                if tn:
-                    direct_recorder = None
-                    try:
-                        direct_recorder = AgentRunRecorder(
-                            runtime.agent_runs,
-                            f"Execute tool: {tn}",
-                            interaction_mode="tool",
-                        )
-                        direct_recorder.record({"type": "tool_start", "tool": tn, "params": tp})
-                    except Exception as error:
-                        logger.warning("Direct tool recorder unavailable: %s", str(error)[:160])
-                    r=await registry.execute(tn,tp)
-                    if direct_recorder is not None:
-                        try:
-                            direct_recorder.record({
-                                "type": "tool_result",
-                                "tool": tn,
-                                "success": r.success,
-                                "data": (r.data or r.error or "")[:2000],
-                            })
-                            direct_recorder.record({"type": "done"})
-                        except Exception as error:
-                            logger.warning("Direct tool record skipped: %s", str(error)[:160])
-                    await ws.send_json({"type":"tool_result","tool":tn,"success":r.success,"data":(r.data or r.error or "")[:500],"image":r.image or ""})
-                    await ws.send_json({"type":"done"})
-            elif t=="ping":await ws.send_json({"type":"pong","tools":registry.count,"model":llm.model})
-    except WebSocketDisconnect:pass
+        full = _save_uploaded_file_for_ws(path, str(command.payload.get("content") or ""))
+        await ws.send_json({"type": "folder_file_saved", "path": str(full)})
+    except ValueError as exc:
+        await ws.send_json({
+            "type": "protocol.error",
+            "payload": {"code": "invalid_upload_path", "message": str(exc)},
+        })
+
+
+async def _handle_ws_tool(command, ws):
+    tool_name = str(command.payload.get("name") or "")
+    params = command.payload.get("params")
+    params = params if isinstance(params, dict) else {}
+    if not tool_name:
+        return
+    recorder = AgentRunRecorder(
+        runtime.agent_runs,
+        f"Execute tool: {tool_name}",
+        interaction_mode="tool",
+    )
+    recorder.record({"type": "tool_start", "tool": tool_name, "params": params})
+    result = await registry.execute(tool_name, params)
+    event = {
+        "type": "tool_result",
+        "tool": tool_name,
+        "success": result.success,
+        "data": (result.data or result.error or "")[:500],
+        "image": result.image or "",
+    }
+    recorder.record(event)
+    recorder.record({"type": "done"})
+    await ws.send_json(event)
+    await ws.send_json({"type": "done"})
+
+
+async def _handle_ws_permission_change(command, ws):
+    permission = str(command.payload.get("permission") or "quick_auth")
+    try:
+        result = set_permission_level(permission)
+        runtime.sync_permission(permission)
+        await ws.send_json({"type": "permission_changed", "payload": result})
+    except Exception as exc:
+        await ws.send_json({
+            "type": "protocol.error",
+            "payload": {"code": "permission_change_failed", "message": str(exc)[:200]},
+        })
+
+
+conversation_gateway = ConversationWebSocketGateway(
+    runtime,
+    transcribe=_transcribe_voice_payload,
+    local_action_resolver=_resolve_local_surface_action,
+    command_handlers={
+        "folder_file": _handle_ws_folder_file,
+        "tool": _handle_ws_tool,
+        "permission_change": _handle_ws_permission_change,
+    },
+)
+
+
+@app.websocket("/ws")
+async def ws(ws: WebSocket):
+    await conversation_gateway.serve(ws)
+
 
 from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,_get_api_key
 from core.agent import action_log

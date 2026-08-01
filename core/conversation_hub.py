@@ -217,6 +217,14 @@ class ConversationHub:
             raise KeyError(normalized)
         return await asyncio.wait_for(asyncio.shield(active.completion), timeout=timeout)
 
+    def stats(self) -> dict[str, int]:
+        return {
+            "active_requests": len(self._active),
+            "known_requests": len(self._request_index),
+            "subscribers": sum(len(queues) for queues in self._subscribers.values()),
+            "pending_approvals": len(self._pending_approvals),
+        }
+
     async def shutdown(self) -> None:
         async with self._lock:
             active_requests = list(self._active.values())

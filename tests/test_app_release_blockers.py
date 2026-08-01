@@ -22,10 +22,10 @@ class AppReleaseBlockerTests(unittest.TestCase):
 
     def test_live_messages_request_the_live_interaction_mode(self):
         client = self.read("app/src/bridge/backendClient.ts")
-        server = self.read("main.py")
+        gateway = self.read("gateway/conversation_ws.py")
 
         self.assertIn('interaction_mode: "live"', client)
-        self.assertIn('interaction_mode=str(payload.get("interaction_mode"', server)
+        self.assertIn('interaction_mode=str(command.payload.get("interaction_mode")', gateway)
 
     def test_live_fast_classifier_keeps_actions_on_full_agent_path(self):
         from core.agent import _is_live_fast_dialogue

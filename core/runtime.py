@@ -17,6 +17,8 @@ from typing import Any
 
 from core.agent_runs import AgentRunStore
 from core.agent import Agent
+from core.conversation_hub import ConversationHub
+from core.conversation_store import ConversationStore
 from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
@@ -49,6 +51,8 @@ class JarvisRuntime:
     tool_catalog: ToolCatalog
     skill_catalog: SkillCatalog
     agent_runs: AgentRunStore
+    conversation_store: ConversationStore
+    conversation_hub: ConversationHub
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -232,6 +236,10 @@ class JarvisRuntime:
                 "skills": skill_stats,
             },
             "agent_runs": self.agent_runs.stats(),
+            "conversations": {
+                **self.conversation_store.stats(),
+                **self.conversation_hub.stats(),
+            },
         }
 
     def _event_store_status(self) -> dict[str, Any]:
@@ -262,6 +270,10 @@ class JarvisRuntime:
                 except Exception as exc:
                     logger.debug("Runtime resource close skipped: %s", exc)
             closed.add(id(resource))
+
+    async def aclose(self) -> None:
+        await self.conversation_hub.shutdown()
+        self.close()
 
 
 def _get_permission_level() -> str:
@@ -433,6 +445,9 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
     tool_catalog = ToolCatalog(registry)
     skill_catalog = SkillCatalog(root / "data" / "skills" / "catalog.sqlite3", event_bus=event_bus)
     agent_runs = AgentRunStore(root / "data" / "agent_runs" / "runs.sqlite3", event_bus=event_bus)
+    conversation_store = ConversationStore(
+        root / "data" / "conversations" / "conversations.sqlite3"
+    )
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
     agent = Agent(
@@ -444,6 +459,11 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         tool_catalog=tool_catalog,
     )
     agent.set_confirm_handler()
+    conversation_hub = ConversationHub(
+        conversation_store,
+        agent_runs,
+        resolve_confirmation=agent.resolve_confirm,
+    )
 
     runtime = JarvisRuntime(
         root=root,
@@ -459,6 +479,8 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         tool_catalog=tool_catalog,
         skill_catalog=skill_catalog,
         agent_runs=agent_runs,
+        conversation_store=conversation_store,
+        conversation_hub=conversation_hub,
     )
     runtime.register_always_on_tools()
     _discover_external_skill_imports(runtime)

@@ -14,14 +14,30 @@ from core.skill_catalog import SkillCatalog
 
 
 class RuntimeAgentFusionTests(unittest.TestCase):
-    def test_websocket_agent_loop_records_stream_without_rewriting_payloads(self):
+    def test_websocket_endpoint_delegates_to_shared_conversation_gateway(self):
         source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
 
-        self.assertIn("AgentRunRecorder(", source)
-        self.assertIn("runtime.agent_runs,", source)
-        self.assertIn("recorder.record(msg)", source)
-        self.assertIn("recorder.resolve_confirmation", source)
-        self.assertIn("await ws.send_json(r)", source)
+        self.assertIn("ConversationWebSocketGateway(", source)
+        self.assertIn("await conversation_gateway.serve(ws)", source)
+        self.assertIn("await runtime.aclose()", source)
+        self.assertNotIn("async def _agent_loop(", source)
+        self.assertNotIn("recorder.record(msg)", source)
+
+    def test_runtime_owns_shared_conversation_store_and_hub(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            runtime = create_runtime(root, startup_side_effects=False)
+            try:
+                status = runtime.get_runtime_status()
+                self.assertEqual(
+                    runtime.conversation_store.path,
+                    (root / "data" / "conversations" / "conversations.sqlite3").resolve(),
+                )
+                self.assertIs(runtime.conversation_hub.store, runtime.conversation_store)
+                self.assertEqual(status["conversations"]["sessions"], 0)
+                self.assertEqual(status["conversations"]["active_requests"], 0)
+            finally:
+                runtime.close()
 
     def test_runtime_registers_catalog_discovery_tools_and_agent_selects_progressively(self):
         with tempfile.TemporaryDirectory() as root_text:

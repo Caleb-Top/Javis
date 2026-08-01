@@ -328,6 +328,15 @@ class ConversationStore:
                 raise
         return request, True
 
+    def stats(self) -> dict[str, int]:
+        with self._lock, closing(self._connect()) as db:
+            sessions = int(db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0])
+            messages = int(
+                db.execute("SELECT COUNT(*) FROM conversation_messages").fetchone()[0]
+            )
+            events = int(db.execute("SELECT COUNT(*) FROM conversation_events").fetchone()[0])
+        return {"sessions": sessions, "messages": messages, "events": events}
+
     @staticmethod
     def _ensure_session_db(db: sqlite3.Connection, session_id: str, now: float) -> None:
         db.execute(

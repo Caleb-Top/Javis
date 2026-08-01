@@ -148,6 +148,7 @@ class InterruptibleAgentTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertTrue(any(event.get("type") == "activity" for event in events))
+        self.assertFalse(any(event.get("type") == "thinking" for event in events))
         self.assertFalse(any("reasoning_content" in event for event in events))
         self.assertNotIn("private chain of thought", repr(events))
 

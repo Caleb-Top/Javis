@@ -464,7 +464,6 @@ class Agent:
                 "activity": "understanding",
                 "detail": "Understanding the request",
             }
-            yield {"type": "thinking", "content": "正在快速理解"}
             try:
                 if self.engine:
                     response, route = await token.race(
@@ -540,8 +539,6 @@ class Agent:
         except Exception:
             pass
         # ── End UserPromptSubmit Hook ──
-
-        yield {"type": "thinking", "content": "思考中..."}
 
         yield {
             "type": "activity",
