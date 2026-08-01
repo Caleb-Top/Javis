@@ -65,7 +65,9 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn('DEFAULT_HTTP_ORIGIN = "http://127.0.0.1:8080"', endpoints)
         self.assertIn("VITE_JAVIS_BACKEND_URL", endpoints)
         self.assertIn("`${endpoints.websocket}/ws`", text)
-        self.assertIn("recent_cards", text)
+        self.assertIn('type: "conversation.attach"', text)
+        self.assertIn('type: "conversation.message"', text)
+        self.assertNotIn("recent_cards", text)
         self.assertIn("thinking", text)
         self.assertIn("executing", text)
 
@@ -125,8 +127,16 @@ class AppPackagingTests(unittest.TestCase):
         self.assertNotIn("MediaRecorder", voice)
         self.assertNotIn("getUserMedia", voice)
         self.assertIn("sendVoice", backend)
-        self.assertIn('"type": "voice"', backend)
+        self.assertIn('type: "voice"', backend)
         self.assertIn("createVoiceCapture", main)
+
+    def test_code_activity_controller_is_packaged_with_web_surface(self):
+        index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        activity = ROOT / "web" / "js" / "conversationActivity.js"
+
+        self.assertTrue(activity.exists())
+        self.assertIn("conversationActivity.js", index)
+        self.assertIn("JavisConversationActivity", activity.read_text(encoding="utf-8"))
 
     def test_static_preview_exists_without_build_dependencies(self):
         preview = ROOT / "app" / "preview.html"
