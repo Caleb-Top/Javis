@@ -92,11 +92,11 @@
 - `tests/test_skill_catalog.py`
 - `skills/external/README.md`
 
-- [ ] Test Markdown/frontmatter discovery, provenance/license/version fields, deterministic search, and candidate/staged/active transitions.
-- [ ] Test that unknown/missing licenses cannot activate and that failed evaluation blocks promotion.
-- [ ] Confirm RED, then implement SQLite-backed metadata plus FTS5 with a deterministic fallback.
+- [x] Test Markdown/frontmatter discovery, provenance/license/version fields, deterministic search, and candidate/staged/active transitions.
+- [x] Test that unknown/missing licenses cannot activate and that failed evaluation blocks promotion.
+- [x] Confirm RED, then implement SQLite-backed metadata plus FTS5 with a deterministic fallback.
 - [ ] Add import manifests and hashes; external content defaults to `candidate` and cannot execute directly.
-- [ ] Confirm persistence across reopen and focused GREEN.
+- [x] Confirm persistence across reopen and focused GREEN (`18 passed`; existing skill/runtime regression `12 passed`).
 
 ## Task 5: Add Durable Agent Runs (A3)
 

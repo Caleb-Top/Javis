@@ -68,10 +68,10 @@ class ToolCatalogTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             runtime = create_runtime(Path(root), startup_side_effects=False)
-
-        self.assertIs(runtime.tool_catalog.registry, runtime.registry)
-        self.assertIs(runtime.registry.event_bus, runtime.event_bus)
-        self.assertIs(runtime.registry.middleware, runtime.middleware)
+            self.assertIs(runtime.tool_catalog.registry, runtime.registry)
+            self.assertIs(runtime.registry.event_bus, runtime.event_bus)
+            self.assertIs(runtime.registry.middleware, runtime.middleware)
+            runtime.close()
 
     def test_list_is_lightweight_and_inspect_returns_one_full_schema(self):
         catalog = ToolCatalog(make_registry())

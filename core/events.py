@@ -43,6 +43,9 @@ class EventType(str, Enum):
     AGENT_STEP_UPDATED = "agent_step.updated"
     AGENT_DELTA_APPENDED = "agent_delta.appended"
     AGENT_CHECKPOINT_CREATED = "agent_checkpoint.created"
+    SKILL_DISCOVERED = "skill.discovered"
+    SKILL_EVALUATED = "skill.evaluated"
+    SKILL_STATUS_CHANGED = "skill.status_changed"
     MEMORY_WRITTEN = "memory.written"
     MEMORY_RECALLED = "memory.recalled"
 

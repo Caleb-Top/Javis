@@ -19,6 +19,7 @@ from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
 from core.middleware import MiddlewarePipeline
+from core.skill_catalog import SkillCatalog
 from core.subsystem import SubsystemStatus
 from core.tool_catalog import ToolCatalog
 from core.tool_registry import ToolRegistry
@@ -44,6 +45,7 @@ class JarvisRuntime:
     event_bus: EventBus
     middleware: MiddlewarePipeline
     tool_catalog: ToolCatalog
+    skill_catalog: SkillCatalog
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -153,6 +155,27 @@ class JarvisRuntime:
         if callable(status):
             return status()
         return {"state": "unknown", "events": 0}
+
+    def close(self) -> None:
+        """Release owned subsystem and persistence resources."""
+        for subsystem in reversed(list(self.subsystems.values())):
+            stop = getattr(subsystem, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception as exc:
+                    logger.debug("Subsystem stop skipped: %s", exc)
+        closed: set[int] = set()
+        for resource in (self.event_store, self.skill_catalog):
+            if resource is None or id(resource) in closed:
+                continue
+            close = getattr(resource, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    logger.debug("Runtime resource close skipped: %s", exc)
+            closed.add(id(resource))
 
 
 def _get_permission_level() -> str:
@@ -322,6 +345,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         middleware=middleware,
     )
     tool_catalog = ToolCatalog(registry)
+    skill_catalog = SkillCatalog(root / "data" / "skills" / "catalog.sqlite3", event_bus=event_bus)
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
     agent = Agent(llm, registry, brain=brain, learner=learner, engine=engine)
@@ -339,6 +363,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         event_bus=event_bus,
         middleware=middleware,
         tool_catalog=tool_catalog,
+        skill_catalog=skill_catalog,
     )
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     runtime.register_always_on_tools()
