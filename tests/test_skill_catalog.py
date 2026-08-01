@@ -77,6 +77,34 @@ class SkillCatalogTests(unittest.TestCase):
         self.assertEqual(skill["tags"], ["web", "research"])
         self.assertEqual(len(skill["content_hash"]), 64)
 
+    def test_discovery_can_apply_an_explicit_verified_default_license(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            write_skill(
+                root,
+                "inherited",
+                name="inherited-license",
+                description="Uses the verified repository license",
+                license_name=None,
+            )
+            write_skill(
+                root,
+                "restricted",
+                name="restricted-license",
+                description="Keeps its document-specific license",
+                license_name="GPL-3.0",
+            )
+            catalog = SkillCatalog(root / "catalog.sqlite3")
+            try:
+                catalog.discover(root, source="verified-upstream", default_license="MIT")
+                inherited = catalog.get("inherited-license")
+                restricted = catalog.get("restricted-license")
+            finally:
+                catalog.close()
+
+        self.assertEqual(inherited["license"], "MIT")
+        self.assertEqual(restricted["license"], "GPL-3.0")
+
     def test_search_is_deterministic_and_persists_across_reopen(self):
         with tempfile.TemporaryDirectory() as root_text:
             root = Path(root_text)

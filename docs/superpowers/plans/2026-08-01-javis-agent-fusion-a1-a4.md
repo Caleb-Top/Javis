@@ -95,7 +95,7 @@
 - [x] Test Markdown/frontmatter discovery, provenance/license/version fields, deterministic search, and candidate/staged/active transitions.
 - [x] Test that unknown/missing licenses cannot activate and that failed evaluation blocks promotion.
 - [x] Confirm RED, then implement SQLite-backed metadata plus FTS5 with a deterministic fallback.
-- [ ] Add import manifests and hashes; external content defaults to `candidate` and cannot execute directly.
+- [x] Add import manifests and hashes; external content defaults to `candidate` and cannot execute directly.
 - [x] Confirm persistence across reopen and focused GREEN (`18 passed`; existing skill/runtime regression `12 passed`).
 
 ## Task 5: Add Durable Agent Runs (A3)
@@ -130,11 +130,11 @@
 
 **Source:** `agent-skills-main.zip` from the user's Downloads folder.
 
-- [ ] Verify the archive identity and MIT license before copying.
-- [ ] Import only the reviewed 24 skill assets under `skills/external/agent-skills/` with upstream license and provenance manifest.
-- [ ] Register assets as `candidate`; run parser, hash, duplicate-name, and policy validation.
-- [ ] Do not copy GPL or unknown-license code/datasets.
-- [ ] Confirm catalog discovery and provenance tests GREEN.
+- [x] Verify the archive identity and MIT license before copying.
+- [x] Import only the reviewed 24 skill assets under `skills/external/agent-skills/` with upstream license and provenance manifest.
+- [x] Register assets as `candidate`; run parser, hash, duplicate-name, and policy validation.
+- [x] Do not copy GPL or unknown-license code/datasets.
+- [x] Confirm catalog discovery and provenance tests GREEN (`10 passed`, including catalog regressions).
 
 ## Task 8: Full Verification and Release Gate
 

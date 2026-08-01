@@ -98,15 +98,31 @@ class SkillCatalog:
         with self._lock:
             self._connection.close()
 
-    def discover(self, root: str | Path, *, source: str) -> list[str]:
+    def discover(
+        self,
+        root: str | Path,
+        *,
+        source: str,
+        default_license: str | None = None,
+    ) -> list[str]:
         root_path = Path(root).expanduser().resolve()
         discovered = []
         for path in sorted(root_path.rglob("SKILL.md"), key=lambda value: str(value).lower()):
-            skill = self.register_document(path, source=source)
+            skill = self.register_document(
+                path,
+                source=source,
+                default_license=default_license,
+            )
             discovered.append(skill["name"])
         return discovered
 
-    def register_document(self, path: str | Path, *, source: str) -> dict[str, Any]:
+    def register_document(
+        self,
+        path: str | Path,
+        *,
+        source: str,
+        default_license: str | None = None,
+    ) -> dict[str, Any]:
         document_path = Path(path).expanduser().resolve()
         content = document_path.read_text(encoding="utf-8")
         metadata, body = _parse_skill_document(content)
@@ -115,7 +131,7 @@ class SkillCatalog:
             raise SkillGovernanceError(f"invalid skill name: {name}")
         description = str(metadata.get("description") or _first_content_line(body) or name).strip()
         version = str(metadata.get("version") or "0.0.0").strip()
-        license_name = _normalize_license(metadata.get("license"))
+        license_name = _normalize_license(metadata.get("license") or default_license)
         tags = _normalize_tags(metadata.get("tags"))
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         now = time.time()
