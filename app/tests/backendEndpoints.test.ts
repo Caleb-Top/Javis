@@ -19,7 +19,7 @@ test("development can target an independent source backend", () => {
 
 test("non-http backend origins are rejected", () => {
   assert.throws(
-    () => resolveBackendEndpoints("file:///D:/Javis"),
+    () => resolveBackendEndpoints("file:///Z:/Portable/Javis"),
     /http or https/,
   );
 });

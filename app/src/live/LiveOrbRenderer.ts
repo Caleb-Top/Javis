@@ -5,6 +5,7 @@ export type OrbPaletteName = "cobalt" | "arctic" | "indigo" | "graphite";
 
 export type LiveOrbController = {
   setState(state: LiveState): void;
+  setAudioLevel(level: number): void;
   setPalette(name: OrbPaletteName): void;
   destroy(): void;
 };
@@ -274,6 +275,7 @@ export function createLiveOrbRenderer(canvas: HTMLCanvasElement): LiveOrbControl
   let state: LiveState = "idle";
   let energy = stateEnergy.idle;
   let energyTarget = energy;
+  let audioLevel = 0;
   let palette = palettes[savedPalette()];
   let frame = 0;
   let disposed = false;
@@ -301,9 +303,12 @@ export function createLiveOrbRenderer(canvas: HTMLCanvasElement): LiveOrbControl
     if (disposed) return;
     resize();
     energy += (energyTarget - energy) * 0.055;
+    audioLevel *= 0.91;
     let reactiveEnergy = energy;
     if (state === "listening") {
-      reactiveEnergy += Math.sin(now * 0.011) * 0.10 + Math.sin(now * 0.021) * 0.05;
+      reactiveEnergy += Math.sin(now * 0.011) * 0.10
+        + Math.sin(now * 0.021) * 0.05
+        + Math.min(0.26, audioLevel * 0.32);
     } else if (state === "speaking") {
       reactiveEnergy += Math.sin(now * 0.017) * 0.13 + Math.sin(now * 0.031) * 0.06;
     }
@@ -328,6 +333,9 @@ export function createLiveOrbRenderer(canvas: HTMLCanvasElement): LiveOrbControl
       state = nextState;
       energyTarget = stateEnergy[nextState];
       canvas.dataset.state = nextState;
+    },
+    setAudioLevel(level: number): void {
+      audioLevel = Math.max(audioLevel, Math.min(1, Math.max(0, Number(level) || 0)));
     },
     setPalette(name: OrbPaletteName): void {
       palette = palettes[name];

@@ -6,6 +6,7 @@ driver crash cannot terminate the Javis API and memory services.
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 import sys
@@ -16,6 +17,7 @@ import pyaudio
 
 
 CHUNK_FRAMES = 1024
+STREAM_RATE = 48_000
 
 
 def _devices(audio: pyaudio.PyAudio) -> list[dict]:
@@ -139,6 +141,90 @@ def capture(arguments: list[str]) -> int:
         audio.terminate()
 
 
+def stream_capture(arguments: list[str]) -> int:
+    if len(arguments) < 3:
+        raise ValueError("stream requires stop, status and rate")
+    stop_path = Path(arguments[0])
+    status_path = Path(arguments[1])
+    requested_rate = max(16_000, min(48_000, int(arguments[2] or STREAM_RATE)))
+    device_index = int(arguments[3]) if len(arguments) > 3 else None
+    audio = pyaudio.PyAudio()
+    stream = None
+    selected = None
+    rate = requested_rate
+    try:
+        last_error: Exception | None = None
+        for device in _ordered_microphones(audio, device_index):
+            rates = []
+            for candidate in (
+                requested_rate,
+                int(device["default_rate"]),
+                16_000,
+            ):
+                if candidate not in rates:
+                    rates.append(candidate)
+            for candidate in rates:
+                try:
+                    stream = audio.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=candidate,
+                        input=True,
+                        input_device_index=device["index"],
+                        frames_per_buffer=candidate // 50,
+                    )
+                    selected = device
+                    rate = candidate
+                    break
+                except Exception as error:
+                    last_error = error
+            if stream is not None:
+                break
+        if stream is None or selected is None:
+            raise RuntimeError(f"unable to open microphone stream: {last_error or 'unknown error'}")
+        _write_status(
+            status_path,
+            {
+                "ok": True,
+                "trackLabel": selected["name"],
+                "deviceIndex": selected["index"],
+                "rate": rate,
+                "channels": 1,
+                "frameMs": 20,
+            },
+        )
+        sequence = 0
+        while not stop_path.exists():
+            frame = stream.read(rate // 50, exception_on_overflow=False)
+            sequence += 1
+            print(
+                json.dumps(
+                    {
+                        "type": "frame",
+                        "sequence": sequence,
+                        "rate": rate,
+                        "channels": 1,
+                        "pcm": base64.b64encode(frame).decode("ascii"),
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+        return 0
+    except Exception as error:
+        _write_status(status_path, {"ok": False, "error": str(error)})
+        print(str(error), file=sys.stderr)
+        return 1
+    finally:
+        if stream is not None:
+            try:
+                stream.stop_stream()
+            except Exception:
+                pass
+            stream.close()
+        audio.terminate()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         raise ValueError("mode is required")
@@ -146,6 +232,8 @@ def main() -> int:
         return list_devices()
     if sys.argv[1] == "capture":
         return capture(sys.argv[2:])
+    if sys.argv[1] == "stream":
+        return stream_capture(sys.argv[2:])
     raise ValueError(f"unknown mode: {sys.argv[1]}")
 
 

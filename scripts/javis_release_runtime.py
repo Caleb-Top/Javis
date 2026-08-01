@@ -79,6 +79,10 @@ REQUIRED_MEMBERS = (
     "app/voice/stt.py",
     "app/voice/native_capture.py",
     "app/voice/native_capture_worker.py",
+    "app/voice/streaming_pipeline.py",
+    "app/voice/continuous_capture.py",
+    "app/voice/streaming_ws.py",
+    "app/voice/native_playback.py",
     "app/voice/native/javis-wasapi-loopback.exe",
     "app/web/index.html",
 )

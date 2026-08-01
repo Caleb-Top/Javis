@@ -4,6 +4,11 @@ let ws = null, isConnected = false, isProcessing = false;
 let currentState = 'idle';
 let heartbeatTimer = null;
 let currentThreadId = null;
+let activeConversationId = null;
+let activeRequestId = null;
+let pendingApprovalId = null;
+let conversationCursor = 0;
+let activityTimeline = null;
 let pushToTalkKey = 'F2';
 let pttActive = false;
 let pttEpoch = 0;
@@ -62,6 +67,15 @@ window.addEventListener('resize', updateInputPlaceholder);
   document.addEventListener('click', _unlockAudio, { once: true });
   document.addEventListener('keydown', _unlockAudio, { once: true });
 
+  function stopAudioPlayback() {
+    if (_audioEl) {
+      try { _audioEl.pause(); } catch(e) {}
+      try { _audioEl.currentTime = 0; } catch(e) {}
+      _audioEl.removeAttribute('src');
+    }
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+
 
 function setBodyState(state) {
   currentState = state;
@@ -70,6 +84,8 @@ function setBodyState(state) {
 }
 function setProcessing(yes) {
   isProcessing = yes;
+  let stopButton = document.getElementById('stop-btn');
+  if (stopButton) stopButton.hidden = !yes;
   setBodyState(yes ? 'processing' : (isConnected ? 'idle' : 'standby'));
   if (!yes && isConnected) setJavisStatus('idle', '待命');
 }
@@ -181,6 +197,39 @@ function toggleSidebar() {
   }
   window.dispatchEvent(new Event('resize'));
 }
+
+function createProtocolId(prefix) {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return (prefix || 'javis') + '-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+
+function getConversationId() {
+  let queryId = new URLSearchParams(location.search).get('session_id') || '';
+  let stored = localStorage.getItem('javis_active_conversation') || '';
+  let value = queryId.trim() || stored.trim() || createProtocolId('conversation');
+  localStorage.setItem('javis_active_conversation', value);
+  return value;
+}
+
+function getActivityTimeline() {
+  if (activityTimeline) return activityTimeline;
+  let layer = document.getElementById('transcript-layer');
+  if (!layer || !globalThis.JavisConversationActivity) return null;
+  activityTimeline = globalThis.JavisConversationActivity.mount(layer, {
+    onCancel: function(requestId) { stopActiveRequest(requestId); }
+  });
+  return activityTimeline;
+}
+
+function persistConversationCursor(sequence) {
+  let next = Number(sequence || 0);
+  if (!Number.isFinite(next) || next <= conversationCursor) return;
+  conversationCursor = next;
+  localStorage.setItem('javis_conversation_cursor_' + activeConversationId, String(next));
+}
+
+activeConversationId = getConversationId();
+conversationCursor = Number.parseInt(localStorage.getItem('javis_conversation_cursor_' + activeConversationId) || '0', 10) || 0;
 
 function renderThreadTree() {
   return; // Replaced by renderProjectTree()
@@ -522,6 +571,14 @@ function connect() {
   ws = new WebSocket(p + '//' + location.host + '/ws');
   ws.onopen = function() {
     isConnected = true; updateStatus();
+    ws.send(JSON.stringify({
+      type: 'conversation.attach',
+      payload: {
+        session_id: activeConversationId,
+        after_sequence: conversationCursor,
+        protocol_version: 2
+      }
+    }));
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(function(){ if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }, 25000);
   };
@@ -534,8 +591,67 @@ function connect() {
 }
 
 function handleWS(msg) {
+  if (msg.session_id && msg.session_id !== activeConversationId) return;
+  persistConversationCursor(msg.sequence);
+  let timeline = getActivityTimeline();
+  if (timeline && msg.request_id) timeline.accept(msg);
+
   switch (msg.type) {
     case 'pong': break;
+    case 'conversation.attached': break;
+    case 'request.accepted':
+      activeRequestId = String(msg.request_id || activeRequestId || '');
+      setProcessing(true);
+      setJavisStatus('thinking', '正在理解');
+      break;
+    case 'activity.understanding':
+    case 'activity.planning':
+      if (msg.request_id === activeRequestId) setJavisStatus('thinking', String(msg.payload?.detail || '处理中'));
+      break;
+    case 'activity.tool_started':
+      if (msg.request_id === activeRequestId) setJavisStatus('executing', String(msg.payload?.tool || '执行工具'));
+      break;
+    case 'activity.tool_completed':
+    case 'activity.verifying':
+    case 'activity.fallback':
+      if (msg.request_id === activeRequestId) setJavisStatus('thinking', String(msg.payload?.detail || '正在处理'));
+      break;
+    case 'response.delta':
+      if (msg.request_id !== activeRequestId) break;
+      setJavisStatus('thinking', '回复中');
+      appendLastCard(String(msg.payload?.text || ''));
+      break;
+    case 'approval.required':
+      if (msg.request_id !== activeRequestId) break;
+      pendingApprovalId = String(msg.payload?.approval_id || '');
+      showConfirm(msg.payload?.tool, msg.payload?.reason, msg.payload?.params);
+      break;
+    case 'request.completed':
+      if (msg.request_id === activeRequestId) {
+        activeRequestId = null;
+        pendingApprovalId = null;
+        setProcessing(false);
+      }
+      break;
+    case 'request.cancelled':
+      if (msg.request_id === activeRequestId) {
+        activeRequestId = null;
+        pendingApprovalId = null;
+        setProcessing(false);
+        setJavisStatus('idle', '已中断');
+      }
+      break;
+    case 'request.failed':
+      if (msg.request_id === activeRequestId) {
+        activeRequestId = null;
+        pendingApprovalId = null;
+        setProcessing(false);
+        setJavisStatus('offline', '执行失败');
+      }
+      break;
+    case 'voice.transcript.final':
+      addCard('user', String(msg.payload?.text || ''));
+      break;
     case 'thinking': tsCreate(); setJavisStatus('thinking', '思考中'); break;
     case 'tool_start': tsStep(msg.tool); setJavisStatus('executing', msg.tool); break;
     case 'tool_result':
@@ -636,55 +752,99 @@ function showConfirm(tool, reason, params) {
 function approveConfirm() {
   document.getElementById('confirm-modal').style.display = 'none';
   if (_pendingConfirmResolve) { _pendingConfirmResolve(true); _pendingConfirmResolve = null; }
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'confirm', payload: { confirmed: true } }));
+  let approvalId = pendingApprovalId;
+  pendingApprovalId = null;
+  if (ws && ws.readyState === WebSocket.OPEN && activeRequestId && approvalId) {
+    ws.send(JSON.stringify({
+      type: 'conversation.confirm',
+      payload: {
+        session_id: activeConversationId,
+        request_id: activeRequestId,
+        approval_id: approvalId,
+        confirmed: true,
+        protocol_version: 2
+      }
+    }));
+  }
 }
 function rejectConfirm() {
   document.getElementById('confirm-modal').style.display = 'none';
   if (_pendingConfirmResolve) { _pendingConfirmResolve(false); _pendingConfirmResolve = null; }
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'confirm', payload: { confirmed: false } }));
+  let approvalId = pendingApprovalId;
+  pendingApprovalId = null;
+  if (ws && ws.readyState === WebSocket.OPEN && activeRequestId && approvalId) {
+    ws.send(JSON.stringify({
+      type: 'conversation.confirm',
+      payload: {
+        session_id: activeConversationId,
+        request_id: activeRequestId,
+        approval_id: approvalId,
+        confirmed: false,
+        protocol_version: 2
+      }
+    }));
+  }
 }
 function hideConfirm() { rejectConfirm(); }
 
 // ── Send ──
-function buildMessagePayload(text) {
-  let cards = [];
-  try {
-    if (currentThreadId && threads[currentThreadId]) {
-      cards = (threads[currentThreadId].cards || []).slice(-80);
-    }
-  } catch(e) { cards = []; }
-  return { text: text, session_id: currentThreadId || '', recent_cards: cards };
-}
-
 function sendAgentMessage(text) {
-  ws.send(JSON.stringify({ type: 'message', payload: buildMessagePayload(text) }));
+  if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+  let requestId = createProtocolId('request');
+  activeRequestId = requestId;
+  let timeline = getActivityTimeline();
+  if (timeline) timeline.begin(requestId);
+  ws.send(JSON.stringify({
+    type: 'conversation.message',
+    payload: {
+      text: text,
+      session_id: activeConversationId,
+      request_id: requestId,
+      idempotency_key: requestId,
+      interaction_mode: 'code',
+      protocol_version: 2
+    }
+  }));
+  setProcessing(true);
+  updateStep('正在理解...');
+  updateStatusBar('thinking', '正在理解...');
+  setJavisStatus('thinking', '正在理解');
+  return requestId;
 }
 
 function sendMessage() {
   let inp = document.getElementById('user-input'); let t = inp.value.trim();
-  if (!t || isProcessing) return;
-  inp.value = ''; inp.style.height = 'auto';
+  if (!t) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    setJavisStatus('offline', '连接不可用');
+    return;
+  }
   if (!currentThreadId || !threads[currentThreadId]) { let id = createThread('新对话', null); currentThreadId = id; }
-  tsCreate();
   addCard('user', t);
-  sendAgentMessage(t);
-  isProcessing = true; updateStep('思考中...'); updateStatusBar('thinking', '思考中…'); setProcessing(true);
-  setJavisStatus('thinking', '思考中');
+  if (!sendAgentMessage(t)) return;
+  inp.value = ''; inp.style.height = 'auto';
 }
 
 function sendQuick(action) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.warn('[sendQuick] WS not open');
-    document.getElementById('user-input').value = action;
-    sendMessage();
-    return;
-  }
-  if (isProcessing) return;
-  if (!currentThreadId || !threads[currentThreadId]) { let id = createThread('新对话', null); currentThreadId = id; }
-  addCard('user', action);
-  sendAgentMessage(action);
-  isProcessing = true; updateStep('思考中...'); updateStatusBar('thinking', '思考中…'); setProcessing(true);
-  setJavisStatus('thinking', '思考中');
+  let input = document.getElementById('user-input');
+  input.value = action;
+  sendMessage();
+}
+
+function stopActiveRequest(requestId) {
+  let target = String(requestId || activeRequestId || '');
+  if (!target || !ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify({
+    type: 'conversation.cancel',
+    payload: {
+      session_id: activeConversationId,
+      request_id: target,
+      reason: 'user interrupt',
+      protocol_version: 2
+    }
+  }));
+  setJavisStatus('thinking', '正在停止');
+  return true;
 }
 
 // ── File upload ──
@@ -832,6 +992,8 @@ async function toggleVoice() {
 
 async function startVoiceCall() {
   if (voiceActive) return;
+  stopAudioPlayback();
+  stopActiveRequest();
   let btn = document.getElementById('voice-btn');
   try {
     voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -988,6 +1150,8 @@ function initPushToTalk() {
 
 function pttStartStream(epoch) {
   if (voiceWs && voiceWs.readyState === WebSocket.OPEN) return;
+  stopAudioPlayback();
+  stopActiveRequest();
   navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
     if (!pttActive || pttEpoch !== epoch) { stream.getTracks().forEach(function(t){ t.stop(); }); return; }
     voiceStream = stream;
@@ -1166,6 +1330,7 @@ function exportChat(format) {
 function playAudio(b64) {
   if (!b64) { console.warn('[Javis] playAudio: empty data'); return; }
   try {
+    stopAudioPlayback();
     if (!_audioEl) _unlockAudio();
     let el = _audioEl || new Audio();
     el.src = 'data:audio/mp3;base64,' + b64;

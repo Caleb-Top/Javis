@@ -48,13 +48,15 @@ test("the center of the orb is a state-reactive fluid wave", () => {
   assert.match(rendererSource, /coreDeformation/);
   assert.match(rendererSource, /coreWaveBand/);
   assert.match(rendererSource, /coreFlow/);
+  assert.match(rendererSource, /setAudioLevel/);
+  assert.match(mainSource, /onLevel:\s*\(level\)[\s\S]*?liveOrb\.setAudioLevel\(level\)/);
 });
 
 test("Code renders immediately while native window geometry settles in the background", () => {
   const handler = mainSource.match(/const showCodeSurface[\s\S]*?\n\};/)?.[0] || "";
 
   assert.match(handler, /const transition = setDesktopMode\("code"\);/);
-  assert.match(handler, /openCodeSurface\(\);/);
+  assert.match(handler, /openCodeSurface\(conversationId\);/);
   assert.match(handler, /void transition;/);
   assert.doesNotMatch(handler, /\.then\(\(\) => openCodeSurface\(\)\)/);
 });

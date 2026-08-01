@@ -45,6 +45,7 @@ tools/anthropic-plugins/
 # 插件缓存
 .codex/
 .claude/
+.pnpm-store/
 
 # 临时脚本
 _*.py
@@ -56,6 +57,10 @@ start.ps1
 skill_*.exe
 _build_temp/
 _build_*.py
+node_modules/
+app/src-tauri/resources/javis-runtime.zip
+app/src-tauri/target/
+.javis_rollback_points/
 
 # OS
 Thumbs.db
@@ -73,6 +78,7 @@ tools/rust/
 *.pt
 
 # 运行时数据
+.cache/
 data/
 logs/*
 !logs/README.md
@@ -84,6 +90,10 @@ thoughts/
 
 # 生成图片
 *.png
+!app/src-tauri/icons/*.png
+!app/public/icons/javis-orb-thinking-c.png
+!app/public/pets/javis-anime/idle.png
+!app/public/pets/javis-anime/walk-source.png
 
 # 一次性诊断/清理脚本
 check_*.py

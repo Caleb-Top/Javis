@@ -2705,3 +2705,171 @@ body[data-theme="dark"] .workspace-panel.open {
     box-shadow: 0 7px 18px rgba(32,42,60,.07) !important;
   }
 }
+
+/* Unified conversation activity */
+.conversation-activity {
+  width: min(900px, calc(100% - 32px));
+  margin: 0 auto;
+  border: 1px solid var(--app-line);
+  border-radius: 8px;
+  background: rgba(255,255,255,.62);
+  color: var(--app-muted);
+  overflow: hidden;
+}
+
+body[data-theme="dark"] .conversation-activity {
+  background: rgba(21,24,30,.72);
+  border-color: rgba(255,255,255,.08);
+}
+
+.activity-summary {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto 36px;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 8px 4px 12px;
+}
+
+.activity-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-primary);
+  box-shadow: 0 0 0 4px rgba(63,126,232,.10);
+  animation: activityPulse 1.35s ease-in-out infinite;
+}
+
+.conversation-activity[data-terminal="completed"] .activity-pulse {
+  background: #24956f;
+  animation: none;
+}
+
+.conversation-activity[data-terminal="cancelled"] .activity-pulse,
+.conversation-activity[data-terminal="failed"] .activity-pulse {
+  background: #b85b52;
+  animation: none;
+}
+
+@keyframes activityPulse {
+  0%, 100% { opacity: .55; transform: scale(.9); }
+  50% { opacity: 1; transform: scale(1.12); }
+}
+
+.activity-disclosure {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 620;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.activity-elapsed {
+  color: var(--app-subtle);
+  font-size: .72rem;
+  white-space: nowrap;
+}
+
+.activity-stop {
+  min-width: 36px;
+  width: 36px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-muted);
+  font-size: .62rem;
+  cursor: pointer;
+}
+
+.activity-stop:hover {
+  background: var(--app-panel-2);
+  color: #a84a43;
+}
+
+.activity-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0 18px 10px 31px;
+  list-style: none;
+}
+
+.activity-timeline li {
+  position: relative;
+  min-width: 0;
+  padding: 5px 0 5px 14px;
+  color: var(--app-muted);
+  font-size: .76rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.activity-timeline li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--app-subtle);
+}
+
+.activity-timeline li[data-status="failed"] {
+  color: #a84a43;
+}
+
+.conversation-activity.collapsed .activity-timeline {
+  display: none;
+}
+
+.stop-btn {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(184,91,82,.24);
+  border-radius: 14px;
+  background: rgba(184,91,82,.08);
+  color: #a84a43;
+  cursor: pointer;
+  transition: background .18s ease, transform .18s ease;
+}
+
+.stop-btn:hover {
+  background: rgba(184,91,82,.14);
+  transform: translateY(-1px);
+}
+
+.stop-btn[hidden],
+.activity-stop[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 700px) {
+  .conversation-activity {
+    width: 100%;
+  }
+
+  .activity-summary {
+    grid-template-columns: 10px minmax(0, 1fr) auto 36px;
+    gap: 7px;
+    padding-left: 9px;
+  }
+
+  .activity-timeline {
+    padding-left: 25px;
+    padding-right: 12px;
+  }
+}

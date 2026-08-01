@@ -19,7 +19,7 @@ class ActionPolicyTests(unittest.TestCase):
         self.assertEqual(decision.action, "confirm")
 
     def test_modifying_javis_source_requires_confirmation(self):
-        root = Path("D:/Javis")
+        root = Path(__file__).resolve().parents[1]
         decision = evaluate_action(
             "file_write",
             {"path": str(root / "core/agent.py"), "content": "changed"},

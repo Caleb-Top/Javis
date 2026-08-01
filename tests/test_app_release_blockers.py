@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppReleaseBlockerTests(unittest.TestCase):
@@ -22,10 +22,10 @@ class AppReleaseBlockerTests(unittest.TestCase):
 
     def test_live_messages_request_the_live_interaction_mode(self):
         client = self.read("app/src/bridge/backendClient.ts")
-        server = self.read("main.py")
+        gateway = self.read("gateway/conversation_ws.py")
 
         self.assertIn('interaction_mode: "live"', client)
-        self.assertIn('interaction_mode=str(payload.get("interaction_mode"', server)
+        self.assertIn('interaction_mode=str(command.payload.get("interaction_mode")', gateway)
 
     def test_live_fast_classifier_keeps_actions_on_full_agent_path(self):
         from core.agent import _is_live_fast_dialogue
@@ -79,6 +79,8 @@ class AppReleaseBlockerTests(unittest.TestCase):
         for contract in ["probeMicrophone", "probeSystemAudio", "selfTest"]:
             self.assertIn(contract, voice)
         self.assertIn('"/api/voice/capture/probe"', voice)
+        self.assertIn("/ws_voice_stream", voice)
+        self.assertIn('type: "audio.stream.start"', voice)
         self.assertNotIn("navigator.mediaDevices", voice)
         self.assertNotIn("MediaRecorder", voice)
         for contract in ["audio-diagnostics", "麦克风自检", "系统音频自检", "STT", "TTS"]:

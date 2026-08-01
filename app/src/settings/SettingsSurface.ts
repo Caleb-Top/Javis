@@ -1,4 +1,5 @@
 import type { OrbPaletteName } from "../live/LiveOrbRenderer.ts";
+import { readStringPreference, writeStringPreference } from "../app/AppPreferences.ts";
 import {
   readPetPreferences,
   writePetPreferences,
@@ -244,6 +245,17 @@ export function createSettingsSurface(
             <div class="settings-panel settings-action-list">
               <button class="settings-row-button settings-diagnostics" type="button"><span><strong>运行诊断</strong><small>检查本地后端与系统组件</small></span><b>›</b></button>
               <button class="settings-row-button settings-privacy" type="button"><span><strong>本地数据与隐私</strong><small>查看首次启动说明与数据位置</small></span><b>›</b></button>
+            </div>
+            <div class="settings-panel">
+              <label class="settings-field">
+                <span>连续语音降噪</span>
+                <select class="voice-noise-profile">
+                  <option value="off">关闭</option>
+                  <option value="standard">标准</option>
+                  <option value="strong">强降噪</option>
+                </select>
+                <small>嘈杂环境可选强降噪，切换后会自动重启连续收听。</small>
+              </label>
             </div>
           </section>
           <section class="settings-section" data-settings-pane="pet">
@@ -683,6 +695,11 @@ export function createSettingsSurface(
     range.value = String(Math.round(preferences.scale * 100));
     options.root.querySelector<HTMLOutputElement>(".pet-scale-output")!.value = `${range.value}%`;
     updateAssistantScalePreview(preferences.scale);
+    const storedNoiseProfile = readStringPreference("voice.noiseProfile", "standard");
+    options.root.querySelector<HTMLSelectElement>(".voice-noise-profile")!.value =
+      ["off", "standard", "strong"].includes(storedNoiseProfile)
+        ? storedNoiseProfile
+        : "standard";
     options.root.querySelectorAll<HTMLElement>(".settings-shortcut-card").forEach((slot, index) => {
       const shortcut = preferences.shortcuts[index] || { label: "", kind: "", value: "" };
       slot.querySelector<HTMLInputElement>(".shortcut-label")!.value = shortcut.label;
@@ -725,6 +742,13 @@ export function createSettingsSurface(
   });
   options.root.querySelector<HTMLButtonElement>(".settings-diagnostics")!.addEventListener("click", options.onOpenDiagnostics);
   options.root.querySelector<HTMLButtonElement>(".settings-privacy")!.addEventListener("click", options.onOpenPrivacy);
+  options.root.querySelector<HTMLSelectElement>(".voice-noise-profile")!.addEventListener("change", (event) => {
+    const profile = (event.currentTarget as HTMLSelectElement).value;
+    writeStringPreference("voice.noiseProfile", profile);
+    document.dispatchEvent(new CustomEvent("javis:voice-profile-changed", { detail: profile }));
+    saveState.textContent = "已保存";
+    saveState.dataset.state = "saved";
+  });
   options.root.querySelectorAll<HTMLButtonElement>("[data-model-source]").forEach((button) => {
     button.addEventListener("click", () => {
       selectModelSource(button.dataset.modelSource as ModelSource);

@@ -23,3 +23,11 @@ test("path settings are loaded and persisted through the Python backend", () => 
   assert.match(mainSource, /onLoadPathSettings/);
   assert.match(mainSource, /onSavePathSetting/);
 });
+
+test("Settings exposes continuous voice noise profiles", () => {
+  assert.match(settingsSource, /class="voice-noise-profile"/);
+  assert.match(settingsSource, /value="standard"/);
+  assert.match(settingsSource, /value="strong"/);
+  assert.match(settingsSource, /writeStringPreference\("voice\.noiseProfile"/);
+  assert.match(settingsSource, /javis:voice-profile-changed/);
+});

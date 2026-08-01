@@ -16,3 +16,19 @@ export function writePreference(key: string, value: boolean): void {
     // Preferences are optional; a locked-down WebView must remain usable.
   }
 }
+
+export function readStringPreference(key: string, fallback = ""): string {
+  try {
+    return localStorage.getItem(PREFIX + key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeStringPreference(key: string, value: string): void {
+  try {
+    localStorage.setItem(PREFIX + key, value);
+  } catch {
+    // Preferences are optional; a locked-down WebView must remain usable.
+  }
+}

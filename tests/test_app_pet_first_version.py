@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path("D:/Javis")
+ROOT = Path(__file__).resolve().parents[1]
 APP_SRC = ROOT / "app" / "src"
 
 

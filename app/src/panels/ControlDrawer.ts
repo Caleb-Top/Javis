@@ -40,6 +40,7 @@ export function createControlDrawer(client: BackendClient, manager: DrawerManage
   const taskStream = createTaskStream(client, drawer.querySelector<HTMLElement>(".task-stream")!);
   let activeTab: ControlTab = "status";
   let pendingConfirm = false;
+  let pendingApprovalId = "";
   let activeRootToken = "";
   let pendingAction: null | { run: () => Promise<void> } = null;
 
@@ -155,8 +156,9 @@ export function createControlDrawer(client: BackendClient, manager: DrawerManage
   }));
   drawer.querySelectorAll<HTMLButtonElement>("[data-confirm]").forEach((button) => button.addEventListener("click", () => {
     const confirm = button.dataset.confirm !== "deny";
-    client.confirm(confirm);
+    client.confirm(confirm, pendingApprovalId);
     pendingConfirm = false;
+    pendingApprovalId = "";
     drawer.querySelector<HTMLElement>(".confirm-request")!.hidden = true;
     runtimeStateCoordinator.signal({ source: "permission", state: confirm ? "executing" : "idle", timestamp: Date.now(), detail: confirm ? "授权后继续执行" : "已拒绝操作" });
   }));
@@ -165,11 +167,13 @@ export function createControlDrawer(client: BackendClient, manager: DrawerManage
   return {
     open(tab = activeTab, trigger = null) { selectTab(tab); manager.open("control", trigger); },
     handleEvent(event) {
-      if (event.type !== "confirm_required") return;
+      if (event.type !== "approval.required" && event.type !== "confirm_required") return;
       pendingConfirm = true;
+      const payload = event.payload as Record<string, unknown> | undefined;
+      pendingApprovalId = String(payload?.approval_id || event.approval_id || "");
       const card = drawer.querySelector<HTMLElement>(".confirm-request")!;
       card.hidden = false;
-      card.querySelector("p")!.textContent = String(event.detail || event.text || "该操作需要你的明确授权");
+      card.querySelector("p")!.textContent = String(payload?.reason || event.detail || event.text || "该操作需要你的明确授权");
       void pendingConfirm;
       selectTab("permission");
       manager.open("control");
