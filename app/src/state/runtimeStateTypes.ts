@@ -42,6 +42,9 @@ const DETAIL_ALIASES: Record<string, string> = {
 function readableDetail(rawDetail: string): string {
   let detail = rawDetail.trim();
   if (!detail) return "";
+  if (detail.toLowerCase() === "activity.fallback" || /failed;\s*choosing another path/i.test(detail)) {
+    return "\u6b63\u5728\u5c1d\u8bd5\u66ff\u4ee3\u65b9\u6848";
+  }
   if ((detail.startsWith("{") && detail.endsWith("}")) ||
       (detail.startsWith("[") && detail.endsWith("]"))) {
     try {

@@ -356,11 +356,16 @@ class ConversationHub:
                     )
                     break
                 elif message_type == "done":
+                    success = message.get("success") is not False
+                    detail = str(
+                        message.get("detail")
+                        or ("completed" if success else "request failed")
+                    )[:500]
                     terminal = await self._publish(
                         request.session_id,
                         request.request_id,
-                        "request.completed",
-                        {"detail": str(message.get("detail") or "completed")[:500]},
+                        "request.completed" if success else "request.failed",
+                        {"detail": detail} if success else {"error": detail},
                     )
                     break
 

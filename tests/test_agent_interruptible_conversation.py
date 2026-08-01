@@ -152,6 +152,91 @@ class InterruptibleAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("reasoning_content" in event for event in events))
         self.assertNotIn("private chain of thought", repr(events))
 
+    async def test_unresolved_tool_failure_marks_done_as_unsuccessful(self):
+        class FailingThenAnsweringLLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat_with_tools(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMResponse(
+                        tool_calls=[
+                            {"id": "one", "name": "save_note", "params": {"text": "x"}},
+                        ]
+                    )
+                return LLMResponse(text="Saved successfully")
+
+        class FailingTools(EmptyTools):
+            async def execute(self, name, params, **kwargs):
+                return ToolResult.failure("save failed")
+
+        agent = Agent(FailingThenAnsweringLLM(), FailingTools())
+        events = [
+            event
+            async for event in agent.chat(
+                "save this note",
+                session_id="session-a",
+                conversation_cards=[],
+                cancellation=CancellationToken(),
+            )
+        ]
+
+        self.assertTrue(any(event.get("activity") == "fallback" for event in events))
+        visible = "".join(
+            str(event.get("text") or "")
+            for event in events
+            if event.get("type") == "text_delta"
+        )
+        self.assertNotIn("Saved successfully", visible)
+        self.assertIn("\u4efb\u52a1\u672a\u5b8c\u6210", visible)
+        self.assertIs(events[-1].get("success"), False)
+
+    async def test_later_successful_tool_resolves_an_earlier_failure(self):
+        class RecoveryLLM:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat_with_tools(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return LLMResponse(
+                        tool_calls=[
+                            {"id": "one", "name": "primary_save", "params": {}},
+                            {"id": "two", "name": "fallback_save", "params": {}},
+                        ]
+                    )
+                return LLMResponse(text="Saved with the fallback")
+
+        class RecoveryTools(EmptyTools):
+            def __init__(self):
+                self.calls = 0
+
+            async def execute(self, name, params, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return ToolResult.failure("primary failed")
+                return ToolResult.success("saved")
+
+        agent = Agent(RecoveryLLM(), RecoveryTools())
+        events = [
+            event
+            async for event in agent.chat(
+                "save this note with a fallback",
+                session_id="session-a",
+                conversation_cards=[],
+                cancellation=CancellationToken(),
+            )
+        ]
+
+        visible = "".join(
+            str(event.get("text") or "")
+            for event in events
+            if event.get("type") == "text_delta"
+        )
+        self.assertIn("Saved with the fallback", visible)
+        self.assertIs(events[-1].get("success"), True)
+
 
 if __name__ == "__main__":
     unittest.main()

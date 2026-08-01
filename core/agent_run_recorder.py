@@ -73,7 +73,11 @@ class AgentRunRecorder:
             self._append_conversation_delta("error", str(message.get("message", "")))
             self.finalize("failed", error=str(message.get("message", "")))
         elif message_type == "done":
-            self.finalize("completed")
+            success = message.get("success") is not False
+            self.finalize(
+                "completed" if success else "failed",
+                error="" if success else str(message.get("detail") or "request failed"),
+            )
         return message
 
     def resolve_confirmation(

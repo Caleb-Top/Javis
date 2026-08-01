@@ -259,7 +259,19 @@ composer = createCommandComposer(form, input, (text) => {
   if (/code|代码|编程|项目|文件|终端/i.test(text)) showCodeSurface();
   return Boolean(client.send(text));
 });
+const stopAudioPlayback = (): void => {
+  document.querySelectorAll<HTMLAudioElement>("audio").forEach((audio) => {
+    audio.pause();
+    audio.currentTime = 0;
+  });
+  window.speechSynthesis?.cancel();
+  document.dispatchEvent(new CustomEvent("javis:stop-audio"));
+};
 const voiceCapture = createVoiceCapture(client, {
+  onBargeIn: () => {
+    stopAudioPlayback();
+    client.cancel("voice barge-in");
+  },
   onAudio: (audioBase64) => client.sendVoice(audioBase64),
   onState: (state) => runtimeStateCoordinator.signal({ source: "voice", state, timestamp: Date.now(), detail: state === "listening" ? "我在听" : "正在理解" }),
   onError: (message) => {

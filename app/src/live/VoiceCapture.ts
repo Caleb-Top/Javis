@@ -2,6 +2,7 @@ import type { BackendClient } from "../bridge/backendClient";
 import type { LiveState } from "./liveState";
 
 export type VoiceCaptureOptions = {
+  onBargeIn(): void | Promise<void>;
   onAudio(audioBase64: string): void;
   onState(state: LiveState): void;
   onError(message: string): void;
@@ -35,13 +36,14 @@ export function createVoiceCapture(
 
   async function start(): Promise<void> {
     try {
+      await options.onBargeIn();
+      options.onState("listening");
       const result = await client.post<AudioProbeResult & { recording?: boolean }>(
         "/api/voice/capture/start",
         { source: "microphone" },
       );
       if (!result.ok) throw new Error(result.message);
       recording = true;
-      options.onState("listening");
     } catch (error) {
       recording = false;
       options.onState("error");

@@ -67,6 +67,15 @@ window.addEventListener('resize', updateInputPlaceholder);
   document.addEventListener('click', _unlockAudio, { once: true });
   document.addEventListener('keydown', _unlockAudio, { once: true });
 
+  function stopAudioPlayback() {
+    if (_audioEl) {
+      try { _audioEl.pause(); } catch(e) {}
+      try { _audioEl.currentTime = 0; } catch(e) {}
+      _audioEl.removeAttribute('src');
+    }
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+
 
 function setBodyState(state) {
   currentState = state;
@@ -983,6 +992,8 @@ async function toggleVoice() {
 
 async function startVoiceCall() {
   if (voiceActive) return;
+  stopAudioPlayback();
+  stopActiveRequest();
   let btn = document.getElementById('voice-btn');
   try {
     voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1139,6 +1150,8 @@ function initPushToTalk() {
 
 function pttStartStream(epoch) {
   if (voiceWs && voiceWs.readyState === WebSocket.OPEN) return;
+  stopAudioPlayback();
+  stopActiveRequest();
   navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
     if (!pttActive || pttEpoch !== epoch) { stream.getTracks().forEach(function(t){ t.stop(); }); return; }
     voiceStream = stream;
@@ -1317,6 +1330,7 @@ function exportChat(format) {
 function playAudio(b64) {
   if (!b64) { console.warn('[Javis] playAudio: empty data'); return; }
   try {
+    stopAudioPlayback();
     if (!_audioEl) _unlockAudio();
     let el = _audioEl || new Audio();
     el.src = 'data:audio/mp3;base64,' + b64;

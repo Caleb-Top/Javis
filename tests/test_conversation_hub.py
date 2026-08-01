@@ -298,6 +298,33 @@ class ConversationHubTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(after, before)
 
+    async def test_unsuccessful_done_event_becomes_request_failed(self):
+        async def runner(request, token):
+            yield {
+                "type": "tool_result",
+                "tool": "save_note",
+                "success": False,
+                "data": "save failed",
+            }
+            yield {"type": "done", "success": False, "detail": "fallback exhausted"}
+
+        await self.hub.submit(
+            ConversationRequest(
+                "session-1",
+                "request-failed",
+                "save",
+                "live",
+                "key-failed",
+            ),
+            runner,
+        )
+        terminal = await self.hub.wait_for_terminal("request-failed")
+        runs = self.run_store.list_runs(limit=5)
+
+        self.assertEqual(terminal["type"], "request.failed")
+        self.assertEqual(terminal["payload"]["error"], "fallback exhausted")
+        self.assertEqual(runs[0]["status"], "failed")
+
     def test_recorder_cancel_is_terminal_and_cannot_be_overwritten_by_done(self):
         recorder = AgentRunRecorder(
             self.run_store,
