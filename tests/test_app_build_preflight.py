@@ -37,6 +37,7 @@ class AppBuildPreflightTests(unittest.TestCase):
         for forbidden in ["pnpm install", "npm install", "cargo fetch", "cargo install", "winget", "Invoke-WebRequest"]:
             self.assertNotIn(forbidden, source)
         self.assertNotIn("subprocess", source)
+        self.assertIn("_shared_tool_root", source)
 
     def test_packaging_boundary_is_part_of_readiness(self):
         from scripts.app_build_preflight import collect_build_preflight

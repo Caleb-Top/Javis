@@ -79,6 +79,8 @@ class AppReleaseBlockerTests(unittest.TestCase):
         for contract in ["probeMicrophone", "probeSystemAudio", "selfTest"]:
             self.assertIn(contract, voice)
         self.assertIn('"/api/voice/capture/probe"', voice)
+        self.assertIn("/ws_voice_stream", voice)
+        self.assertIn('type: "audio.stream.start"', voice)
         self.assertNotIn("navigator.mediaDevices", voice)
         self.assertNotIn("MediaRecorder", voice)
         for contract in ["audio-diagnostics", "麦克风自检", "系统音频自检", "STT", "TTS"]:

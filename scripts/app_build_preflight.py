@@ -25,12 +25,33 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _shared_tool_root(root: Path) -> Path:
+    marker = root / ".git"
+    if not marker.is_file():
+        return root
+    try:
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.lower().startswith("gitdir:"):
+            return root
+        git_dir = Path(line.split(":", 1)[1].strip())
+        if not git_dir.is_absolute():
+            git_dir = (root / git_dir).resolve()
+        if git_dir.parent.name == "worktrees" and len(git_dir.parents) >= 3:
+            candidate = git_dir.parents[2]
+            if (candidate / "tools").is_dir():
+                return candidate
+    except (OSError, ValueError):
+        pass
+    return root
+
+
 def _tool_exists(root: Path, bundled_relative: str, command: str) -> bool:
-    return (root / bundled_relative).is_file() or shutil.which(command) is not None
+    tool_root = _shared_tool_root(root)
+    return (tool_root / bundled_relative).is_file() or shutil.which(command) is not None
 
 
 def _tauri_crate_cached(root: Path) -> bool:
-    cargo = root / "tools" / "rust" / "cargo" / "registry"
+    cargo = _shared_tool_root(root) / "tools" / "rust" / "cargo" / "registry"
     source_matches = cargo.glob("src/*/tauri-*") if cargo.exists() else ()
     cache_matches = cargo.glob("cache/*/tauri-*.crate") if cargo.exists() else ()
     return any(path.is_dir() for path in source_matches) or any(path.is_file() for path in cache_matches)

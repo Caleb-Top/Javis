@@ -5,28 +5,47 @@ import test from "node:test";
 import type { BackendClient } from "../src/bridge/backendClient.ts";
 import { createVoiceCapture } from "../src/live/VoiceCapture.ts";
 
+class BargeInSocket {
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  send(): void {}
+  close(): void { this.readyState = 3; }
+  open(): void { this.readyState = 1; this.onopen?.(); }
+  emit(payload: Record<string, unknown>): void {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+}
+
 test("native capture interrupts playback and the active request before listening", async () => {
   const order: string[] = [];
+  const socket = new BargeInSocket();
   const client = {
-    post: async (path: string) => {
-      order.push(`post:${path}`);
-      return { ok: true, source: "microphone", status: "ready", message: "ready" };
-    },
+    sessionId: () => "session-barge-in",
   } as unknown as BackendClient;
   const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
     onBargeIn: async () => { order.push("barge-in"); },
     onAudio: () => undefined,
     onState: (state) => { order.push(`state:${state}`); },
     onError: (message) => { throw new Error(message); },
   });
 
-  await capture.toggle();
+  const started = capture.startContinuous();
+  socket.open();
+  socket.emit({ type: "audio.stream.ready" });
+  await started;
+  order.length = 0;
+  socket.emit({ type: "speech.start" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(order, [
     "barge-in",
     "state:listening",
-    "post:/api/voice/capture/start",
   ]);
+  await capture.pauseContinuous();
 });
 
 test("web voice entry stops audio and cancels the old request before microphone capture", () => {

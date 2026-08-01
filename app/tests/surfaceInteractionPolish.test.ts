@@ -48,6 +48,8 @@ test("the center of the orb is a state-reactive fluid wave", () => {
   assert.match(rendererSource, /coreDeformation/);
   assert.match(rendererSource, /coreWaveBand/);
   assert.match(rendererSource, /coreFlow/);
+  assert.match(rendererSource, /setAudioLevel/);
+  assert.match(mainSource, /onLevel:\s*\(level\)[\s\S]*?liveOrb\.setAudioLevel\(level\)/);
 });
 
 test("Code renders immediately while native window geometry settles in the background", () => {

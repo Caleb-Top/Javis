@@ -157,6 +157,7 @@ class PackagedVoiceRuntimeTests(unittest.TestCase):
         control = (ROOT / "app/src/panels/ControlDrawer.ts").read_text(encoding="utf-8")
 
         self.assertIn('"/api/voice/capture/probe"', voice_capture)
+        self.assertIn("/ws_voice_stream", voice_capture)
         self.assertNotIn("navigator.mediaDevices", voice_capture)
         self.assertIn('"/api/perception/screen/analyze"', control)
 

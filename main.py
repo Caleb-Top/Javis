@@ -33,6 +33,10 @@ from voice.native_capture import (
     start_capture,
     stop_capture,
 )
+from voice.continuous_capture import continuous_capture_manager
+from voice.native_playback import NativePlaybackManager
+from voice.stt import preload_model
+from voice.streaming_ws import serve_continuous_voice_stream
 from utils.local_surface_commands import match_local_surface_command
 
 def _event_store_path() -> Path:
@@ -103,6 +107,7 @@ engine = runtime.engine
 agent = runtime.agent
 SKILL_LIST = runtime.skill_list
 CURRENT_SKILL = runtime.current_skill
+native_playback_manager = NativePlaybackManager(service=continuous_capture_manager.service)
 
 def _register_always_on_tools():
     runtime.register_always_on_tools()
@@ -125,9 +130,19 @@ from utils.app_cors import install_desktop_cors
 
 @asynccontextmanager
 async def _app_lifespan(_app):
+    warmup_task = None
+    if _STARTUP_SIDE_EFFECTS:
+        warmup_task = asyncio.create_task(asyncio.to_thread(preload_model))
     try:
         yield
     finally:
+        await asyncio.to_thread(native_playback_manager.stop)
+        await asyncio.to_thread(continuous_capture_manager.stop)
+        if warmup_task is not None and warmup_task.done():
+            try:
+                warmup_task.result()
+            except Exception as error:
+                logger.warning("STT model warmup failed: %s", error)
         await runtime.aclose()
 
 
@@ -232,6 +247,11 @@ async def ws(ws: WebSocket):
     await conversation_gateway.serve(ws)
 
 
+@app.websocket("/ws_voice_stream")
+async def ws_voice_stream(ws: WebSocket):
+    await serve_continuous_voice_stream(ws, continuous_capture_manager)
+
+
 from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,_get_api_key
 from core.agent import action_log
 from utils.memory import save_conversation,load_conversation,list_conversations,delete_conversation
@@ -250,9 +270,49 @@ async def api_voice_diagnostics():
 
     return {
         "capture": get_capture_diagnostics(),
+        "continuous": continuous_capture_manager.status(),
+        "playback": native_playback_manager.status(),
         "stt": get_stt_diagnostics(),
         "tts": get_tts_diagnostics(),
     }
+
+@app.post("/api/voice/playback/speak")
+async def api_voice_playback_speak(data: dict = Body(default={})):
+    text = str(data.get("text", "") or "").strip()[:3000]
+    if not text:
+        return {"ok": False, "error": "text is required", "active": False}
+    reservation = await asyncio.to_thread(native_playback_manager.reserve)
+    from voice.tts import synthesize
+
+    audio, mime = await synthesize(text)
+    if not audio:
+        return {"ok": False, "error": "speech synthesis failed", "active": False}
+    if mime != "audio/wav":
+        return {
+            "ok": False,
+            "error": "native playback currently requires local PCM WAV speech",
+            "mime": mime,
+            "active": False,
+        }
+    import base64
+
+    try:
+        wav_bytes = base64.b64decode(audio, validate=True)
+        result = await asyncio.to_thread(
+            native_playback_manager.play_reserved_wav,
+            wav_bytes,
+            None,
+            None,
+            None,
+            reservation,
+        )
+    except Exception as error:
+        return {"ok": False, "error": str(error), "active": False}
+    return {**result, "mime": mime}
+
+@app.post("/api/voice/playback/stop")
+async def api_voice_playback_stop():
+    return await asyncio.to_thread(native_playback_manager.stop)
 
 @app.post("/api/voice/capture/start")
 async def api_voice_capture_start(data: dict = Body(default={})):

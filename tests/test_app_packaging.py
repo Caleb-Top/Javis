@@ -118,12 +118,14 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("checkBackendHealth", text)
         self.assertIn("offline", text)
 
-    def test_live_voice_capture_sends_existing_voice_protocol(self):
+    def test_live_voice_capture_uses_continuous_native_voice_protocol(self):
         voice = (ROOT / "app" / "src" / "live" / "VoiceCapture.ts").read_text(encoding="utf-8")
         backend = (ROOT / "app" / "src" / "bridge" / "backendClient.ts").read_text(encoding="utf-8")
         main = (ROOT / "app" / "src" / "main.ts").read_text(encoding="utf-8")
 
-        self.assertIn('"/api/voice/capture/start"', voice)
+        self.assertIn("/ws_voice_stream", voice)
+        self.assertIn('type: "audio.stream.start"', voice)
+        self.assertIn("session_id: client.sessionId()", voice)
         self.assertNotIn("MediaRecorder", voice)
         self.assertNotIn("getUserMedia", voice)
         self.assertIn("sendVoice", backend)

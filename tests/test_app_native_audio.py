@@ -17,8 +17,9 @@ class NativeAudioContractTests(unittest.TestCase):
         voice = self.read("app/src/live/VoiceCapture.ts")
         main = self.read("app/src/main.ts")
 
-        self.assertIn('"/api/voice/capture/start"', voice)
-        self.assertIn('"/api/voice/capture/stop"', voice)
+        self.assertIn("/ws_voice_stream", voice)
+        self.assertIn('type: "audio.stream.start"', voice)
+        self.assertIn('type: "audio.stream.stop"', voice)
         self.assertIn('"/api/voice/capture/probe"', voice)
         self.assertIn("createVoiceCapture(client,", main)
         for forbidden in (
@@ -54,6 +55,18 @@ class NativeAudioContractTests(unittest.TestCase):
         self.assertIn('@app.post("/api/voice/capture/stop")', main)
         self.assertIn('@app.post("/api/voice/capture/probe")', main)
         self.assertIn('"capture": get_capture_diagnostics()', main)
+        self.assertIn("preload_model", main)
+
+    def test_app_continuous_voice_uses_a_native_backend_stream(self):
+        voice = self.read("app/src/live/VoiceCapture.ts")
+        main = self.read("main.py")
+
+        self.assertIn("/ws_voice_stream", voice)
+        self.assertIn("audio.stream.start", voice)
+        self.assertIn("transcript.partial", voice)
+        self.assertIn("transcript.final", voice)
+        self.assertIn('@app.websocket("/ws_voice_stream")', main)
+        self.assertIn("serve_continuous_voice_stream", main)
 
     def test_native_capture_encodes_pcm_as_valid_wav(self):
         from voice.native_capture import frames_to_wav_base64
@@ -121,7 +134,14 @@ class NativeAudioContractTests(unittest.TestCase):
     def test_release_runtime_requires_isolated_microphone_worker(self):
         from scripts.javis_release_runtime import REQUIRED_MEMBERS
 
-        self.assertIn("app/voice/native_capture_worker.py", REQUIRED_MEMBERS)
+        for required in (
+            "app/voice/native_capture_worker.py",
+            "app/voice/streaming_pipeline.py",
+            "app/voice/continuous_capture.py",
+            "app/voice/streaming_ws.py",
+            "app/voice/native_playback.py",
+        ):
+            self.assertIn(required, REQUIRED_MEMBERS)
 
     def test_app_screen_capture_uses_native_tauri_command(self):
         tauri_main = self.read("app/src-tauri/src/main.rs")

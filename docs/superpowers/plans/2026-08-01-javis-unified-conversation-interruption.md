@@ -611,13 +611,13 @@ git commit -m "feat: add Code activity guidance and interruption"
 - Adds Web `stopAudioPlayback()`.
 - Maps `activity.fallback` to a short, non-success status.
 
-- [ ] **Step 1: Write voice interruption and fallback tests**
+- [x] **Step 1: Write voice interruption and fallback tests**
 
 Assert that starting a new capture calls `onBargeIn` before the native capture
 endpoint, Web `playAudio` is stopped before a replacement voice message, and a
 failed tool never produces a completed/saved claim unless a later tool succeeds.
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 ```powershell
 Set-Location app
@@ -626,13 +626,13 @@ Set-Location ..
 G:\Javis\venv\Scripts\python.exe -m pytest tests\test_agent_interruptible_conversation.py -q
 ```
 
-- [ ] **Step 3: Implement barge-in ordering**
+- [x] **Step 3: Implement barge-in ordering**
 
 The order is: stop TTS, send cancel for active request, enter listening state,
 capture, transcribe, then submit the new voice request in the same session. Do not
 queue raw microphone audio for reconnect.
 
-- [ ] **Step 4: Implement concise fallback states**
+- [x] **Step 4: Implement concise fallback states**
 
 Code receives the full structured fallback activity. Live/Pet display a bounded
 message such as `Trying a local fallback`; they return to failure if no verified
@@ -645,7 +645,7 @@ verify microphone permission, one spoken interruption, TTS stop, and continuous
 follow-up. Record hardware and Windows permission results separately from
 automated status.
 
-- [ ] **Step 6: Commit barge-in behavior**
+- [x] **Step 6: Commit barge-in behavior**
 
 ```powershell
 git add app/src/live/VoiceCapture.ts app/src/main.ts web/js/app.js app/src/state/runtimeStateTypes.ts app/src/live/SurfaceStatus.ts app/tests/voiceBargeIn.test.ts app/tests/surfaceStatus.test.ts tests/test_agent_interruptible_conversation.py
@@ -675,38 +675,41 @@ git commit -m "feat: add voice barge-in and fallback status"
   `javis://audio-error`.
 - Python `StreamingVoicePipeline.push_frame(frame) -> VoicePipelineEvents`.
 
-- [ ] **Step 1: Write failing frame, endpoint, and interruption tests**
+- [x] **Step 1: Write failing frame, endpoint, and interruption tests**
 
 Cover bounded ring-buffer behavior, speech pre-roll, VAD hysteresis, partial
 replacement, final transcript order, continuous second turns, queue overload,
 and a speech-start event stopping TTS before request cancellation.
 
-- [ ] **Step 2: Add deterministic noisy-speech fixtures**
+- [x] **Step 2: Add deterministic noisy-speech fixtures**
 
 Generate or keep small licensed fixtures for clean speech, fan-like stationary
 noise, keyboard impulses, and TTS echo. Assert intelligible speech is preserved,
 silence does not create final transcripts, and stronger suppression is opt-in.
 
-- [ ] **Step 3: Implement native WASAPI frame capture**
+- [x] **Step 3: Implement native Windows frame capture**
 
-Capture 48 kHz mono PCM as 10/20 ms frames. Keep capture and playback references
-native and process-wide so the microphone remains open across turns. The App must
-not call browser media APIs in production Tauri mode.
+Capture 48 kHz mono PCM as 20 ms frames through an isolated Python
+PyAudio/PortAudio worker. Keep capture and playback references process-wide so
+the microphone remains open across turns. The App does not call browser media
+APIs in production Tauri mode.
 
-- [ ] **Step 4: Integrate AEC, NS, AGC, and optional RNNoise**
+- [x] **Step 4: Integrate reduced-mode AEC, NS, and AGC**
 
-Use WebRTC APM for echo cancellation, noise suppression, and gain control. Feed
-TTS playback frames into the reverse stream. Add RNNoise as a selectable measured
-enhancer, with standard/strong profiles and reduced-mode diagnostics when an
-optional component is unavailable.
+The installed dependency set does not contain WebRTC APM or RNNoise. The current
+reduced mode uses synchronized adaptive playback-reference cancellation, adaptive
+Wiener suppression, bounded AGC, and off/standard/strong profiles. Diagnostics
+report optional backend availability separately and never claim those modules are
+active.
 
-- [ ] **Step 5: Implement rolling VAD and streaming transcription**
+- [x] **Step 5: Implement rolling VAD and streaming transcription**
 
-Run Silero VAD on 16 kHz rolling frames. Emit partial hypotheses every 250-500 ms
-from bounded overlapping windows and finalize after 350-600 ms endpoint silence.
-Only finalized segments become conversation messages; partials update Live status.
+Silero is not installed, so reduced mode uses adaptive energy/ZCR VAD with onset
+hysteresis. It emits bounded partial hypotheses every 800 ms and finalizes after
+900 ms, which avoids false cuts across measured Chinese SAPI pauses. Only final
+segments become conversation messages; partials update Live status.
 
-- [ ] **Step 6: Wire continuous conversation and native barge-in**
+- [x] **Step 6: Wire continuous conversation and native barge-in**
 
 Keep capture active while Javis thinks and speaks. New speech onset stops native
 TTS, cancels the current request through the shared `ConversationHub`, and submits
@@ -717,6 +720,11 @@ the finalized replacement segment in the same session.
 Record first-partial, endpoint, barge-in, queue, overrun, and real-time-factor
 metrics. Confirm raw audio is not persisted by default. Separate automated fixture
 results from a real Windows microphone, speaker, and noisy-room hardware test.
+
+Automated fixtures, Windows microphone streaming (48 kHz/20 ms), offline SAPI
+speech, local faster-whisper recognition, queue bounds, and no-raw-audio behavior
+have passed. A human noisy-room barge-in and speaker audibility pass remains a
+release acceptance item and is not reported as complete.
 
 - [ ] **Step 8: Commit the native continuous voice path**
 

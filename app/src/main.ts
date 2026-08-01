@@ -110,6 +110,8 @@ let controlDrawer: ReturnType<typeof createControlDrawer> | null = null;
 let settingsSurface: ReturnType<typeof createSettingsSurface> | null = null;
 let diagnostics: ReturnType<typeof createDiagnosticsPanel>;
 let diagnosticsReturnMode: DesktopMode = "live";
+let voiceCapture!: ReturnType<typeof createVoiceCapture>;
+const voiceRequestIds = new Set<string>();
 const sidecar = createSidecarClient();
 let backendConnection: ConnectionSnapshot = { http: false, websocket: false };
 let desktopSidecar: SidecarSnapshot = { state: isTauriRuntime() ? "unknown" : "offline" };
@@ -152,6 +154,32 @@ const client = createBackendClient({
         liveCaption.setText(snapshot.response, event.request_id);
       } else if (event.type === "request.cancelled" && previous.activeRequestId === event.request_id) {
         liveCaption.setText("已中断", event.request_id);
+      }
+      if (
+        event.type === "request.completed"
+        || event.type === "request.cancelled"
+        || event.type === "request.failed"
+      ) {
+        const voiceTurn = voiceRequestIds.delete(event.request_id);
+        if (event.type === "request.completed" && voiceTurn && snapshot.response.trim()) {
+          void client.post<{
+            ok: boolean;
+            active: boolean;
+            duration_ms?: number;
+          }>("/api/voice/playback/speak", { text: snapshot.response.trim() })
+            .then((playback) => {
+              if (!playback.ok || !playback.active) return;
+              runtimeStateCoordinator.signal({
+                source: "voice",
+                state: "speaking",
+                timestamp: Date.now(),
+                detail: "正在回答",
+              });
+              window.setTimeout(() => voiceCapture.resumeListeningState(), playback.duration_ms ?? 0);
+            })
+            .catch(() => undefined);
+        }
+        queueMicrotask(() => voiceCapture.resumeListeningState());
       }
     }
     if (event.type === "app_action") {
@@ -267,10 +295,26 @@ const stopAudioPlayback = (): void => {
   window.speechSynthesis?.cancel();
   document.dispatchEvent(new CustomEvent("javis:stop-audio"));
 };
-const voiceCapture = createVoiceCapture(client, {
-  onBargeIn: () => {
+voiceCapture = createVoiceCapture(client, {
+  noiseProfile: () => {
+    const profile = readStringPreference("voice.noiseProfile", "standard");
+    return profile === "off" || profile === "strong" ? profile : "standard";
+  },
+  onBargeIn: async () => {
     stopAudioPlayback();
+    await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
     client.cancel("voice barge-in");
+  },
+  onPartial: (text) => {
+    liveCaption.setText(text);
+  },
+  onLevel: (level) => {
+    liveOrb.setAudioLevel(level);
+  },
+  onTranscript: (text) => {
+    liveCaption.setText(text);
+    const requestId = client.send(text);
+    if (requestId) voiceRequestIds.add(requestId);
   },
   onAudio: (audioBase64) => client.sendVoice(audioBase64),
   onState: (state) => runtimeStateCoordinator.signal({ source: "voice", state, timestamp: Date.now(), detail: state === "listening" ? "我在听" : "正在理解" }),
@@ -430,6 +474,12 @@ document.addEventListener("javis:surface-command", (event) => {
 });
 document.addEventListener("javis:open-first-run", () => firstRun.open());
 document.addEventListener("javis:open-settings", showSettingsSurface);
+document.addEventListener("javis:voice-profile-changed", (event) => {
+  const profile = (event as CustomEvent<unknown>).detail;
+  if (profile === "off" || profile === "standard" || profile === "strong") {
+    void voiceCapture.setNoiseProfile(profile);
+  }
+});
 const firstRunRequired = firstRun.showOnFirstRun();
 void setDesktopMode(getStartupDesktopMode(firstRunRequired));
 
