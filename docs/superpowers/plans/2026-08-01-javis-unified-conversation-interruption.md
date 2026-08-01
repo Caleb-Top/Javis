@@ -726,7 +726,7 @@ speech, local faster-whisper recognition, queue bounds, and no-raw-audio behavio
 have passed. A human noisy-room barge-in and speaker audibility pass remains a
 release acceptance item and is not reported as complete.
 
-- [ ] **Step 8: Commit the native continuous voice path**
+- [x] **Step 8: Commit the native continuous voice path**
 
 ```powershell
 git add app/src-tauri app/src/live/VoiceCapture.ts app/src/main.ts voice tests/test_streaming_voice_pipeline.py app/tests/continuousVoiceCapture.test.ts
@@ -747,14 +747,14 @@ git commit -m "feat: add native continuous voice pipeline"
 - Produces a deterministic verification script returning nonzero on session,
   ordering, cancellation, replay, persistence, or stale-delta failure.
 
-- [ ] **Step 1: Add an end-to-end test harness**
+- [x] **Step 1: Add an end-to-end test harness**
 
 The harness starts the backend in test mode on a free G-rooted temp directory,
 opens two WebSockets as Live and Code, attaches both to one session, submits from
 each surface, cancels/replaces one request, reconnects after a cursor, and checks
 the durable conversation and run databases.
 
-- [ ] **Step 2: Run all Python suites**
+- [x] **Step 2: Run all Python suites**
 
 ```powershell
 . .\scripts\javis_dev_env.ps1
@@ -764,7 +764,7 @@ the durable conversation and run databases.
 Expected: zero failures across `tests`, `agent_distill/tests`, and
 `ClaudeAgent_Distill/agent_distill/tests`.
 
-- [ ] **Step 3: Run frontend and native builds**
+- [x] **Step 3: Run frontend and native builds**
 
 ```powershell
 Set-Location app
@@ -781,6 +781,9 @@ Verify `/api/status`, `/api/runtime/status`, tool/skill catalogs, agent runs,
 conversation stats, two-surface replay, and graceful shutdown. Confirm no test
 server or build process remains afterward.
 
+Source backend API/WebSocket and shutdown checks pass. Packaged-sidecar smoke is
+deferred to Task 10 because the new runtime archive has not been generated yet.
+
 - [ ] **Step 5: Perform visual and interaction QA**
 
 Use the native Tauri app for Live/Code/Settings/Pet transitions. Verify Code opens
@@ -788,14 +791,18 @@ immediately, displays the current Live task, remains aligned with sidebar open a
 closed, allows stop and replacement input, and returns to Live without session
 loss. Check desktop and compact window sizes.
 
-- [ ] **Step 6: Prove visual and path invariants**
+Automated transition/layout tests pass and the native window compiles and starts.
+The current Windows desktop helper intermittently fails transparent-window cursor
+capture with `0x80070005`, so manual mouse-driven native QA remains unclaimed.
+
+- [x] **Step 6: Prove visual and path invariants**
 
 Compare pre-feature hashes for `LiveOrbRenderer.ts`, `LiveOrb.ts`, selected orb
 icon assets, Pet skins, and Pet renderer assets. Scan active source/config/build
 scripts for fixed `D:\Javis` project paths. Confirm caches, temp, Cargo target,
 pnpm store, runtime staging, and release output are under `G:`.
 
-- [ ] **Step 7: Write the verification report and commit**
+- [x] **Step 7: Write the verification report and commit**
 
 Report exact commands, counts, durations, hardware results, residual limitations,
 upstream provenance, and rollback commits. Do not label unperformed microphone or
