@@ -187,6 +187,7 @@ export type SettingsSurfaceOptions = {
   onSaveModelSettings: (
     settings: Record<string, unknown>,
   ) => Promise<ModelConnectionSettingsResponse>;
+  onLoadVoiceDevices: () => Promise<{ input_devices: Array<{ index: number; name: string }> }>;
   onRefreshLocalModels: (baseUrl: string) => Promise<LocalModelCatalogResponse>;
   onRefreshRemoteModels: (
     provider: string,
@@ -331,6 +332,16 @@ export function createSettingsSurface(
                   <option value="strong">强降噪</option>
                 </select>
                 <small>嘈杂环境可选强降噪，切换后会自动重启连续收听。</small>
+              </label>
+              <label class="settings-field">
+                <span>麦克风设备</span>
+                <div class="settings-input-action">
+                  <select class="voice-input-device">
+                    <option value="">默认麦克风</option>
+                  </select>
+                  <button class="settings-secondary-button voice-device-refresh" type="button">刷新</button>
+                </div>
+                <small>选择用于连续语音识别的输入设备，留空则使用系统默认麦克风。</small>
               </label>
             </div>
           </section>
@@ -1116,6 +1127,27 @@ export function createSettingsSurface(
     });
   }
 
+  function loadVoiceDevices(select: HTMLSelectElement): void {
+    select.disabled = true;
+    void options.onLoadVoiceDevices().then(({ input_devices }) => {
+      const stored = readStringPreference("voice.inputDevice", "");
+      select.innerHTML = '<option value="">默认麦克风</option>';
+      for (const device of input_devices || []) {
+        const option = document.createElement("option");
+        option.value = String(device.index);
+        option.textContent = device.name || `设备 ${device.index}`;
+        select.append(option);
+      }
+      if (stored && [...select.options].some((option) => option.value === stored)) {
+        select.value = stored;
+      }
+    }).catch(() => {
+      select.innerHTML = '<option value="">默认麦克风</option>';
+    }).finally(() => {
+      select.disabled = false;
+    });
+  }
+
   function sync(): void {
     const preferences = readPetPreferences();
     const range = options.root.querySelector<HTMLInputElement>(".pet-scale-input")!;
@@ -1127,6 +1159,8 @@ export function createSettingsSurface(
       ["off", "standard", "strong"].includes(storedNoiseProfile)
         ? storedNoiseProfile
         : "standard";
+    const deviceSelect = options.root.querySelector<HTMLSelectElement>(".voice-input-device")!;
+    loadVoiceDevices(deviceSelect);
     options.root.querySelectorAll<HTMLElement>(".settings-shortcut-card").forEach((slot, index) => {
       const shortcut = preferences.shortcuts[index] || { label: "", kind: "", value: "" };
       slot.querySelector<HTMLInputElement>(".shortcut-label")!.value = shortcut.label;
@@ -1175,6 +1209,18 @@ export function createSettingsSurface(
     document.dispatchEvent(new CustomEvent("javis:voice-profile-changed", { detail: profile }));
     saveState.textContent = "已保存";
     saveState.dataset.state = "saved";
+  });
+  options.root.querySelector<HTMLSelectElement>(".voice-input-device")!.addEventListener("change", (event) => {
+    const device = (event.currentTarget as HTMLSelectElement).value;
+    writeStringPreference("voice.inputDevice", device);
+    document.dispatchEvent(new CustomEvent("javis:voice-device-changed", { detail: device }));
+    saveState.textContent = "已保存";
+    saveState.dataset.state = "saved";
+  });
+  options.root.querySelector<HTMLButtonElement>(".voice-device-refresh")!.addEventListener("click", (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const select = button.previousElementSibling as HTMLSelectElement;
+    loadVoiceDevices(select);
   });
   options.root.querySelectorAll<HTMLButtonElement>("[data-model-source]").forEach((button) => {
     button.addEventListener("click", () => {

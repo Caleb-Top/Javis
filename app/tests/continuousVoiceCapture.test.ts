@@ -184,3 +184,31 @@ test("voice turns use native playback and barge-in stops it before cancellation"
     /onBargeIn:\s*async[\s\S]*?\/api\/voice\/playback\/stop[\s\S]*?client\.cancel/,
   );
 });
+
+test("selected microphone device index is included in the continuous stream start payload", async () => {
+  const socket = new FakeVoiceSocket();
+  const client = {
+    sessionId: () => "session-device",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
+    noiseProfile: () => "standard",
+    deviceIndex: () => 3,
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: (message) => { throw new Error(message); },
+  });
+
+  const started = capture.startContinuous();
+  socket.open();
+  socket.emit({ type: "audio.stream.ready" });
+  await started;
+
+  const payload = socket.sent[0].payload as Record<string, unknown>;
+  assert.equal(payload.device_index, 3);
+
+  await capture.pauseContinuous();
+  assert.equal(capture.isContinuous(), false);
+});

@@ -312,6 +312,10 @@ voiceCapture = createVoiceCapture(client, {
     const profile = readStringPreference("voice.noiseProfile", "standard");
     return profile === "off" || profile === "strong" ? profile : "standard";
   },
+  deviceIndex: () => {
+    const stored = readStringPreference("voice.inputDevice", "");
+    return stored ? Number(stored) : undefined;
+  },
   onBargeIn: async () => {
     stopAudioPlayback();
     await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
@@ -389,6 +393,12 @@ settingsSurface = createSettingsSurface({
     client.get<ModelConnectionSettingsResponse>("/api/config/models"),
   onSaveModelSettings: (settings) =>
     client.post<ModelConnectionSettingsResponse>("/api/config/models", settings),
+  onLoadVoiceDevices: async () => {
+    const diagnostics = await client.get<{
+      capture?: { input_devices?: Array<{ index: number; name: string }> };
+    }>("/api/voice/diagnostics");
+    return { input_devices: diagnostics.capture?.input_devices ?? [] };
+  },
   onRefreshLocalModels: (baseUrl) =>
     client.post<LocalModelCatalogResponse>("/api/config/models/local", {
       base_url: baseUrl,

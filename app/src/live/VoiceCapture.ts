@@ -12,6 +12,7 @@ export type VoiceCaptureOptions = {
   onLevel?(level: number): void;
   openStream?(url: string): WebSocket;
   noiseProfile?(): VoiceNoiseProfile;
+  deviceIndex?(): string | number | undefined;
   onAudio(audioBase64: string): void;
   onState(state: LiveState): void;
   onError(message: string): void;
@@ -118,13 +119,18 @@ export function createVoiceCapture(
       startReject = reject;
     });
     socket.onopen = () => {
+      const deviceIndex = options.deviceIndex?.();
+      const payload: Record<string, unknown> = {
+        session_id: client.sessionId(),
+        noise_profile: noiseProfile,
+        protocol_version: 1,
+      };
+      if (deviceIndex !== undefined && deviceIndex !== null && deviceIndex !== "") {
+        payload.device_index = Number(deviceIndex);
+      }
       socket.send(JSON.stringify({
         type: "audio.stream.start",
-        payload: {
-          session_id: client.sessionId(),
-          noise_profile: noiseProfile,
-          protocol_version: 1,
-        },
+        payload,
       }));
     };
     socket.onmessage = (event) => {
