@@ -185,6 +185,16 @@ test("voice turns use native playback and barge-in stops it before cancellation"
   );
 });
 
+test("TTS playback failure surfaces the reason and still resumes listening", () => {
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const start = main.indexOf("/api/voice/playback/speak");
+  const end = main.indexOf("request.completed", start);
+  const branch = main.slice(start, end < start ? main.length : end);
+  // The speak call must not silently swallow failures: a failed playback
+  // must render the reason and keep the voice loop recoverable.
+  assert.match(branch, /\.catch\(\(error\)\s*=>\s*\{[\s\S]*?liveCaption\.setText/);
+});
+
 test("selected microphone device index is included in the continuous stream start payload", async () => {
   const socket = new FakeVoiceSocket();
   const client = {

@@ -189,7 +189,9 @@ const client = createBackendClient({
               });
               window.setTimeout(() => voiceCapture.resumeListeningState(), playback.duration_ms ?? 0);
             })
-            .catch(() => undefined);
+            .catch((error) => {
+              liveCaption.setText(error instanceof Error ? error.message : "语音播报失败");
+            });
         }
         queueMicrotask(() => voiceCapture.resumeListeningState());
       }
