@@ -26,8 +26,44 @@ def _session_id(payload: dict) -> str:
 
 async def serve_continuous_voice_stream(ws, manager) -> None:
     await ws.accept()
+    closed = asyncio.Event()
+    stream_acquired = False
+
+    async def send_json(message: dict) -> None:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            closed.set()
+            raise
+
+    async def send_error(error: Exception) -> None:
+        if closed.is_set():
+            return
+        try:
+            await send_json({"type": "audio.error", "message": str(error)[:500]})
+        except Exception:
+            pass
+
+    async def release_stream(session_id: str) -> None:
+        nonlocal stream_acquired
+        if not stream_acquired:
+            return
+        try:
+            await asyncio.to_thread(manager.stop, session_id=session_id)
+        except RuntimeError as error:
+            if str(error) != "microphone stream belongs to another conversation":
+                raise
+        stream_acquired = False
+
     try:
         first = await ws.receive_json()
+    except (WebSocketDisconnect, RuntimeError):
+        return
+    except Exception as error:
+        await send_error(error)
+        return
+
+    try:
         payload = _payload(first)
         session_id = _session_id(payload)
         command = str(first.get("type") or "")
@@ -38,48 +74,61 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
             raise ValueError("invalid noise profile")
         cursor = max(0, int(payload.get("after_sequence") or 0))
         if command == "audio.stream.start":
-            await asyncio.to_thread(
-                manager.start,
-                session_id=session_id,
-                noise_profile=profile,
-                device_index=payload.get("device_index"),
+            acquisition = asyncio.create_task(
+                asyncio.to_thread(
+                    manager.start,
+                    session_id=session_id,
+                    noise_profile=profile,
+                    device_index=payload.get("device_index"),
+                )
             )
         else:
-            await asyncio.to_thread(manager.attach, session_id=session_id)
-    except (ValueError, TypeError) as error:
-        await ws.send_json({"type": "audio.error", "message": str(error)[:500]})
-        return
-    except WebSocketDisconnect:
-        return
+            acquisition = asyncio.create_task(
+                asyncio.to_thread(manager.attach, session_id=session_id)
+            )
+        try:
+            await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            try:
+                await acquisition
+            except Exception:
+                pass
+            else:
+                stream_acquired = True
+                await release_stream(session_id)
+            raise
+        stream_acquired = True
     except Exception as error:
-        await ws.send_json({"type": "audio.error", "message": str(error)[:500]})
+        await send_error(error)
         return
-
-    closed = asyncio.Event()
-    stopped = False
 
     async def receive_controls() -> None:
-        nonlocal stopped
-        try:
-            while True:
+        while True:
+            try:
                 message = await ws.receive_json()
+            except (WebSocketDisconnect, RuntimeError):
+                closed.set()
+                return
+            except Exception as error:
+                await send_error(error)
+                closed.set()
+                return
+            try:
                 payload = _payload(message)
                 _session_id(payload)
                 command = str(message.get("type") or "")
                 if command == "audio.stream.stop":
-                    await asyncio.to_thread(manager.stop, session_id=session_id)
-                    stopped = True
+                    await release_stream(session_id)
                     closed.set()
                     return
                 if command != "audio.stream.attach":
-                    await ws.send_json(
+                    await send_json(
                         {"type": "audio.error", "message": "unsupported audio stream command"}
                     )
-        except WebSocketDisconnect:
-            closed.set()
-        except Exception as error:
-            await ws.send_json({"type": "audio.error", "message": str(error)[:500]})
-            closed.set()
+            except Exception as error:
+                await send_error(error)
+                closed.set()
+                return
 
     async def send_events() -> None:
         nonlocal cursor
@@ -91,7 +140,7 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
                 timeout=0.1,
             )
             for event in events:
-                await ws.send_json(event)
+                await send_json(event)
                 cursor = max(cursor, int(event.get("sequence") or 0))
             if closed.is_set() and not events:
                 return
@@ -99,10 +148,18 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
     receiver = asyncio.create_task(receive_controls())
     sender = asyncio.create_task(send_events())
     try:
-        await asyncio.gather(receiver, sender)
+        _, pending = await asyncio.wait(
+            (receiver, sender),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        closed.set()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     finally:
+        closed.set()
         for task in (receiver, sender):
             if not task.done():
                 task.cancel()
-        if stopped:
-            return
+        await asyncio.gather(receiver, sender, return_exceptions=True)
+        await release_stream(session_id)

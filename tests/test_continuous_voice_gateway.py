@@ -1,5 +1,7 @@
-import unittest
+import asyncio
 import queue
+import threading
+import unittest
 
 from voice.streaming_ws import serve_continuous_voice_stream
 from voice.continuous_capture import NativeContinuousCaptureManager
@@ -23,6 +25,33 @@ class FakeSocket:
 
     async def send_json(self, payload):
         self.sent.append(payload)
+
+
+class FailingSendSocket(FakeSocket):
+    def __init__(self, messages):
+        super().__init__(messages)
+        self.send_attempted = asyncio.Event()
+        self.send_attempts = 0
+
+    async def receive_json(self):
+        if self.messages:
+            return self.messages.pop(0)
+        await self.send_attempted.wait()
+        from fastapi import WebSocketDisconnect
+
+        raise WebSocketDisconnect()
+
+    async def send_json(self, payload):
+        self.send_attempts += 1
+        self.send_attempted.set()
+        raise RuntimeError("socket is closed")
+
+
+class ClosingReceiveSocket(FakeSocket):
+    async def receive_json(self):
+        if self.messages:
+            return self.messages.pop(0)
+        raise RuntimeError("socket is closing")
 
 
 class FakeManager:
@@ -53,7 +82,224 @@ class FakeManager:
         return [event for event in self.events if event["sequence"] > after_sequence]
 
 
+class LeaseTrackingManager(FakeManager):
+    def __init__(self):
+        super().__init__()
+        self.active_session = None
+
+    def start(self, *, session_id, noise_profile, device_index=None):
+        if self.active_session is not None:
+            raise RuntimeError("microphone stream belongs to another conversation")
+        self.active_session = session_id
+        return super().start(
+            session_id=session_id,
+            noise_profile=noise_profile,
+            device_index=device_index,
+        )
+
+    def stop(self, *, session_id=None):
+        if self.active_session != session_id:
+            raise RuntimeError("microphone stream belongs to another conversation")
+        self.active_session = None
+        return super().stop(session_id=session_id)
+
+
+class BlockingStartManager(FakeManager):
+    def __init__(self):
+        super().__init__()
+        self.start_acquired = threading.Event()
+        self.allow_start_return = threading.Event()
+        self.start_finished = threading.Event()
+
+    def start(self, *, session_id, noise_profile, device_index=None):
+        result = super().start(
+            session_id=session_id,
+            noise_profile=noise_profile,
+            device_index=device_index,
+        )
+        self.start_acquired.set()
+        self.allow_start_return.wait(timeout=2)
+        self.start_finished.set()
+        return result
+
+
 class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_receive_failure_does_not_send_audio_error(self):
+        socket = ClosingReceiveSocket([])
+        manager = FakeManager()
+
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(socket, manager),
+            timeout=1,
+        )
+
+        self.assertEqual(socket.sent, [])
+        self.assertEqual(manager.started, [])
+
+    async def test_disconnect_releases_stream_lease(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        manager = FakeManager()
+
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(socket, manager),
+            timeout=1,
+        )
+
+        self.assertEqual(manager.stopped, 1)
+
+    async def test_cancellation_during_start_releases_stream_lease(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        manager = BlockingStartManager()
+        gateway_task = asyncio.create_task(
+            serve_continuous_voice_stream(socket, manager)
+        )
+
+        acquired = await asyncio.to_thread(manager.start_acquired.wait, 1)
+        self.assertTrue(acquired)
+        gateway_task.cancel()
+        await asyncio.sleep(0)
+        manager.allow_start_return.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await gateway_task
+        finished = await asyncio.to_thread(manager.start_finished.wait, 1)
+
+        self.assertTrue(finished)
+        self.assertEqual(manager.stopped, 1)
+
+    async def test_send_failure_releases_stream_lease(self):
+        socket = FailingSendSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        manager = FakeManager()
+
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(socket, manager),
+            timeout=1,
+        )
+
+        self.assertEqual(socket.send_attempts, 1)
+        self.assertEqual(manager.stopped, 1)
+
+    async def test_closing_receive_does_not_send_audio_error(self):
+        socket = ClosingReceiveSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        manager = FakeManager()
+        manager.events = []
+
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(socket, manager),
+            timeout=1,
+        )
+
+        self.assertEqual(socket.sent, [])
+        self.assertEqual(manager.stopped, 1)
+
+    async def test_explicit_stop_releases_stream_lease_once(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+        manager = FakeManager()
+
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(socket, manager),
+            timeout=1,
+        )
+
+        self.assertEqual(manager.stopped, 1)
+
+    async def test_second_session_starts_after_first_socket_disconnects(self):
+        manager = LeaseTrackingManager()
+        first_socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        second_socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-2",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(first_socket, manager),
+            timeout=1,
+        )
+        await asyncio.wait_for(
+            serve_continuous_voice_stream(second_socket, manager),
+            timeout=1,
+        )
+
+        self.assertEqual(
+            manager.started,
+            [
+                ("session-1", "standard", None),
+                ("session-2", "standard", None),
+            ],
+        )
+        self.assertEqual(manager.stopped, 2)
+
     async def test_start_streams_ordered_public_events_and_stop_is_explicit(self):
         socket = FakeSocket(
             [
