@@ -40,8 +40,13 @@ import { createDiagnosticsPanel } from "./panels/DiagnosticsPanel";
 import {
   createSettingsSurface,
   type LocalModelCatalogResponse,
+  type ModelAddonDetectionResponse,
   type ModelConnectionSettingsResponse,
   type ModelDiagnosticReport,
+  type ModelInstallPlan,
+  type ModelInstallProgress,
+  type RemoteModelCatalogResponse,
+  type HuggingFaceSearchResponse,
   type PathSettingKey,
   type PathSettingsResponse,
 } from "./settings/SettingsSurface";
@@ -381,10 +386,26 @@ settingsSurface = createSettingsSurface({
     client.post<LocalModelCatalogResponse>("/api/config/models/local", {
       base_url: baseUrl,
     }),
+  onRefreshRemoteModels: (provider, baseUrl, apiKey) =>
+    client.post<RemoteModelCatalogResponse>("/api/config/models/remote", {
+      provider,
+      base_url: baseUrl,
+      api_key: apiKey,
+    }),
+  onDetectModelAddon: (path) =>
+    client.post<ModelAddonDetectionResponse>("/api/config/models/install/detect", { path }),
+  onGetModelInstallProgress: () =>
+    client.get<ModelInstallProgress>("/api/config/models/install/progress"),
   onTestModelConnections: () =>
     client.post<ModelDiagnosticReport>("/api/diagnostics/self-test", {
       scope: "model",
     }),
+  onSearchHuggingFace: (query) =>
+    client.get<HuggingFaceSearchResponse>(`/api/config/models/install/search?q=${encodeURIComponent(query)}`),
+  onPlanModelInstall: (settings) =>
+    client.post<ModelInstallPlan>("/api/config/models/install/plan", settings),
+  onInstallModel: (settings) =>
+    client.post<ModelInstallPlan>("/api/config/models/install", settings),
 });
 
 runtimeStateCoordinator.subscribe((snapshot) => statusRail.update(snapshot));
@@ -405,7 +426,9 @@ sidecar.subscribe((snapshot) => {
 });
 
 async function bootRuntime(): Promise<void> {
-  const snapshot = await sidecar.ensureStarted();
+  const snapshot = isTauriRuntime()
+    ? await sidecar.status()
+    : { state: "healthy" as const };
   const canConnect = !isTauriRuntime() || snapshot.state === "healthy" || snapshot.state === "attached";
   AppLogger.write("info", "startup", `Sidecar state: ${snapshot.state}`);
   if (!canConnect) {
@@ -417,7 +440,7 @@ async function bootRuntime(): Promise<void> {
   await client.checkBackendHealth();
 }
 
-if (!previewOrbState) {
+if (!previewOrbState && !isTauriRuntime()) {
   void bootRuntime();
 }
 window.setInterval(async () => {
@@ -428,8 +451,12 @@ window.setInterval(async () => {
 const toggleVoice = async (): Promise<void> => {
   const rate = limiter.take("voice", VOICE_ACTION_WINDOW_MS);
   if (!rate.allowed) return;
-  await voiceCapture.toggle();
-  liveCaption.setText(voiceCapture.isRecording() ? "我在听" : "正在理解");
+  try {
+    await voiceCapture.toggle();
+    liveCaption.setText(voiceCapture.isRecording() ? "我在听" : "正在理解");
+  } catch {
+    liveCaption.setText("语音服务正在准备，请稍后再试");
+  }
 };
 
 voiceButtons.forEach((button) => button.addEventListener("click", () => void toggleVoice()));
@@ -484,18 +511,21 @@ const firstRunRequired = firstRun.showOnFirstRun();
 void setDesktopMode(getStartupDesktopMode(firstRunRequired));
 
 if (isTauriRuntime()) {
-  void listen("javis://runtime-ready", () => void bootRuntime());
-  void listen<string>("javis://runtime-error", (event) => {
-    runtimeStateCoordinator.signal({
-      source: "sidecar",
-      state: "error",
-      timestamp: Date.now(),
-      detail: event.payload || "Javis 运行时准备失败",
+  void (async () => {
+    await listen("javis://runtime-ready", () => void bootRuntime());
+    await listen<string>("javis://runtime-error", (event) => {
+      runtimeStateCoordinator.signal({
+        source: "sidecar",
+        state: "error",
+        timestamp: Date.now(),
+        detail: event.payload || "Javis 运行时准备失败",
+      });
     });
-  });
-  void listen("javis://open-diagnostics", showDiagnosticsSurface);
-  void listen("javis://pause-listening", () => {
-    void voiceCapture.stop();
-    runtimeStateCoordinator.signal({ source: "voice", state: "idle", timestamp: Date.now(), detail: "已暂停聆听" });
-  });
+    await listen("javis://open-diagnostics", showDiagnosticsSurface);
+    await listen("javis://pause-listening", () => {
+      void voiceCapture.stop();
+      runtimeStateCoordinator.signal({ source: "voice", state: "idle", timestamp: Date.now(), detail: "已暂停聆听" });
+    });
+    await bootRuntime();
+  })();
 }

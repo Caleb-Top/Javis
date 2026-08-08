@@ -22,17 +22,21 @@
   },
   "runtime": {
     "archive": "javis-runtime.zip",
-    "install_root": "%LOCALAPPDATA%/Javis/runtime",
+    "install_root": "%LOCALAPPDATA%/local.javis.desktop/runtime",
     "python": "python/python.exe",
     "offline_build": true
   },
   "data": {
     "preserved": true,
-    "root": "%LOCALAPPDATA%/Javis",
+    "root": "%LOCALAPPDATA%/local.javis.desktop",
     "upgrade_rollback": true
   },
   "models": {
     "ollama_external": true,
+    "bundled_default": null,
+    "optional_addon": "Javis-R1-8B-Addon",
+    "optional_runtime": "portable Ollama",
+    "user_switchable": true,
     "yolo_runtime_discovery": true
   },
   "systems": [
@@ -48,5 +52,5 @@
     "cuda_training_stack": true
   },
   "web_debug_preserved": true,
-  "release_scope": "integrated Windows x64 v3 test installer"
+  "release_scope": "Windows x64 v3 main installer plus optional local-model add-on"
 }

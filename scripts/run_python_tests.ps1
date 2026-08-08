@@ -6,6 +6,7 @@ param(
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 if (-not $PythonPath) {
     $candidates = @(
+        (Join-Path $root "tools\python-runtime-3.11\python.exe"),
         (Join-Path $root "venv\Scripts\python.exe")
     )
     $commonGitDir = (& git -C $root rev-parse --git-common-dir 2>$null)
@@ -18,6 +19,16 @@ if (-not $PythonPath) {
 if (-not $PythonPath) {
     throw "No Javis Python runtime was found. Pass -PythonPath explicitly."
 }
+
+$sitePackages = Join-Path $root "venv\Lib\site-packages"
+$pythonPaths = @(
+    $sitePackages,
+    (Join-Path $sitePackages "win32"),
+    (Join-Path $sitePackages "win32\lib"),
+    (Join-Path $sitePackages "Pythonwin")
+)
+$env:PYTHONPATH = $pythonPaths -join ";"
+$env:PATH = "$(Join-Path $sitePackages 'pywin32_system32');$env:PATH"
 
 $suites = @(
     "tests",

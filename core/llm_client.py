@@ -1,7 +1,7 @@
 """LLM 客户端"""
 import os, json, logging, asyncio
 from dataclasses import dataclass, field
-from utils.config_api import load_config as lcfg
+from utils.config_api import resolve_model_route, load_config as lcfg
 logger = logging.getLogger("llm")
 DEFAULT_SYSTEM = "你是 Javis，桌面智能助手。中文回复。"
 
@@ -15,7 +15,8 @@ class LLMResponse:
 class LLMClient:
     def __init__(self, config_path: str = "config.yaml"):
         self._config_path = config_path
-        self._init_client()
+        self.route_name = "live"
+        self._init_client(self.route_name)
 
     @staticmethod
     def _has_usable_key(api_key: str) -> bool:
@@ -24,29 +25,33 @@ class LLMClient:
         lowered = api_key.strip().lower()
         return lowered not in {"your_api_key_here", "sk-xxx", "none", "null"}
 
-    def _init_client(self):
+    def _init_client(self, route_name: str = "live"):
         """读取配置并初始化 API 客户端（__init__ 和 reload 共用）"""
         self.config = lcfg()
         cfg = self.config.get("model", {})
-        self.provider = cfg.get("provider", "local")
+        self.route_name = "code" if str(route_name).strip().lower() == "code" else "live"
+        route = resolve_model_route(self.config, self.route_name)
+        remote_route = route.get("remote", {})
+        local_route = route.get("local", {})
+        self.provider = "local" if route.get("source") == "local" else remote_route.get("provider", "deepseek")
         self.temperature = cfg.get("temperature", 0.7)
         self.top_p = cfg.get("top_p", 0.9)
         self.max_tokens = cfg.get("max_tokens", 4096)
 
         if self.provider == "local":
             lc = cfg.get("local", {})
-            self.model = lc.get("name") or cfg.get("name", "deepseek-r1:8b")
-            self.base_url = lc.get("base_url", "http://localhost:11434/v1")
+            self.model = local_route.get("model") or lc.get("name") or cfg.get("name", "deepseek-r1:8b")
+            self.base_url = local_route.get("base_url") or lc.get("base_url", "http://localhost:11434/v1")
             api_key = lc.get("api_key", "ollama")
         elif self.provider == "anthropic":
             ac = cfg.get("anthropic", {})
-            self.model = ac.get("name", cfg.get("name"))
+            self.model = remote_route.get("model") or ac.get("name", cfg.get("name"))
             api_key = os.getenv("ANTHROPIC_API_KEY") or ac.get("api_key", "")
             self.base_url = ""
         else:
             pc = cfg.get(self.provider, {})
-            self.model = pc.get("name", cfg.get("name", ""))
-            self.base_url = pc.get("base_url", "")
+            self.model = remote_route.get("model") or pc.get("name", cfg.get("name", ""))
+            self.base_url = remote_route.get("base_url") or pc.get("base_url", "")
             # 优先级: 环境变量 > config.yaml (环境变量更安全)
             api_key = os.getenv(f"{self.provider.upper()}_API_KEY") or pc.get("api_key", "")
 
@@ -81,9 +86,15 @@ class LLMClient:
     @property
     def is_ready(self): return self._api_ready
 
-    def reload(self):
-        self._init_client()
-        logger.info(f"配置已重载: {self.provider}/{self.model}")
+    def reload(self, route_name: str | None = None):
+        self._init_client(route_name or self.route_name)
+        logger.info(f"配置已重载: {self.route_name} -> {self.provider}/{self.model}")
+
+    def use_route(self, route_name: str):
+        """Apply the effective Live or Code route before a serialized request."""
+        normalized = "code" if str(route_name).strip().lower() == "code" else "live"
+        self._init_client(normalized)
+        logger.info("推理路由: %s -> %s/%s", normalized, self.provider, self.model)
 
     async def chat_with_tools(self, messages, tools, system=DEFAULT_SYSTEM):
         if not self.is_ready:

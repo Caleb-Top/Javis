@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_log;
+mod bundled_ollama;
 mod pet_actions;
+mod process_command;
 mod runtime_bundle;
 mod screen_capture;
 mod sidecar;

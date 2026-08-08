@@ -60,6 +60,14 @@ class InferenceEngine:
     def is_using_fallback(self) -> bool:
         return self._fallback_active
 
+    def use_route(self, route_name: str) -> None:
+        """Reset transient fallback state and select the requested surface route."""
+        self.llm.use_route(route_name)
+        self._fallback_active = False
+        self._consecutive_failures = 0
+        self._saved_provider = self.llm.provider
+        self._saved_model = self.llm.model
+
     async def chat_with_fallback(self, messages, tools, system) -> tuple:
         """带自动降级的 LLM 调用"""
         route = ModelRoute()

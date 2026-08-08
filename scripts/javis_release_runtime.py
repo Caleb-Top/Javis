@@ -18,8 +18,9 @@ ARCHIVE_NAME = "javis-runtime.zip"
 SYSTEMS = ("core", "memory", "perception", "control", "evolution")
 EXTERNAL_COMPONENTS = (
     "deepseek_api",
-    "ollama_models",
     "cuda_training_stack",
+    "ollama_models",
+    "ollama_portable_runtime",
 )
 BACKEND_INCLUDE = (
     "main.py",
@@ -103,6 +104,8 @@ APP_TOOLCHAIN_EXCLUDES = {
     "app/tools/imagemagick",
     "app/tools/gh",
     "app/tools/cvu_data",
+    "app/tools/ollama-runtime",
+    "app/tools/python-runtime-3.11",
 }
 
 

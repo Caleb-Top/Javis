@@ -15,6 +15,27 @@ camera:
   - 1280
   - 720
 model:
+  # 同一个设置中心管理两条路由。true 时 Code 自动跟随 Live。
+  share_live_code: true
+  routes:
+    live:
+      source: local
+      local:
+        model: deepseek-r1:8b
+        base_url: http://127.0.0.1:11435/v1
+      remote:
+        provider: deepseek
+        model: deepseek-v4-pro
+        base_url: https://api.deepseek.com/v1
+    code:
+      source: remote
+      local:
+        model: deepseek-r1:8b
+        base_url: http://127.0.0.1:11435/v1
+      remote:
+        provider: deepseek
+        model: deepseek-v4-pro
+        base_url: https://api.deepseek.com/v1
   anthropic:
     api_key: ''
     name: claude-haiku-3-5
@@ -32,15 +53,15 @@ model:
     name: moonshot-v1-8k
   local:
     api_key: ollama
-    base_url: http://localhost:11434/v1
+    base_url: http://127.0.0.1:11435/v1
     name: deepseek-r1:8b
   max_tokens: 32768
-  name: deepseek-v4-pro
+  name: deepseek-r1:8b
   openai:
     api_key: ''
     base_url: ''
     name: gpt-4o-mini
-  provider: deepseek
+  provider: local
   qwen:
     api_key: ''
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1

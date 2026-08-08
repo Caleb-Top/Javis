@@ -1,4 +1,5 @@
 import { AppLogger } from "./AppLogger";
+import { toUserFacingError } from "./userFacingError.ts";
 
 export function installAppErrorBoundary(): void {
   const boundary = document.createElement("section");
@@ -14,18 +15,19 @@ export function installAppErrorBoundary(): void {
     </div>`;
   document.body.append(boundary);
 
-  function reveal(message: string): void {
-    boundary.querySelector<HTMLElement>(".app-error-message")!.textContent = message.slice(0, 600);
+  function reveal(reason: unknown): void {
+    const raw = reason instanceof Error ? reason.stack || reason.message : String(reason || "Unknown interface error");
+    boundary.querySelector<HTMLElement>(".app-error-message")!.textContent = toUserFacingError(reason);
     boundary.hidden = false;
-    AppLogger.write("error", "frontend", message);
+    AppLogger.write("error", "frontend", raw);
   }
 
   window.addEventListener("error", (event) => {
-    reveal(event.error instanceof Error ? event.error.stack || event.error.message : event.message || "Unknown interface error");
+    reveal(event.error instanceof Error ? event.error : event.message || "Unknown interface error");
   });
   window.addEventListener("unhandledrejection", (event) => {
     const reason = event.reason;
-    reveal(reason instanceof Error ? reason.stack || reason.message : String(reason || "Unhandled promise rejection"));
+    reveal(reason instanceof Error ? reason : String(reason || "Unhandled promise rejection"));
   });
   boundary.querySelector<HTMLButtonElement>(".app-error-recover")!.addEventListener("click", () => {
     document.body.dataset.surface = "live";

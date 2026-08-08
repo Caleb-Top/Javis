@@ -131,6 +131,7 @@ export function createVoiceCapture(
     socket.onerror = () => {
       const error = new Error("native audio stream connection failed");
       options.onState("error");
+      options.onError("语音服务尚未就绪，正在等待本地运行时。");
       settleStart(error);
     };
     socket.onclose = () => {
