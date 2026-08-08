@@ -82,6 +82,47 @@ test("continuous native voice stays open across turns and barges in before final
   assert.equal(capture.isContinuous(), false);
 });
 
+test("empty transcripts return continuous capture to listening without submitting text", async () => {
+  const socket = new FakeVoiceSocket();
+  const states: string[] = [];
+  const emptyMessages: string[] = [];
+  const transcripts: string[] = [];
+  const client = {
+    sessionId: () => "session-empty",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
+    onBargeIn: () => undefined,
+    onEmptyTranscript: (message) => { emptyMessages.push(message); },
+    onTranscript: (text) => { transcripts.push(text); },
+    onAudio: () => undefined,
+    onState: (state) => { states.push(state); },
+    onError: (message) => { throw new Error(message); },
+  });
+
+  const started = capture.startContinuous();
+  socket.open();
+  socket.emit({ type: "audio.stream.ready" });
+  await started;
+  const statesBeforeEmpty = states.length;
+
+  socket.emit({
+    type: "transcript.empty",
+    turn: 1,
+    audio_ms: 260,
+    input_rms: 0.12,
+    input_peak: 0.42,
+  });
+
+  assert.equal(states.length, statesBeforeEmpty + 1);
+  assert.equal(states.at(-1), "listening");
+  assert.deepEqual(emptyMessages, ["没有识别到语音，请再说一次"]);
+  assert.deepEqual(transcripts, []);
+  assert.equal(capture.isContinuous(), true);
+  assert.equal(socket.readyState, FakeVoiceSocket.OPEN);
+});
+
 test("native stream connection errors are reported without escaping the Live action", async () => {
   const socket = new FakeVoiceSocket();
   const errors: string[] = [];

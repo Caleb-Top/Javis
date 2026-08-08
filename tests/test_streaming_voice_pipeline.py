@@ -282,6 +282,49 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         self.assertNotIn("audio_base64", repr(events).lower())
         self.assertFalse(service.status()["raw_audio_persisted"])
 
+    def test_empty_final_transcript_emits_one_privacy_safe_terminal_event(self):
+        service = ContinuousVoiceService(
+            transcribe=lambda pcm, rate, final: "",
+            pipeline_config=VoicePipelineConfig(
+                sample_rate=RATE,
+                frame_ms=FRAME_MS,
+                pre_roll_ms=40,
+                onset_frames=1,
+                endpoint_silence_ms=60,
+                partial_interval_ms=40,
+            ),
+        )
+        service.configure()
+        for index in range(8):
+            service.ingest_pcm(pcm_frame(tone=6500, noise=300, phase=index), RATE)
+        for index in range(5):
+            service.ingest_pcm(pcm_frame(noise=10, phase=20 + index), RATE)
+
+        deadline = time.monotonic() + 1.0
+        events = []
+        while time.monotonic() < deadline:
+            events = service.events_after(0)
+            if any(event["type"] == "transcript.empty" for event in events):
+                break
+            time.sleep(0.01)
+
+        empty_events = [event for event in events if event["type"] == "transcript.empty"]
+        self.assertEqual(len(empty_events), 1)
+        empty = empty_events[0]
+        self.assertEqual(empty["turn"], 1)
+        self.assertGreater(empty["audio_ms"], 0)
+        for field in ("input_rms", "input_peak"):
+            self.assertIsInstance(empty[field], (int, float))
+            self.assertNotIsInstance(empty[field], bool)
+            self.assertGreaterEqual(empty[field], 0.0)
+            self.assertLessEqual(empty[field], 1.0)
+        self.assertGreater(empty["input_rms"], 0.0)
+        self.assertGreater(empty["input_peak"], 0.0)
+        self.assertLessEqual(empty["input_rms"], empty["input_peak"])
+        self.assertFalse({"pcm", "audio", "audio_base64", "raw"} & empty.keys())
+        self.assertFalse(any("base64" in str(key).lower() for key in empty))
+        self.assertNotIn("transcript.final", [event["type"] for event in events])
+
     def test_playback_pcm_is_forwarded_as_echo_reference(self):
         service = ContinuousVoiceService(
             transcribe=lambda pcm, rate, final: "",

@@ -63,6 +63,16 @@ def _rms(samples: list[int] | list[float]) -> float:
     return math.sqrt(sum(float(value) * float(value) for value in samples) / len(samples))
 
 
+def _normalized_pcm_levels(pcm: bytes) -> tuple[float, float]:
+    samples = _decode_pcm(pcm)
+    if not samples:
+        return 0.0, 0.0
+    full_scale = 32768.0
+    input_rms = min(1.0, _rms(samples) / full_scale)
+    input_peak = min(1.0, max(abs(value) for value in samples) / full_scale)
+    return round(input_rms, 6), round(input_peak, 6)
+
+
 def _zero_crossing_rate(samples: list[int]) -> float:
     if len(samples) < 2:
         return 0.0
@@ -295,9 +305,15 @@ class StreamingVoicePipeline:
 
         self._turn += 1
         audio_ms = len(self._utterance) * self.config.frame_ms
+        input_rms, input_peak = _normalized_pcm_levels(b"".join(self._utterance))
         final_text = self._submit_transcription(
             final=True,
-            metadata={"turn": self._turn, "audio_ms": audio_ms},
+            metadata={
+                "turn": self._turn,
+                "audio_ms": audio_ms,
+                "input_rms": input_rms,
+                "input_peak": input_peak,
+            },
         )
         if final_text:
             events.append(

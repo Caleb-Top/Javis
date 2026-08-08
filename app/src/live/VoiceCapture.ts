@@ -8,6 +8,7 @@ export type VoiceCaptureOptions = {
   onBargeIn(): void | Promise<void>;
   onPartial?(text: string): void;
   onTranscript?(text: string): void;
+  onEmptyTranscript?(message: string): void;
   onLevel?(level: number): void;
   openStream?(url: string): WebSocket;
   noiseProfile?(): VoiceNoiseProfile;
@@ -89,6 +90,11 @@ export function createVoiceCapture(
       if (!text) return;
       options.onState("thinking");
       options.onTranscript?.(text);
+      return;
+    }
+    if (type === "transcript.empty") {
+      options.onState("listening");
+      options.onEmptyTranscript?.("没有识别到语音，请再说一次");
       return;
     }
     if (type === "audio.error") {

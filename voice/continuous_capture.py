@@ -133,6 +133,8 @@ class ContinuousVoiceService:
             "final": bool(final),
             "turn": int(metadata.get("turn") or 0),
             "audio_ms": int(metadata.get("audio_ms") or 0),
+            "input_rms": max(0.0, min(1.0, float(metadata.get("input_rms") or 0.0))),
+            "input_peak": max(0.0, min(1.0, float(metadata.get("input_peak") or 0.0))),
         }
         with self._transcription_condition:
             if final:
@@ -176,24 +178,35 @@ class ContinuousVoiceService:
                     continue
                 turn = task["turn"]
                 if task["final"]:
-                    self._finalized_turn = max(self._finalized_turn, turn)
+                    if turn <= self._finalized_turn:
+                        continue
+                    self._finalized_turn = turn
                     self._last_partial.pop(turn, None)
                 elif turn <= self._finalized_turn or self._last_partial.get(turn) == text:
                     continue
                 else:
                     self._last_partial[turn] = text
-            if not text:
-                continue
             if task["final"]:
-                self._publish(
-                    {
-                        "type": "transcript.final",
-                        "text": text,
-                        "turn": task["turn"],
-                        "audio_ms": task["audio_ms"],
-                    }
-                )
-            else:
+                if text:
+                    self._publish(
+                        {
+                            "type": "transcript.final",
+                            "text": text,
+                            "turn": task["turn"],
+                            "audio_ms": task["audio_ms"],
+                        }
+                    )
+                else:
+                    self._publish(
+                        {
+                            "type": "transcript.empty",
+                            "turn": task["turn"],
+                            "audio_ms": task["audio_ms"],
+                            "input_rms": task["input_rms"],
+                            "input_peak": task["input_peak"],
+                        }
+                    )
+            elif text:
                 self._publish(
                     {
                         "type": "transcript.partial",
