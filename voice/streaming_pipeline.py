@@ -324,6 +324,16 @@ class StreamingVoicePipeline:
                     "audio_ms": audio_ms,
                 }
             )
+        elif self.transcription_sink is None:
+            events.append(
+                {
+                    "type": "transcript.empty",
+                    "turn": self._turn,
+                    "audio_ms": audio_ms,
+                    "input_rms": input_rms,
+                    "input_peak": input_peak,
+                }
+            )
         self._utterance.clear()
         self._onset_count = 0
         self._silence_count = 0

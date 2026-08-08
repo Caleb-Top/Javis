@@ -94,6 +94,7 @@ class ContinuousVoiceService:
         self._transcription_drops = 0
         self._transcription_generation = 0
         self._finalized_turn = 0
+        self._terminal_turns: set[int] = set()
         self._last_partial: dict[int, str] = {}
         self._transcription_thread = threading.Thread(
             target=self._transcription_worker,
@@ -105,12 +106,13 @@ class ContinuousVoiceService:
     def configure(self, *, noise_profile: str = "standard") -> dict:
         settings = dict(vars(self._base_config))
         settings["noise_profile"] = noise_profile
-        with self._transcription_condition:
-            self._transcription_generation += 1
-            self._transcription_queue.clear()
-            self._finalized_turn = 0
-            self._last_partial.clear()
         with self._pipeline_lock:
+            with self._transcription_condition:
+                self._transcription_generation += 1
+                self._transcription_queue.clear()
+                self._finalized_turn = 0
+                self._terminal_turns.clear()
+                self._last_partial.clear()
             self._pipeline = StreamingVoicePipeline(
                 config=VoicePipelineConfig(**settings),
                 transcription_sink=self._enqueue_transcription,
@@ -126,17 +128,25 @@ class ContinuousVoiceService:
         final: bool,
         metadata: dict,
     ) -> None:
-        task = {
-            "generation": self._transcription_generation,
-            "pcm": bytes(pcm),
-            "sample_rate": int(sample_rate),
-            "final": bool(final),
-            "turn": int(metadata.get("turn") or 0),
-            "audio_ms": int(metadata.get("audio_ms") or 0),
-            "input_rms": max(0.0, min(1.0, float(metadata.get("input_rms") or 0.0))),
-            "input_peak": max(0.0, min(1.0, float(metadata.get("input_peak") or 0.0))),
-        }
         with self._transcription_condition:
+            task = {
+                "generation": self._transcription_generation,
+                "pcm": bytes(pcm),
+                "sample_rate": int(sample_rate),
+                "final": bool(final),
+                "turn": int(metadata.get("turn") or 0),
+                "audio_ms": int(metadata.get("audio_ms") or 0),
+                "input_rms": max(
+                    0.0,
+                    min(1.0, float(metadata.get("input_rms") or 0.0)),
+                ),
+                "input_peak": max(
+                    0.0,
+                    min(1.0, float(metadata.get("input_peak") or 0.0)),
+                ),
+            }
+            if task["final"] and task["turn"] in self._terminal_turns:
+                return
             if final:
                 self._transcription_queue = deque(
                     queued
@@ -150,8 +160,34 @@ class ContinuousVoiceService:
                     if queued["final"] or queued["turn"] != task["turn"]
                 )
             while len(self._transcription_queue) >= self._transcription_limit:
-                self._transcription_queue.popleft()
+                dropped = next(
+                    (
+                        queued
+                        for queued in self._transcription_queue
+                        if not queued["final"]
+                    ),
+                    None,
+                )
+                if dropped is None:
+                    dropped = self._transcription_queue.popleft()
+                else:
+                    self._transcription_queue.remove(dropped)
                 self._transcription_drops += 1
+                dropped.pop("pcm", None)
+                if dropped["final"] and dropped["turn"] not in self._terminal_turns:
+                    turn = dropped["turn"]
+                    self._terminal_turns.add(turn)
+                    self._finalized_turn = max(self._finalized_turn, turn)
+                    self._last_partial.pop(turn, None)
+                    self._publish(
+                        {
+                            "type": "transcript.empty",
+                            "turn": turn,
+                            "audio_ms": dropped["audio_ms"],
+                            "input_rms": dropped["input_rms"],
+                            "input_peak": dropped["input_peak"],
+                        }
+                    )
             self._transcription_queue.append(task)
             self._transcription_condition.notify()
 
@@ -178,42 +214,42 @@ class ContinuousVoiceService:
                     continue
                 turn = task["turn"]
                 if task["final"]:
-                    if turn <= self._finalized_turn:
+                    if turn in self._terminal_turns:
                         continue
-                    self._finalized_turn = turn
+                    self._terminal_turns.add(turn)
+                    self._finalized_turn = max(self._finalized_turn, turn)
                     self._last_partial.pop(turn, None)
+                    if text:
+                        self._publish(
+                            {
+                                "type": "transcript.final",
+                                "text": text,
+                                "turn": task["turn"],
+                                "audio_ms": task["audio_ms"],
+                            }
+                        )
+                    else:
+                        self._publish(
+                            {
+                                "type": "transcript.empty",
+                                "turn": task["turn"],
+                                "audio_ms": task["audio_ms"],
+                                "input_rms": task["input_rms"],
+                                "input_peak": task["input_peak"],
+                            }
+                        )
                 elif turn <= self._finalized_turn or self._last_partial.get(turn) == text:
                     continue
                 else:
                     self._last_partial[turn] = text
-            if task["final"]:
-                if text:
-                    self._publish(
-                        {
-                            "type": "transcript.final",
-                            "text": text,
-                            "turn": task["turn"],
-                            "audio_ms": task["audio_ms"],
-                        }
-                    )
-                else:
-                    self._publish(
-                        {
-                            "type": "transcript.empty",
-                            "turn": task["turn"],
-                            "audio_ms": task["audio_ms"],
-                            "input_rms": task["input_rms"],
-                            "input_peak": task["input_peak"],
-                        }
-                    )
-            elif text:
-                self._publish(
-                    {
-                        "type": "transcript.partial",
-                        "text": text,
-                        "turn": task["turn"],
-                    }
-                )
+                    if text:
+                        self._publish(
+                            {
+                                "type": "transcript.partial",
+                                "text": text,
+                                "turn": task["turn"],
+                            }
+                        )
 
     def _publish(self, event: dict) -> dict:
         public = {

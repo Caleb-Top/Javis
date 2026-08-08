@@ -1,6 +1,7 @@
 import math
 import random
 import struct
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -107,6 +108,59 @@ class StreamingVoicePipelineTests(unittest.TestCase):
         self.assertEqual(first_final["turn"], 1)
         self.assertEqual(second_final["turn"], 2)
         self.assertTrue(pipeline.listening)
+
+    def test_direct_empty_final_transcript_emits_one_terminal_event(self):
+        pipeline = self.make_pipeline(
+            onset_frames=1,
+            endpoint_silence_ms=60,
+            partial_interval_ms=40,
+        )
+        pipeline.transcribe = lambda pcm, rate, final: ""
+        events = []
+        for index in range(8):
+            events += pipeline.push_frame(
+                pcm_frame(tone=6500, noise=300, phase=index)
+            )
+        for index in range(5):
+            events += pipeline.push_frame(pcm_frame(noise=10, phase=20 + index))
+
+        empty_events = [event for event in events if event["type"] == "transcript.empty"]
+
+        self.assertEqual(len(empty_events), 1)
+        self.assertEqual(
+            set(empty_events[0]),
+            {"type", "turn", "audio_ms", "input_rms", "input_peak"},
+        )
+        self.assertEqual(empty_events[0]["turn"], 1)
+        self.assertGreater(empty_events[0]["audio_ms"], 0)
+        self.assertGreater(empty_events[0]["input_rms"], 0.0)
+        self.assertGreater(empty_events[0]["input_peak"], 0.0)
+        self.assertNotIn("transcript.final", [event["type"] for event in events])
+
+    def test_direct_pipeline_without_transcriber_still_emits_empty_terminal(self):
+        pipeline = self.make_pipeline(
+            onset_frames=1,
+            endpoint_silence_ms=60,
+            partial_interval_ms=40,
+        )
+        pipeline.transcribe = None
+        events = []
+        for index in range(8):
+            events += pipeline.push_frame(
+                pcm_frame(tone=6500, noise=300, phase=index)
+            )
+        for index in range(5):
+            events += pipeline.push_frame(pcm_frame(noise=10, phase=20 + index))
+
+        terminals = [
+            event
+            for event in events
+            if event["type"] in {"transcript.final", "transcript.empty"}
+        ]
+
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0]["type"], "transcript.empty")
+        self.assertEqual(terminals[0]["turn"], 1)
 
     def test_stationary_noise_and_keyboard_impulses_do_not_finalize_speech(self):
         pipeline = self.make_pipeline()
@@ -304,13 +358,30 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         events = []
         while time.monotonic() < deadline:
             events = service.events_after(0)
-            if any(event["type"] == "transcript.empty" for event in events):
+            if (
+                any(event["type"] == "transcript.empty" for event in events)
+                and service.status()["transcription_queue"] == 0
+            ):
                 break
             time.sleep(0.01)
+        time.sleep(0.05)
+        events = service.events_after(0)
 
         empty_events = [event for event in events if event["type"] == "transcript.empty"]
         self.assertEqual(len(empty_events), 1)
         empty = empty_events[0]
+        self.assertEqual(
+            set(empty),
+            {
+                "type",
+                "turn",
+                "audio_ms",
+                "input_rms",
+                "input_peak",
+                "sequence",
+                "timestamp",
+            },
+        )
         self.assertEqual(empty["turn"], 1)
         self.assertGreater(empty["audio_ms"], 0)
         for field in ("input_rms", "input_peak"):
@@ -321,9 +392,324 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         self.assertGreater(empty["input_rms"], 0.0)
         self.assertGreater(empty["input_peak"], 0.0)
         self.assertLessEqual(empty["input_rms"], empty["input_peak"])
-        self.assertFalse({"pcm", "audio", "audio_base64", "raw"} & empty.keys())
-        self.assertFalse(any("base64" in str(key).lower() for key in empty))
-        self.assertNotIn("transcript.final", [event["type"] for event in events])
+
+        def assert_no_audio_material(value):
+            self.assertNotIsInstance(value, (bytes, bytearray, memoryview))
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    normalized = str(key).lower()
+                    self.assertNotIn(
+                        normalized,
+                        {
+                            "pcm",
+                            "audio",
+                            "audio_base64",
+                            "raw",
+                            "samples",
+                            "waveform",
+                            "payload",
+                        },
+                    )
+                    self.assertNotIn("base64", normalized)
+                    assert_no_audio_material(nested)
+            elif isinstance(value, (list, tuple, set)):
+                for nested in value:
+                    assert_no_audio_material(nested)
+
+        assert_no_audio_material(empty)
+        turn_terminals = [
+            event
+            for event in events
+            if event["type"] in {"transcript.final", "transcript.empty"}
+            and event.get("turn") == 1
+        ]
+        self.assertEqual(len(turn_terminals), 1)
+        self.assertEqual(turn_terminals[0]["type"], "transcript.empty")
+
+    def test_duplicate_final_tasks_publish_one_terminal_event(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+        final_pcm = pcm_frame(tone=6500, noise=300)
+        metadata = {
+            "turn": 1,
+            "audio_ms": FRAME_MS,
+            "input_rms": 0.1,
+            "input_peak": 0.2,
+        }
+
+        with service._transcription_condition:
+            service._enqueue_transcription(final_pcm, RATE, True, metadata)
+            service._enqueue_transcription(final_pcm, RATE, True, metadata)
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            events = service.events_after(0)
+            terminals = [
+                event
+                for event in events
+                if event["type"] in {"transcript.final", "transcript.empty"}
+                and event.get("turn") == 1
+            ]
+            if terminals and service.status()["transcription_queue"] == 0:
+                break
+            time.sleep(0.01)
+        time.sleep(0.05)
+        terminals = [
+            event
+            for event in service.events_after(0)
+            if event["type"] in {"transcript.final", "transcript.empty"}
+            and event.get("turn") == 1
+        ]
+
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0]["type"], "transcript.empty")
+
+    def test_full_transcription_queue_preserves_one_terminal_per_final_turn(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+        final_pcm = pcm_frame(tone=6500, noise=300)
+
+        with service._transcription_condition:
+            for turn in range(1, 5):
+                service._enqueue_transcription(
+                    final_pcm,
+                    RATE,
+                    True,
+                    {
+                        "turn": turn,
+                        "audio_ms": FRAME_MS,
+                        "input_rms": 0.1,
+                        "input_peak": 0.2,
+                    },
+                )
+                self.assertLessEqual(
+                    len(service._transcription_queue),
+                    service._transcription_limit,
+                )
+
+        deadline = time.monotonic() + 1.0
+        terminals = []
+        while time.monotonic() < deadline:
+            events = service.events_after(0)
+            terminals = [
+                event
+                for event in events
+                if event["type"] in {"transcript.final", "transcript.empty"}
+                and event.get("turn") in {1, 2, 3, 4}
+            ]
+            if len(terminals) >= 4:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(sorted(event["turn"] for event in terminals), [1, 2, 3, 4])
+        for turn in range(1, 5):
+            self.assertEqual(sum(event["turn"] == turn for event in terminals), 1)
+        self.assertLessEqual(
+            service.status()["transcription_queue"],
+            service.status()["transcription_queue_limit"],
+        )
+        self.assertEqual(service.status()["transcription_drops"], 1)
+
+    def test_full_queue_evicts_partial_before_any_final_turn(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+        pcm = pcm_frame(tone=6500, noise=300)
+
+        with service._transcription_condition:
+            for turn, final in ((1, True), (2, False), (3, True), (4, True)):
+                service._enqueue_transcription(
+                    pcm,
+                    RATE,
+                    final,
+                    {
+                        "turn": turn,
+                        "audio_ms": FRAME_MS,
+                        "input_rms": 0.1,
+                        "input_peak": 0.2,
+                    },
+                )
+            queued = [
+                (task["turn"], task["final"])
+                for task in service._transcription_queue
+            ]
+            events_before_worker = service.events_after(0)
+
+        self.assertEqual(queued, [(1, True), (3, True), (4, True)])
+        self.assertEqual(events_before_worker, [])
+        self.assertEqual(service.status()["transcription_drops"], 1)
+
+    def test_later_overflow_terminal_does_not_suppress_earlier_inflight_final(self):
+        first_final_started = threading.Event()
+        allow_first_final = threading.Event()
+
+        def transcribe(pcm, rate, final):
+            if final and not first_final_started.is_set():
+                first_final_started.set()
+                allow_first_final.wait(1.0)
+            return ""
+
+        service = ContinuousVoiceService(transcribe=transcribe)
+        service.configure()
+        pcm = pcm_frame(tone=6500, noise=300)
+
+        service._enqueue_transcription(
+            pcm,
+            RATE,
+            True,
+            {
+                "turn": 1,
+                "audio_ms": FRAME_MS,
+                "input_rms": 0.1,
+                "input_peak": 0.2,
+            },
+        )
+        try:
+            self.assertTrue(first_final_started.wait(1.0))
+            with service._transcription_condition:
+                for turn in range(2, 6):
+                    service._enqueue_transcription(
+                        pcm,
+                        RATE,
+                        True,
+                        {
+                            "turn": turn,
+                            "audio_ms": FRAME_MS,
+                            "input_rms": 0.1,
+                            "input_peak": 0.2,
+                        },
+                    )
+                    self.assertLessEqual(
+                        len(service._transcription_queue),
+                        service._transcription_limit,
+                    )
+        finally:
+            allow_first_final.set()
+
+        deadline = time.monotonic() + 1.0
+        terminals = []
+        while time.monotonic() < deadline:
+            terminals = [
+                event
+                for event in service.events_after(0)
+                if event["type"] in {"transcript.final", "transcript.empty"}
+                and event.get("turn") in {1, 2, 3, 4, 5}
+            ]
+            if len(terminals) >= 5:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(
+            sorted(event["turn"] for event in terminals),
+            [1, 2, 3, 4, 5],
+        )
+        for turn in range(1, 6):
+            self.assertEqual(sum(event["turn"] == turn for event in terminals), 1)
+
+    def test_reconfigure_cannot_cross_inflight_terminal_publication(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+        publish_entered = threading.Event()
+        allow_publish = threading.Event()
+        configure_started = threading.Event()
+        pipeline_construction_started = threading.Event()
+        configure_done = threading.Event()
+        configure_errors = []
+        original_publish = service._publish
+
+        def blocking_publish(event):
+            if event["type"] in {"transcript.final", "transcript.empty"}:
+                publish_entered.set()
+                allow_publish.wait(1.0)
+            return original_publish(event)
+
+        def build_pipeline(*args, **kwargs):
+            pipeline_construction_started.set()
+            return StreamingVoicePipeline(*args, **kwargs)
+
+        def reconfigure():
+            configure_started.set()
+            try:
+                service.configure()
+            except Exception as error:
+                configure_errors.append(error)
+            finally:
+                configure_done.set()
+
+        service._publish = blocking_publish
+        service._enqueue_transcription(
+            pcm_frame(tone=6500, noise=300),
+            RATE,
+            True,
+            {
+                "turn": 1,
+                "audio_ms": FRAME_MS,
+                "input_rms": 0.1,
+                "input_peak": 0.2,
+            },
+        )
+        self.assertTrue(publish_entered.wait(1.0))
+
+        with patch(
+            "voice.continuous_capture.StreamingVoicePipeline",
+            side_effect=build_pipeline,
+        ):
+            configure_thread = threading.Thread(target=reconfigure, daemon=True)
+            configure_thread.start()
+            self.assertTrue(configure_started.wait(1.0))
+            crossed_before_publish = pipeline_construction_started.wait(0.25)
+            allow_publish.set()
+            configure_thread.join(1.0)
+
+        service._publish = original_publish
+        self.assertFalse(crossed_before_publish)
+        self.assertFalse(configure_thread.is_alive())
+        self.assertTrue(configure_done.is_set())
+        self.assertEqual(configure_errors, [])
+        terminals = [
+            event
+            for event in service.events_after(0)
+            if event["type"] in {"transcript.final", "transcript.empty"}
+            and event.get("turn") == 1
+        ]
+        self.assertEqual(len(terminals), 1)
+
+    def test_reconfigure_waits_for_inflight_pipeline_before_advancing_generation(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+        generation_before = service._transcription_generation
+        configure_started = threading.Event()
+        configure_done = threading.Event()
+        configure_errors = []
+
+        def reconfigure():
+            configure_started.set()
+            try:
+                service.configure()
+            except Exception as error:
+                configure_errors.append(error)
+            finally:
+                configure_done.set()
+
+        with service._pipeline_lock:
+            configure_thread = threading.Thread(target=reconfigure, daemon=True)
+            configure_thread.start()
+            self.assertTrue(configure_started.wait(1.0))
+            deadline = time.monotonic() + 0.25
+            while (
+                service._transcription_generation == generation_before
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.005)
+            generation_advanced_while_pipeline_busy = (
+                service._transcription_generation != generation_before
+            )
+
+        configure_thread.join(1.0)
+        self.assertFalse(generation_advanced_while_pipeline_busy)
+        self.assertFalse(configure_thread.is_alive())
+        self.assertTrue(configure_done.is_set())
+        self.assertEqual(configure_errors, [])
+        self.assertEqual(service._transcription_generation, generation_before + 1)
 
     def test_playback_pcm_is_forwarded_as_echo_reference(self):
         service = ContinuousVoiceService(
