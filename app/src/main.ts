@@ -143,7 +143,14 @@ const client = createBackendClient({
     mergeConnectionDetails();
   },
   onEvent: (event) => {
-    if (isConversationEvent(event)) {
+    if (event.type === "request.failed" && event.local === true) {
+      if (event.request_id) voiceRequestIds.delete(event.request_id);
+      liveCaption.setText(
+        String(event.payload?.error || "Request failed"),
+        event.request_id,
+      );
+      queueMicrotask(() => voiceCapture.resumeListeningState());
+    } else if (isConversationEvent(event)) {
       const previous = conversationEvents.current();
       const snapshot = conversationEvents.accept(event);
       if (snapshot.lastSequence !== previous.lastSequence) {

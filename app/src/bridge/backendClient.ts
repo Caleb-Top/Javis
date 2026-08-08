@@ -7,6 +7,13 @@ export type BackendClientOptions = {
   afterSequence?(): number;
   onConnection?(snapshot: ConnectionSnapshot): void;
   onEvent?(event: BackendEvent): void;
+  requestTimeouts?: Partial<RequestTimeouts>;
+};
+
+export type RequestTimeouts = {
+  acceptedMs: number;
+  firstResponseMs: number;
+  overallMs: number;
 };
 
 export type BackendEvent = Record<string, unknown> & {
@@ -38,13 +45,33 @@ export type BackendClient = {
 };
 
 const RECONNECT_DELAYS = [1000, 2000, 3000, 5000, 8000, 15000];
+const DEFAULT_REQUEST_TIMEOUTS: RequestTimeouts = {
+  acceptedMs: 3000,
+  firstResponseMs: 15000,
+  overallMs: 60000,
+};
+
+type RequestTimeoutPhase = "accepted" | "first-response" | "overall";
+
+type RequestWatchdogs = {
+  acceptedTimer: number | null;
+  firstResponseTimer: number | null;
+  overallTimer: number | null;
+  accepted: boolean;
+  firstResponseReceived: boolean;
+};
 
 export function createBackendClient(options: BackendClientOptions): BackendClient {
   const sessionId = options.sessionId.trim();
   if (!sessionId) throw new Error("BackendClient requires a conversation session id");
 
   const endpoints = resolveBackendEndpoints();
+  const requestTimeouts: RequestTimeouts = {
+    ...DEFAULT_REQUEST_TIMEOUTS,
+    ...options.requestTimeouts,
+  };
   const queue = new RequestQueue();
+  const requestWatchdogs = new Map<string, RequestWatchdogs>();
   let ws: WebSocket | null = null;
   let reconnectAttempt = 0;
   let reconnectTimer = 0;
@@ -106,6 +133,97 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     return true;
   }
 
+  function clearRequestWatchdogs(requestId: string): void {
+    const watchdogs = requestWatchdogs.get(requestId);
+    if (!watchdogs) return;
+    if (watchdogs.acceptedTimer !== null) window.clearTimeout(watchdogs.acceptedTimer);
+    if (watchdogs.firstResponseTimer !== null) window.clearTimeout(watchdogs.firstResponseTimer);
+    if (watchdogs.overallTimer !== null) window.clearTimeout(watchdogs.overallTimer);
+    requestWatchdogs.delete(requestId);
+  }
+
+  function timeoutRequest(requestId: string, phase: RequestTimeoutPhase): void {
+    if (!requestWatchdogs.has(requestId)) return;
+    clearRequestWatchdogs(requestId);
+    queue.cancel(requestId);
+    sendWire({
+      type: "conversation.cancel",
+      payload: {
+        session_id: sessionId,
+        request_id: requestId,
+        reason: `${phase} timeout`,
+        protocol_version: 2,
+      },
+    });
+    if (currentRequestId === requestId) {
+      currentRequestId = null;
+      pendingApprovalId = "";
+    }
+    const error = phase === "accepted"
+      ? "Request acknowledgement timed out"
+      : phase === "first-response"
+        ? "First response timed out"
+        : "Request timed out";
+    runtimeStateCoordinator.signal({
+      source: "websocket",
+      state: "error",
+      timestamp: Date.now(),
+      requestId,
+      detail: error,
+      terminal: true,
+    });
+    options.onEvent?.({
+      type: "request.failed",
+      local: true,
+      request_id: requestId,
+      payload: { error, phase },
+    });
+  }
+
+  function startRequestWatchdogs(requestId: string): void {
+    const watchdogs: RequestWatchdogs = {
+      acceptedTimer: null,
+      firstResponseTimer: null,
+      overallTimer: null,
+      accepted: false,
+      firstResponseReceived: false,
+    };
+    requestWatchdogs.set(requestId, watchdogs);
+    watchdogs.acceptedTimer = window.setTimeout(
+      () => timeoutRequest(requestId, "accepted"),
+      requestTimeouts.acceptedMs,
+    );
+    watchdogs.overallTimer = window.setTimeout(
+      () => timeoutRequest(requestId, "overall"),
+      requestTimeouts.overallMs,
+    );
+  }
+
+  function markRequestAccepted(requestId: string): void {
+    const watchdogs = requestWatchdogs.get(requestId);
+    if (!watchdogs || watchdogs.accepted) return;
+    watchdogs.accepted = true;
+    if (watchdogs.acceptedTimer !== null) {
+      window.clearTimeout(watchdogs.acceptedTimer);
+      watchdogs.acceptedTimer = null;
+    }
+    if (watchdogs.firstResponseReceived) return;
+    watchdogs.firstResponseTimer = window.setTimeout(
+      () => timeoutRequest(requestId, "first-response"),
+      requestTimeouts.firstResponseMs,
+    );
+  }
+
+  function markFirstResponse(requestId: string): void {
+    const watchdogs = requestWatchdogs.get(requestId);
+    if (!watchdogs || watchdogs.firstResponseReceived) return;
+    watchdogs.firstResponseReceived = true;
+    if (watchdogs.firstResponseTimer !== null) {
+      window.clearTimeout(watchdogs.firstResponseTimer);
+      watchdogs.firstResponseTimer = null;
+    }
+  }
+
   function flushQueue(): void {
     queue.drain().forEach((request) => sendWire(request.payload));
   }
@@ -125,10 +243,15 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     const type = String(msg.type || "");
     const requestId = String(msg.request_id || "");
     const payload = msg.payload ?? {};
-    if (type === "request.accepted") currentRequestId = requestId || currentRequestId;
+    const lifecycleRequestId = requestId || currentRequestId || "";
+    if (type === "request.accepted" && requestId === currentRequestId) {
+      markRequestAccepted(requestId);
+    }
+    if (type === "response.delta" && requestId) markFirstResponse(requestId);
     if (type === "approval.required") pendingApprovalId = String(payload.approval_id || "");
 
     const terminal = type === "request.completed" || type === "request.cancelled" || type === "request.failed";
+    if (terminal && lifecycleRequestId) clearRequestWatchdogs(lifecycleRequestId);
     if (terminal && (!requestId || requestId === currentRequestId)) {
       currentRequestId = null;
       pendingApprovalId = "";
@@ -220,9 +343,14 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   function send(text: string): string | null {
     const clean = text.trim();
     if (!clean) return null;
-    if (currentRequestId) queue.cancel(currentRequestId);
+    if (currentRequestId) {
+      queue.cancel(currentRequestId);
+      clearRequestWatchdogs(currentRequestId);
+      pendingApprovalId = "";
+    }
     const requestId = createRequestId();
     currentRequestId = requestId;
+    startRequestWatchdogs(requestId);
     runtimeStateCoordinator.signal({
       source: "ui",
       state: "thinking",
@@ -284,8 +412,10 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   function cancel(reason = "user interrupt"): boolean {
     if (!currentRequestId) return false;
     const requestId = currentRequestId;
+    clearRequestWatchdogs(requestId);
+    currentRequestId = null;
+    pendingApprovalId = "";
     if (queue.cancel(requestId)) {
-      currentRequestId = null;
       return true;
     }
     const payload = {

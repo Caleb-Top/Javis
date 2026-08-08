@@ -115,6 +115,24 @@ test("the App sends only final transcripts and resumes listening after request t
   assert.match(main, /request\.(completed|cancelled|failed)[\s\S]*?resumeListeningState/);
 });
 
+test("local request failures bypass the strict reducer and recover Live listening", () => {
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const localFailureBranch = main.indexOf(
+    'if (event.type === "request.failed" && event.local === true)',
+  );
+  const conversationEventBranch = main.indexOf(
+    "else if (isConversationEvent(event))",
+  );
+
+  assert.ok(localFailureBranch >= 0);
+  assert.ok(conversationEventBranch > localFailureBranch);
+  const recovery = main.slice(localFailureBranch, conversationEventBranch);
+  assert.match(recovery, /voiceRequestIds\.delete\(event\.request_id\)/);
+  assert.match(recovery, /event\.payload\?\.error/);
+  assert.match(recovery, /liveCaption\.setText/);
+  assert.match(recovery, /voiceCapture\.resumeListeningState\(\)/);
+});
+
 test("voice turns use native playback and barge-in stops it before cancellation", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
