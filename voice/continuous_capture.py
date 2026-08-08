@@ -94,7 +94,7 @@ class ContinuousVoiceService:
         self._transcription_drops = 0
         self._transcription_generation = 0
         self._finalized_turn = 0
-        self._terminal_turns: set[int] = set()
+        self._terminal_turn_ranges: list[tuple[int, int]] = []
         self._last_partial: dict[int, str] = {}
         self._transcription_thread = threading.Thread(
             target=self._transcription_worker,
@@ -111,7 +111,7 @@ class ContinuousVoiceService:
                 self._transcription_generation += 1
                 self._transcription_queue.clear()
                 self._finalized_turn = 0
-                self._terminal_turns.clear()
+                self._terminal_turn_ranges.clear()
                 self._last_partial.clear()
             self._pipeline = StreamingVoicePipeline(
                 config=VoicePipelineConfig(**settings),
@@ -120,6 +120,42 @@ class ContinuousVoiceService:
             self._pcm_buffer.clear()
             self._playback_buffer.clear()
         return self.status()
+
+    def _is_terminal_turn(self, turn: int) -> bool:
+        """Return terminal membership while the transcription condition is held."""
+        target = int(turn)
+        for start, end in self._terminal_turn_ranges:
+            if target < start:
+                return False
+            if target <= end:
+                return True
+        return False
+
+    def _record_terminal_turn(self, turn: int) -> bool:
+        """Record one terminal turn and merge ranges under the transcription condition."""
+        target = int(turn)
+        if self._is_terminal_turn(target):
+            return False
+
+        merged_start = target
+        merged_end = target
+        merged_ranges: list[tuple[int, int]] = []
+        inserted = False
+        for start, end in self._terminal_turn_ranges:
+            if end + 1 < merged_start:
+                merged_ranges.append((start, end))
+            elif merged_end + 1 < start:
+                if not inserted:
+                    merged_ranges.append((merged_start, merged_end))
+                    inserted = True
+                merged_ranges.append((start, end))
+            else:
+                merged_start = min(merged_start, start)
+                merged_end = max(merged_end, end)
+        if not inserted:
+            merged_ranges.append((merged_start, merged_end))
+        self._terminal_turn_ranges = merged_ranges
+        return True
 
     def _enqueue_transcription(
         self,
@@ -145,7 +181,7 @@ class ContinuousVoiceService:
                     min(1.0, float(metadata.get("input_peak") or 0.0)),
                 ),
             }
-            if task["final"] and task["turn"] in self._terminal_turns:
+            if task["final"] and self._is_terminal_turn(task["turn"]):
                 return
             if final:
                 self._transcription_queue = deque(
@@ -174,20 +210,20 @@ class ContinuousVoiceService:
                     self._transcription_queue.remove(dropped)
                 self._transcription_drops += 1
                 dropped.pop("pcm", None)
-                if dropped["final"] and dropped["turn"] not in self._terminal_turns:
+                if dropped["final"]:
                     turn = dropped["turn"]
-                    self._terminal_turns.add(turn)
-                    self._finalized_turn = max(self._finalized_turn, turn)
-                    self._last_partial.pop(turn, None)
-                    self._publish(
-                        {
-                            "type": "transcript.empty",
-                            "turn": turn,
-                            "audio_ms": dropped["audio_ms"],
-                            "input_rms": dropped["input_rms"],
-                            "input_peak": dropped["input_peak"],
-                        }
-                    )
+                    if self._record_terminal_turn(turn):
+                        self._finalized_turn = max(self._finalized_turn, turn)
+                        self._last_partial.pop(turn, None)
+                        self._publish(
+                            {
+                                "type": "transcript.empty",
+                                "turn": turn,
+                                "audio_ms": dropped["audio_ms"],
+                                "input_rms": dropped["input_rms"],
+                                "input_peak": dropped["input_peak"],
+                            }
+                        )
             self._transcription_queue.append(task)
             self._transcription_condition.notify()
 
@@ -207,16 +243,24 @@ class ContinuousVoiceService:
                     or ""
                 ).strip()
             except Exception as error:
-                self.mark_error(f"speech transcription failed: {error}")
+                with self._transcription_condition:
+                    if task["generation"] != self._transcription_generation:
+                        continue
+                    if task["final"]:
+                        turn = task["turn"]
+                        if not self._record_terminal_turn(turn):
+                            continue
+                        self._finalized_turn = max(self._finalized_turn, turn)
+                        self._last_partial.pop(turn, None)
+                    self.mark_error(f"speech transcription failed: {error}")
                 continue
             with self._transcription_condition:
                 if task["generation"] != self._transcription_generation:
                     continue
                 turn = task["turn"]
                 if task["final"]:
-                    if turn in self._terminal_turns:
+                    if not self._record_terminal_turn(turn):
                         continue
-                    self._terminal_turns.add(turn)
                     self._finalized_turn = max(self._finalized_turn, turn)
                     self._last_partial.pop(turn, None)
                     if text:

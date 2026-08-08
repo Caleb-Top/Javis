@@ -464,6 +464,33 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         self.assertEqual(len(terminals), 1)
         self.assertEqual(terminals[0]["type"], "transcript.empty")
 
+    def test_terminal_turn_tracking_compresses_large_sequential_history(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+
+        with service._transcription_condition:
+            for turn in range(1, 4097):
+                service._record_terminal_turn(turn)
+            tracking = list(service._terminal_turn_ranges)
+
+        self.assertEqual(len(tracking), 1)
+        self.assertEqual(tracking, [(1, 4096)])
+
+    def test_terminal_turn_tracking_merges_out_of_order_and_detects_duplicates(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+
+        with service._transcription_condition:
+            self.assertTrue(service._record_terminal_turn(1))
+            self.assertTrue(service._record_terminal_turn(3))
+            self.assertTrue(service._record_terminal_turn(2))
+            self.assertFalse(service._record_terminal_turn(2))
+            tracking = list(service._terminal_turn_ranges)
+            membership = [service._is_terminal_turn(turn) for turn in range(1, 5)]
+
+        self.assertEqual(tracking, [(1, 3)])
+        self.assertEqual(membership, [True, True, True, False])
+
     def test_full_transcription_queue_preserves_one_terminal_per_final_turn(self):
         service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
         service.configure()
@@ -710,6 +737,106 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         self.assertTrue(configure_done.is_set())
         self.assertEqual(configure_errors, [])
         self.assertEqual(service._transcription_generation, generation_before + 1)
+
+    def test_stale_generation_transcriber_exception_is_not_published(self):
+        first_transcription_started = threading.Event()
+        allow_stale_exception = threading.Event()
+        calls = 0
+
+        def transcribe(pcm, rate, final):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_transcription_started.set()
+                allow_stale_exception.wait(1.0)
+                raise RuntimeError("stale transcription exploded")
+            return ""
+
+        service = ContinuousVoiceService(transcribe=transcribe)
+        service.configure()
+        metadata = {
+            "turn": 1,
+            "audio_ms": FRAME_MS,
+            "input_rms": 0.1,
+            "input_peak": 0.2,
+        }
+        service._enqueue_transcription(
+            pcm_frame(tone=6500, noise=300),
+            RATE,
+            True,
+            metadata,
+        )
+        try:
+            self.assertTrue(first_transcription_started.wait(1.0))
+            service.configure()
+        finally:
+            allow_stale_exception.set()
+
+        fresh_metadata = dict(metadata)
+        fresh_metadata["turn"] = 2
+        service._enqueue_transcription(
+            pcm_frame(tone=6500, noise=300, phase=1),
+            RATE,
+            True,
+            fresh_metadata,
+        )
+        deadline = time.monotonic() + 1.0
+        events = []
+        while time.monotonic() < deadline:
+            events = service.events_after(0)
+            if any(event["type"] == "transcript.empty" for event in events):
+                break
+            time.sleep(0.01)
+
+        self.assertIn("transcript.empty", [event["type"] for event in events])
+        self.assertEqual(
+            [event for event in events if event["type"] == "audio.error"],
+            [],
+        )
+        with service._transcription_condition:
+            self.assertFalse(service._is_terminal_turn(1))
+            self.assertTrue(service._is_terminal_turn(2))
+            self.assertEqual(service._terminal_turn_ranges, [(2, 2)])
+
+    def test_current_generation_final_exception_is_one_recorded_terminal_error(self):
+        calls = 0
+
+        def transcribe(pcm, rate, final):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("current transcription exploded")
+
+        service = ContinuousVoiceService(transcribe=transcribe)
+        service.configure()
+        final_pcm = pcm_frame(tone=6500, noise=300)
+        metadata = {
+            "turn": 1,
+            "audio_ms": FRAME_MS,
+            "input_rms": 0.1,
+            "input_peak": 0.2,
+        }
+        service._enqueue_transcription(final_pcm, RATE, True, metadata)
+
+        deadline = time.monotonic() + 1.0
+        events = []
+        while time.monotonic() < deadline:
+            events = service.events_after(0)
+            if any(event["type"] == "audio.error" for event in events):
+                break
+            time.sleep(0.01)
+        service._enqueue_transcription(final_pcm, RATE, True, metadata)
+        time.sleep(0.05)
+        events = service.events_after(0)
+        errors = [event for event in events if event["type"] == "audio.error"]
+        with service._transcription_condition:
+            terminal_recorded = service._is_terminal_turn(1)
+            ranges = list(service._terminal_turn_ranges)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("current transcription exploded", errors[0]["message"])
+        self.assertEqual(calls, 1)
+        self.assertTrue(terminal_recorded)
+        self.assertEqual(ranges, [(1, 1)])
 
     def test_playback_pcm_is_forwarded_as_echo_reference(self):
         service = ContinuousVoiceService(
