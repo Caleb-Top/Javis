@@ -119,6 +119,8 @@ class StreamingVoicePipeline:
         self._utterance: deque[bytes] = deque(maxlen=self.max_utterance_frames)
         self._noise_power = 200.0**2
         self._noise_rms = 200.0
+        self._signal_power = 200.0**2
+        self._signal_rms = 200.0
         self._onset_count = 0
         self._silence_count = 0
         self._speech_frames = 0
@@ -258,6 +260,10 @@ class StreamingVoicePipeline:
         )
         level = min(1.0, _rms(raw_samples) / 8_000.0)
         events: list[dict] = [{"type": "audio.level", "level": round(level, 4)}]
+        if speech:
+            power = max(1.0, _rms(echo_cleaned) ** 2)
+            self._signal_power = 0.94 * self._signal_power + 0.06 * power
+            self._signal_rms = math.sqrt(self._signal_power)
         self._pre_roll.append(processed)
 
         if not self._utterance:
@@ -344,11 +350,15 @@ class StreamingVoicePipeline:
         return events
 
     def metrics(self) -> dict:
+        signal_db = 20.0 * math.log10(max(1.0, self._signal_rms))
+        noise_db = 20.0 * math.log10(max(1.0, self._noise_rms))
         return {
             "turns": self._turn,
             "dropped_frames": self._dropped_frames,
             "buffered_frames": len(self._utterance),
             "noise_rms": round(self._noise_rms, 3),
+            "signal_rms": round(self._signal_rms, 3),
+            "snr_db": round(signal_db - noise_db, 3),
         }
 
     def diagnostics(self) -> dict:

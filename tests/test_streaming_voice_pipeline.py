@@ -233,6 +233,25 @@ class StreamingVoicePipelineTests(unittest.TestCase):
         self.assertEqual(diagnostics["aec_backend"], "adaptive-reference")
         self.assertEqual(diagnostics["noise_backend"], "adaptive-wiener")
 
+    def test_metrics_expose_signal_levels_and_snr_estimate(self):
+        pipeline = self.make_pipeline(noise_profile="standard")
+
+        # Feed sustained noise only: SNR must be low.
+        for index in range(40):
+            pipeline.push_frame(pcm_frame(noise=2000, phase=index))
+        noise_metrics = pipeline.metrics()
+        self.assertIn("noise_rms", noise_metrics)
+        self.assertIn("signal_rms", noise_metrics)
+        self.assertIn("snr_db", noise_metrics)
+        self.assertLess(noise_metrics["snr_db"], 5.0)
+
+        # Feed a clear tone on top of the noise: SNR must climb.
+        fresh = self.make_pipeline(noise_profile="standard")
+        for index in range(60):
+            fresh.push_frame(pcm_frame(tone=9000, noise=2000, phase=index))
+        speech_metrics = fresh.metrics()
+        self.assertGreater(speech_metrics["snr_db"], noise_metrics["snr_db"] + 6.0)
+
     def test_pcm_transcription_uses_wav_and_a_fast_partial_decode(self):
         calls = []
 
