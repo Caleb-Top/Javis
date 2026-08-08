@@ -92,6 +92,7 @@ class SlowCancellingReceiveSocket(BlockingReceiveSocket):
     def __init__(self, messages):
         super().__init__(messages)
         self.cancel_entered = asyncio.Event()
+        self.cancel_finished = asyncio.Event()
         self.allow_cancel_finish = asyncio.Event()
 
     async def receive_json(self):
@@ -101,7 +102,10 @@ class SlowCancellingReceiveSocket(BlockingReceiveSocket):
             await self.release_receive.wait()
         except asyncio.CancelledError:
             self.cancel_entered.set()
-            await self.allow_cancel_finish.wait()
+            try:
+                await self.allow_cancel_finish.wait()
+            finally:
+                self.cancel_finished.set()
             raise
 
 
@@ -301,6 +305,12 @@ class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
         gateway_task = asyncio.create_task(
             serve_continuous_voice_stream(socket, manager)
         )
+        stop_finished_at_gateway_done = []
+        gateway_task.add_done_callback(
+            lambda _: stop_finished_at_gateway_done.append(
+                manager.stop_finished.is_set()
+            )
+        )
 
         try:
             await asyncio.wait_for(socket.ready_sent.wait(), timeout=1)
@@ -310,20 +320,27 @@ class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
 
             self.assertFalse(gateway_task.done())
+            socket.allow_cancel_finish.set()
+            await asyncio.wait_for(socket.cancel_finished.wait(), timeout=1)
+            await asyncio.sleep(0)
+
+            self.assertFalse(gateway_task.done())
             entered = await asyncio.to_thread(manager.stop_entered.wait, 0.2)
             self.assertTrue(entered)
             self.assertEqual(manager.stop_calls, ["session-1"])
+            self.assertFalse(manager.stop_finished.is_set())
+
+            manager.allow_stop_return.set()
+            results = await asyncio.gather(gateway_task, return_exceptions=True)
+            finished = manager.stop_finished.is_set()
         finally:
             socket.allow_cancel_finish.set()
             manager.allow_stop_return.set()
-            results = await asyncio.gather(gateway_task, return_exceptions=True)
-            finished = (
-                await asyncio.to_thread(manager.stop_finished.wait, 1)
-                if manager.stop_entered.is_set()
-                else False
-            )
+            if not gateway_task.done():
+                await asyncio.gather(gateway_task, return_exceptions=True)
 
         self.assertTrue(finished)
+        self.assertEqual(stop_finished_at_gateway_done, [True])
         self.assertIsInstance(results[0], asyncio.CancelledError)
         self.assertEqual(manager.stop_calls, ["session-1"])
 
