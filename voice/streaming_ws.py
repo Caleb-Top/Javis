@@ -24,16 +24,27 @@ def _session_id(payload: dict) -> str:
     return value
 
 
+def _is_socket_closing(error: BaseException) -> bool:
+    if isinstance(error, WebSocketDisconnect):
+        return True
+    return isinstance(error, RuntimeError) and str(error) in {
+        'Cannot call "receive" once a disconnect message has been received.',
+        'Cannot call "send" once a close message has been sent.',
+    }
+
+
 async def serve_continuous_voice_stream(ws, manager) -> None:
     await ws.accept()
     closed = asyncio.Event()
     stream_acquired = False
+    release_task = None
 
     async def send_json(message: dict) -> None:
         try:
             await ws.send_json(message)
-        except Exception:
-            closed.set()
+        except Exception as error:
+            if _is_socket_closing(error):
+                closed.set()
             raise
 
     async def send_error(error: Exception) -> None:
@@ -41,26 +52,51 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
             return
         try:
             await send_json({"type": "audio.error", "message": str(error)[:500]})
-        except Exception:
-            pass
+        except Exception as send_failure:
+            if not _is_socket_closing(send_failure):
+                raise
 
-    async def release_stream(session_id: str) -> None:
-        nonlocal stream_acquired
-        if not stream_acquired:
-            return
+    async def drain_task(task) -> bool:
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                return cancelled
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    task.result()
+                    return cancelled
+
+    async def stop_owned_stream(session_id: str) -> None:
         try:
             await asyncio.to_thread(manager.stop, session_id=session_id)
         except RuntimeError as error:
             if str(error) != "microphone stream belongs to another conversation":
                 raise
-        stream_acquired = False
+
+    def ensure_release(session_id: str):
+        nonlocal release_task, stream_acquired
+        if release_task is None:
+            if not stream_acquired:
+                return None
+            stream_acquired = False
+            release_task = asyncio.create_task(stop_owned_stream(session_id))
+        return release_task
+
+    async def release_stream(session_id: str) -> None:
+        task = ensure_release(session_id)
+        if task is None:
+            return
+        cancelled = await drain_task(task)
+        if cancelled:
+            raise asyncio.CancelledError
 
     try:
         first = await ws.receive_json()
-    except (WebSocketDisconnect, RuntimeError):
-        return
     except Exception as error:
-        await send_error(error)
+        if not _is_socket_closing(error):
+            await send_error(error)
         return
 
     try:
@@ -86,18 +122,11 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
             acquisition = asyncio.create_task(
                 asyncio.to_thread(manager.attach, session_id=session_id)
             )
-        try:
-            await asyncio.shield(acquisition)
-        except asyncio.CancelledError:
-            try:
-                await acquisition
-            except Exception:
-                pass
-            else:
-                stream_acquired = True
-                await release_stream(session_id)
-            raise
+        cancelled = await drain_task(acquisition)
         stream_acquired = True
+        if cancelled:
+            await release_stream(session_id)
+            raise asyncio.CancelledError
     except Exception as error:
         await send_error(error)
         return
@@ -106,11 +135,9 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
         while True:
             try:
                 message = await ws.receive_json()
-            except (WebSocketDisconnect, RuntimeError):
-                closed.set()
-                return
             except Exception as error:
-                await send_error(error)
+                if not _is_socket_closing(error):
+                    await send_error(error)
                 closed.set()
                 return
             try:
@@ -147,19 +174,38 @@ async def serve_continuous_voice_stream(ws, manager) -> None:
 
     receiver = asyncio.create_task(receive_controls())
     sender = asyncio.create_task(send_events())
+    tasks = (receiver, sender)
+    done = set()
     try:
-        _, pending = await asyncio.wait(
-            (receiver, sender),
+        done, pending = await asyncio.wait(
+            tasks,
             return_when=asyncio.FIRST_COMPLETED,
         )
         closed.set()
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
     finally:
         closed.set()
-        for task in (receiver, sender):
+        active_release = ensure_release(session_id)
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(receiver, sender, return_exceptions=True)
-        await release_stream(session_id)
+        ordered_tasks = tuple(done) + tuple(task for task in tasks if task not in done)
+
+        async def collect_task_results():
+            return await asyncio.gather(*ordered_tasks, return_exceptions=True)
+
+        child_cleanup = asyncio.create_task(collect_task_results())
+        cleanup_cancelled = await drain_task(child_cleanup)
+        results = child_cleanup.result()
+        if active_release is not None:
+            cleanup_cancelled = (
+                await drain_task(active_release) or cleanup_cancelled
+            )
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                continue
+            if isinstance(result, BaseException) and not _is_socket_closing(result):
+                raise result
+        if cleanup_cancelled:
+            raise asyncio.CancelledError
