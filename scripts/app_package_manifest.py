@@ -42,7 +42,6 @@ EXCLUDE = [
 ]
 
 EXTERNAL = [
-    "ollama_models",
     "DeepSeek API",
     "CUDA/PyTorch training stack",
     "data",
@@ -58,6 +57,11 @@ EXTERNAL = [
     "memory/sessions",
 ]
 
+OPTIONAL_ADDON_COMPONENTS = [
+    "ollama_models",
+    "Ollama portable runtime",
+]
+
 
 def build_app_package_manifest(root: Path) -> dict:
     return {
@@ -65,4 +69,6 @@ def build_app_package_manifest(root: Path) -> dict:
         "include": INCLUDE,
         "exclude": EXCLUDE,
         "external": EXTERNAL,
+        "bundled_release_components": [],
+        "optional_addon_components": OPTIONAL_ADDON_COMPONENTS,
     }

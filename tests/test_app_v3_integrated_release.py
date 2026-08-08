@@ -39,7 +39,12 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             {"core", "memory", "perception", "control", "evolution"},
         )
         self.assertTrue(manifest["external_components"]["ollama_models"])
+        self.assertIsNone(manifest["models"]["bundled_default"])
+        self.assertEqual(manifest["models"]["optional_addon"], "Javis-R1-8B-Addon")
+        self.assertTrue(manifest["models"]["user_switchable"])
         self.assertTrue(manifest["external_components"]["cuda_training_stack"])
+        self.assertEqual(manifest["runtime"]["install_root"], "%LOCALAPPDATA%/local.javis.desktop/runtime")
+        self.assertEqual(manifest["data"]["root"], "%LOCALAPPDATA%/local.javis.desktop")
 
     def test_runtime_manifest_contract_is_v3_and_complete(self):
         from scripts.javis_release_runtime import (
@@ -58,6 +63,16 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             self.assertIn(path, BACKEND_INCLUDE)
         self.assertIn("python/python.exe", REQUIRED_MEMBERS)
         self.assertIn("app/models/faster-whisper-base/model.bin", REQUIRED_MEMBERS)
+
+    def test_runtime_archive_does_not_duplicate_outer_installer_payloads(self):
+        from scripts.javis_release_runtime import should_exclude
+
+        self.assertTrue(
+            should_exclude(Path("app/tools/ollama-runtime/ollama.exe"), is_python=False)
+        )
+        self.assertTrue(
+            should_exclude(Path("app/tools/python-runtime-3.11/python.exe"), is_python=False)
+        )
 
     def test_runtime_bootstrap_binds_to_package_version_and_preserves_state(self):
         runtime = self.read("app/src-tauri/src/runtime_bundle.rs")
@@ -115,7 +130,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
     def test_runtime_extraction_ignores_nonportable_zip_timestamps(self):
         runtime = self.read("app/src-tauri/src/runtime_bundle.rs")
 
-        self.assertIn('Command::new("tar.exe")', runtime)
+        self.assertIn('hidden_command("tar.exe")', runtime)
         self.assertIn('.args(["-m", "-xf"])', runtime)
 
     def test_webview2_loader_is_bundled_beside_the_app_executable(self):
@@ -140,7 +155,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
         self.assertIn('Join-Path $AppExe.DirectoryName "WebView2Loader.dll"', installer_verify)
         self.assertIn('"Installed WebView2 loader"', installer_verify)
 
-    def test_v3_build_is_offline_and_produces_verified_desktop_zip(self):
+    def test_v3_build_produces_a_loadable_main_setup_and_optional_r1_addon(self):
         build = self.read("scripts/build_javis_app_v3.ps1")
         installer_verify = self.read("scripts/verify_javis_v3_installer.ps1")
         for contract in (
@@ -149,13 +164,24 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "stage_javis_runtime.py",
             "verify_javis_release.py",
             "verify_javis_v3_installer.ps1",
-            "Javis-v3.0.0-test",
-            "Javis-v3.0.0-Verified",
-            "Javis-v3.0.0-Windows-x64.zip",
-            "ZIP-SHA256.txt",
+            "javis_release_layout.py",
+            "javis_full_installer.py",
+            "tools\\ollama-runtime",
+            "tools\\python-runtime-3.11",
+            "models\\faster-whisper-base",
+            "--python-root",
+            "--stt-model-root",
+            "deepseek-r1:8b",
+            "Javis-v3.0.0-Setup.exe",
+            "--build-addon",
+            "Javis-R1-8B-Addon",
+            "GetBinaryType",
+            "--output-dir",
             "SHA256SUMS.txt",
         ):
             self.assertIn(contract, build)
+        self.assertNotIn("GetFolderPath(\"Desktop\")", build)
+        self.assertNotIn("Compress-Archive", build)
         for forbidden in (
             "pip install",
             "npm install",
@@ -177,9 +203,14 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "Installed App window",
             "Wait-JavisProcessesStopped",
             "ExecutablePath",
+            "VerifierProcessIds",
             "$DataRoot",
+            "/DATA=",
+            "Main setup excludes Ollama",
+            "Main setup excludes R1 weights",
         ):
             self.assertIn(contract, installer_verify)
+        self.assertNotIn("Join-Path $env:TEMP", installer_verify)
 
     def test_v3_build_uses_the_installed_rust_toolchain_without_rustup_sync(self):
         build = self.read("scripts/build_javis_app_v3.ps1")

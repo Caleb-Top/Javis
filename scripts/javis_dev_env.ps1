@@ -38,6 +38,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $runtimeRoot "tools\nodejs\node.exe"
 }
 
 $rustRoot = Join-Path $runtimeRoot "tools\rust"
+$pythonRuntime = Join-Path $runtimeRoot "tools\python-runtime-3.11\python.exe"
+if (-not (Test-Path -LiteralPath $pythonRuntime)) {
+    throw "G-rooted Python 3.11 runtime is missing: $pythonRuntime"
+}
+$env:JAVIS_PYTHON = $pythonRuntime
+$venvSitePackages = Join-Path $runtimeRoot "venv\Lib\site-packages"
+$env:PYTHONPATH = if ($env:PYTHONPATH) {
+    $venvSitePackages + [IO.Path]::PathSeparator + $env:PYTHONPATH
+} else {
+    $venvSitePackages
+}
 if (Test-Path -LiteralPath (Join-Path $rustRoot "rustup\settings.toml")) {
     $env:CARGO_HOME = Join-Path $rustRoot "cargo"
     $env:RUSTUP_HOME = Join-Path $rustRoot "rustup"
@@ -50,6 +61,7 @@ if (Test-Path -LiteralPath (Join-Path $rustRoot "rustup\settings.toml")) {
 $rustToolchainBin = Join-Path $env:RUSTUP_HOME "toolchains\stable-x86_64-pc-windows-gnu\bin"
 $rustSelfContainedBin = Join-Path $rustToolchainBin "..\lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained"
 $toolPaths = @(
+    (Split-Path -Parent $pythonRuntime),
     (Join-Path $runtimeRoot "tools\nodejs"),
     $rustToolchainBin,
     (Join-Path $runtimeRoot "tools\mingw32\bin"),

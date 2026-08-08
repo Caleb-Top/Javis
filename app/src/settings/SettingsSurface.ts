@@ -79,6 +79,12 @@ export type RemoteModelProfile = {
 
 export type ModelConnectionSettingsResponse = {
   applied: boolean;
+  share_live_code: boolean;
+  routes: Record<"live" | "code", {
+    source: ModelSource;
+    local: { model: string; base_url: string };
+    remote: { provider: string; model: string; base_url: string };
+  }>;
   source: ModelSource;
   active_provider: string;
   active_model: string;
@@ -96,8 +102,26 @@ export type ModelConnectionSettingsResponse = {
 
 export type LocalModelCatalogResponse = {
   connected: boolean;
+  state?: "connected" | "not_installed" | "offline";
   models: string[];
   message: string;
+};
+
+export type RemoteModelCatalogResponse = {
+  connected: boolean;
+  models: RemoteProviderOption["models"];
+  discovered_count?: number;
+  message: string;
+};
+
+export type ModelAddonDetectionResponse = {
+  ok: boolean;
+  detected: boolean;
+  manifest_path?: string;
+  source_dir?: string;
+  suggested_install_dir?: string;
+  title?: string;
+  model?: string;
 };
 
 export type ModelDiagnosticReport = {
@@ -108,6 +132,43 @@ export type ModelDiagnosticReport = {
     status: "pass" | "warn" | "fail";
     message: string;
   }>;
+};
+
+export type ModelInstallPlan = {
+  ok: boolean;
+  source?: "offline" | "local_gguf" | "huggingface";
+  title?: string;
+  model?: string;
+  base_url?: string;
+  repo_id?: string;
+  filename?: string;
+  gguf_path?: string;
+  available_files?: Array<{ filename: string; size: number }>;
+  install_dir?: string;
+  download_bytes?: number;
+  required_bytes?: number;
+  free_bytes?: number;
+  license?: string;
+  gated?: boolean;
+  runtime_ready?: boolean;
+  restart_required?: boolean;
+  configuration_applied?: boolean;
+  message?: string;
+  error?: string;
+};
+
+export type ModelInstallProgress = {
+  state: "idle" | "running" | "completed" | "failed";
+  phase: string;
+  percent: number;
+  completed_bytes: number;
+  total_bytes: number;
+};
+
+export type HuggingFaceSearchResponse = {
+  ok: boolean;
+  models: Array<{ repo_id: string; downloads: number; likes: number; gated: boolean }>;
+  error?: string;
 };
 
 export type SettingsSurfaceOptions = {
@@ -127,7 +188,17 @@ export type SettingsSurfaceOptions = {
     settings: Record<string, unknown>,
   ) => Promise<ModelConnectionSettingsResponse>;
   onRefreshLocalModels: (baseUrl: string) => Promise<LocalModelCatalogResponse>;
+  onRefreshRemoteModels: (
+    provider: string,
+    baseUrl: string,
+    apiKey: string,
+  ) => Promise<RemoteModelCatalogResponse>;
+  onDetectModelAddon: (path: string) => Promise<ModelAddonDetectionResponse>;
+  onGetModelInstallProgress: () => Promise<ModelInstallProgress>;
   onTestModelConnections: () => Promise<ModelDiagnosticReport>;
+  onSearchHuggingFace: (query: string) => Promise<HuggingFaceSearchResponse>;
+  onPlanModelInstall: (settings: Record<string, unknown>) => Promise<ModelInstallPlan>;
+  onInstallModel: (settings: Record<string, unknown>) => Promise<ModelInstallPlan>;
 };
 
 export type SettingsSurfaceController = {
@@ -218,7 +289,12 @@ export function createSettingsSurface(
   let sourceMode: SettingsSourceMode = "live";
   let activeSection = "general";
   let activeModelSource: ModelSource = "local";
+  let activeModelRoute: "live" | "code" = "live";
+  let modelRouteDrafts: ModelConnectionSettingsResponse["routes"] | null = null;
   let modelSettings: ModelConnectionSettingsResponse | null = null;
+  const remoteModelCatalogs = new Map<string, RemoteProviderOption["models"]>();
+  let modelInstallPlan: ModelInstallPlan | null = null;
+  let modelInstallInProgress = false;
   let recordingSlot: HTMLElement | null = null;
 
   options.root.innerHTML = `
@@ -278,11 +354,18 @@ export function createSettingsSurface(
             </div>
           </section>
           <section class="settings-section" data-settings-pane="storage">
-            <div class="settings-title"><small>MODEL ROUTING</small><h1>模型与存储</h1><span>本地与远端配置独立保留，切换后立即成为 Live 的推理来源。</span></div>
+            <div class="settings-title"><small>MODEL ROUTING</small><h1>模型与存储</h1><span>从 Live 或 Code 打开的都是这一个设置中心；两边可共享，也可分别使用本地模型或云端 API。</span></div>
             <div class="settings-panel settings-model-panel">
               <div class="settings-panel-heading">
                 <div><strong>推理来源</strong><small>本地优先低延迟，远端用于更强推理。</small></div>
                 <span class="settings-active-model">正在读取…</span>
+              </div>
+              <div class="model-route-toolbar">
+                <div class="model-route-segment" role="tablist" aria-label="配置目标">
+                  <button type="button" role="tab" data-model-route="live">Live</button>
+                  <button type="button" role="tab" data-model-route="code">Code</button>
+                </div>
+                <label class="model-route-share"><input class="model-share-routes" type="checkbox"> Code 与 Live 共用此配置</label>
               </div>
               <div class="model-source-segment" role="tablist" aria-label="推理来源">
                 <button type="button" role="tab" data-model-source="local">本地模型</button>
@@ -291,12 +374,12 @@ export function createSettingsSurface(
               <div class="settings-model-profile" data-model-profile="local">
                 <label class="settings-field">
                   <span>Ollama 地址</span>
-                  <input class="local-model-base-url" type="url" maxlength="2048" placeholder="http://127.0.0.1:11434/v1">
+                  <input class="local-model-base-url" type="url" maxlength="2048" placeholder="http://127.0.0.1:11435/v1">
                 </label>
                 <label class="settings-field">
                   <span>本地模型</span>
                   <div class="settings-input-action settings-model-input-action">
-                    <input class="local-model-name" type="text" list="local-model-options" maxlength="240" placeholder="选择或输入模型名称">
+                    <input class="local-model-name" type="text" list="local-model-options" maxlength="240" placeholder="正在读取或选择模型…">
                     <datalist id="local-model-options"></datalist>
                     <button class="settings-secondary-button local-model-refresh" type="button">刷新模型</button>
                   </div>
@@ -312,8 +395,12 @@ export function createSettingsSurface(
                   </label>
                   <label class="settings-field">
                     <span>远端模型</span>
-                    <input class="remote-model-name" type="text" list="remote-model-options" maxlength="240" placeholder="选择或输入模型名称">
-                    <datalist id="remote-model-options"></datalist>
+                    <div class="settings-input-action settings-remote-model-action">
+                      <select class="remote-model-name" aria-label="远端模型完整列表"></select>
+                      <button class="settings-secondary-button remote-model-refresh" type="button">同步供应商</button>
+                    </div>
+                    <input class="remote-model-custom-name" type="text" maxlength="240" placeholder="输入供应商发布的新模型 ID" hidden>
+                    <small class="remote-model-catalog-summary">正在读取供应商模型目录…</small>
                   </label>
                 </div>
                 <label class="settings-field">
@@ -329,15 +416,49 @@ export function createSettingsSurface(
                 <span data-model-channel="local" data-state="idle"><i></i><b>本地</b><small>未检测</small></span>
                 <span data-model-channel="remote" data-state="idle"><i></i><b>远端</b><small>未检测</small></span>
               </div>
+              <div class="settings-local-installer">
+                <div><strong>本地模型安装向导</strong><small>无需云 API。先选附加包来源，再另选模型安装位置；确认计划前不会写入或下载。</small></div>
+                <button class="settings-secondary-button model-open-installer" type="button">安装或导入模型</button>
+              </div>
+              <div class="model-installer-panel" hidden>
+                <ol class="model-installer-steps" aria-label="本地模型安装步骤">
+                  <li data-installer-step="source" data-active="true"><b>1</b><span>选择来源</span></li>
+                  <li data-installer-step="plan"><b>2</b><span>自动检查</span></li>
+                  <li data-installer-step="consent"><b>3</b><span>确认安装</span></li>
+                  <li data-installer-step="progress"><b>4</b><span>自动适配</span></li>
+                </ol>
+                <div class="settings-model-grid">
+                  <label class="settings-field"><span>安装来源</span><select class="model-installer-source"><option value="offline">R1 离线附加包（首次推荐）</option><option value="local_gguf">导入已有 GGUF 文件</option><option value="huggingface">从 Hugging Face 自动安装</option></select></label>
+                  <label class="settings-field"><span>模型安装位置（不能选附加包目录）</span><div class="settings-input-action"><input class="model-installer-directory" type="text" readonly placeholder="例如 G:\\Javis-Local-Models"><button class="settings-secondary-button model-installer-pick-directory" type="button">选择</button></div></label>
+                </div>
+                <div class="model-installer-source-panel" data-installer-source="offline">
+                  <label class="settings-field"><span>R1 附加包来源目录</span><div class="settings-input-action"><input class="model-addon-path" type="text" readonly placeholder="包含 Javis-R1-8B-Addon.manifest.json 的目录"><button class="settings-secondary-button model-addon-browse" type="button">选择目录</button></div></label>
+                </div>
+                <div class="model-installer-source-panel" data-installer-source="local_gguf" hidden>
+                  <label class="settings-field"><span>现有 GGUF 模型文件</span><div class="settings-input-action"><input class="local-gguf-path" type="text" readonly placeholder="选择电脑上已有的 .gguf 文件"><button class="settings-secondary-button local-gguf-browse" type="button">选择文件</button></div></label>
+                  <small class="model-installer-hint">向导会复制、校验并自动生成 Ollama 适配配置；安装位置须已通过 R1 附加包安装运行时。</small>
+                </div>
+                <div class="model-installer-source-panel" data-installer-source="huggingface" hidden>
+                  <label class="settings-field"><span>搜索 Hugging Face</span><div class="settings-input-action"><input class="hf-search-query" type="search" placeholder="例如 Qwen GGUF"><button class="settings-secondary-button hf-search" type="button">自动搜索</button></div></label>
+                  <label class="settings-field"><span>模型仓库</span><input class="hf-repo-id" type="text" list="hf-repo-options" placeholder="owner/model"><datalist id="hf-repo-options"></datalist></label>
+                  <label class="settings-field"><span>GGUF 文件（留空则自动推荐量化版本）</span><input class="hf-filename" type="text" list="hf-file-options" placeholder="自动优先 Q4_K_M"><datalist id="hf-file-options"></datalist></label>
+                  <label class="settings-field"><span>Hugging Face Token（仅受限模型需要）</span><input class="hf-token" type="password" autocomplete="off" placeholder="只用于本次请求，不保存"></label>
+                  <small class="model-installer-hint">确认后由 Javis 自动下载、校验 SHA-256、生成 Modelfile 并适配 Ollama，无需手动访问网页。</small>
+                </div>
+                <div class="model-installer-plan"><output class="model-installer-status" aria-live="polite">先选择来源与目录，再生成安装计划。</output></div>
+                <div class="model-installer-progress" hidden><progress max="100" value="0"></progress><span>0%</span></div>
+                <label class="model-installer-consent"><input type="checkbox" class="model-installer-approved"> 我确认安装位置、下载大小与模型许可，并允许 Javis 写入所选目录</label>
+                <div class="settings-model-actions"><span></span><button class="settings-secondary-button model-installer-plan-button" type="button">生成安装计划</button><button class="settings-primary-button model-installer-install" type="button" disabled>确认安装</button></div>
+              </div>
               <div class="settings-model-actions">
                 <output class="settings-model-status" aria-live="polite">配置尚未加载</output>
-                <button class="settings-secondary-button model-test-connections" type="button">检测两路连接</button>
+                <button class="settings-secondary-button model-test-connections" type="button">检测当前连接</button>
                 <button class="settings-primary-button model-save" type="button">保存并应用</button>
               </div>
             </div>
             <div class="settings-subheading"><strong>数据目录</strong><small>使用 Windows 原生目录选择器授权。</small></div>
             <div class="settings-panel settings-path-list">
-              ${pathSettingTemplate("model_dir", "本地模型目录", "扫描 GGUF 与 Ollama 模型；外部 Ollama 可能需要重启")}
+              ${pathSettingTemplate("model_dir", "外部 Ollama 模型存储（高级）", "仅供已有外部 Ollama 使用；不是 R1 附加包来源，也不是安装向导目标")}
               ${pathSettingTemplate("workspace_dir", "项目工作区", "新建项目和授权工作文件的保存位置")}
               ${pathSettingTemplate("output_dir", "导入与输出", "上传文件、导出结果和生成内容的保存位置")}
               ${pathSettingTemplate("backup_dir", "备份目录", "记忆、配置与技能备份的目标位置")}
@@ -391,6 +512,33 @@ export function createSettingsSurface(
     });
   }
 
+  async function recognizeAddonPath(path: string, announce = true): Promise<boolean> {
+    if (!path) return false;
+    const response = await options.onDetectModelAddon(path);
+    if (!response.ok || !response.detected) return false;
+    const panel = options.root.querySelector<HTMLElement>(".model-installer-panel")!;
+    const source = options.root.querySelector<HTMLSelectElement>(".model-installer-source")!;
+    panel.hidden = false;
+    source.value = "offline";
+    options.root.querySelectorAll<HTMLElement>("[data-installer-source]").forEach((item) => {
+      item.hidden = item.dataset.installerSource !== "offline";
+    });
+    options.root.querySelector<HTMLInputElement>(".model-addon-path")!.value =
+      response.source_dir || response.manifest_path || path;
+    const target = options.root.querySelector<HTMLInputElement>(".model-installer-directory")!;
+    if (!target.value || target.value === path) target.value = response.suggested_install_dir || "";
+    modelInstallPlan = null;
+    options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.disabled = true;
+    setInstallerStatus(
+      `已识别 ${response.title || "R1 附加包"}；请确认另一个模型安装位置后生成计划`,
+      "saved",
+    );
+    if (announce) {
+      setPathStatus("这里是 R1 附加包来源，不是模型存储目录；已转到安装向导，尚未修改配置", "saved");
+    }
+    return true;
+  }
+
   function setPathStatus(message: string, state: "idle" | "saving" | "saved" | "error"): void {
     const output = options.root.querySelector<HTMLOutputElement>(".settings-path-status")!;
     output.value = message;
@@ -403,7 +551,13 @@ export function createSettingsSurface(
       const response = await options.onLoadPathSettings();
       if (!response.applied) throw new Error(response.error || "路径配置读取失败");
       renderPathSettings(response.paths);
-      setPathStatus("目录配置已就绪", "idle");
+      const recognized = await recognizeAddonPath(response.paths.model_dir, false);
+      setPathStatus(
+        recognized
+          ? "检测到旧配置把 R1 附加包当成模型目录；已为你转到安装向导，尚未写入任何文件"
+          : "目录配置已就绪",
+        recognized ? "saved" : "idle",
+      );
     } catch (error) {
       setPathStatus(error instanceof Error ? error.message : "无法读取目录配置", "error");
     }
@@ -413,6 +567,7 @@ export function createSettingsSurface(
     const key = row.dataset.pathKey as PathSettingKey;
     const selected = await options.onPickTarget("directory");
     if (!selected) return;
+    if (key === "model_dir" && await recognizeAddonPath(selected)) return;
     setPathStatus("正在保存目录…", "saving");
     try {
       const response = await options.onSavePathSetting(key, selected);
@@ -458,6 +613,44 @@ export function createSettingsSurface(
     }));
   }
 
+  function getRemoteModelValue(): string {
+    const select = options.root.querySelector<HTMLSelectElement>(".remote-model-name")!;
+    if (select.value !== "__custom__") return select.value.trim();
+    return options.root.querySelector<HTMLInputElement>(".remote-model-custom-name")!.value.trim();
+  }
+
+  function renderRemoteModelOptions(
+    provider: RemoteProviderOption,
+    selectedModel: string,
+  ): void {
+    const models = remoteModelCatalogs.get(provider.id) || provider.models;
+    const select = options.root.querySelector<HTMLSelectElement>(".remote-model-name")!;
+    const customInput = options.root.querySelector<HTMLInputElement>(".remote-model-custom-name")!;
+    const optionsList = models.map((model) => {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = `${model.label} · ${model.id}${model.description ? ` — ${model.description}` : ""}`;
+      return option;
+    });
+    const known = models.some((model) => model.id === selectedModel);
+    if (selectedModel && !known) {
+      const current = document.createElement("option");
+      current.value = selectedModel;
+      current.textContent = `当前自定义 · ${selectedModel}`;
+      optionsList.push(current);
+    }
+    const custom = document.createElement("option");
+    custom.value = "__custom__";
+    custom.textContent = "自定义模型 ID…";
+    optionsList.push(custom);
+    select.replaceChildren(...optionsList);
+    select.value = selectedModel || models[0]?.id || "__custom__";
+    customInput.hidden = select.value !== "__custom__";
+    if (!customInput.hidden && selectedModel) customInput.value = selectedModel;
+    options.root.querySelector<HTMLElement>(".remote-model-catalog-summary")!.textContent =
+      `${provider.label}：已列出 ${models.length} 个兼容模型；也可同步账户目录或自定义模型 ID`;
+  }
+
   function renderRemoteProvider(providerId: string): void {
     if (!modelSettings) return;
     const provider = modelSettings.providers.find((candidate) => candidate.id === providerId)
@@ -472,9 +665,8 @@ export function createSettingsSurface(
     };
     const select = options.root.querySelector<HTMLSelectElement>(".remote-provider")!;
     select.value = provider.id;
-    options.root.querySelector<HTMLInputElement>(".remote-model-name")!.value = profile.model;
+    renderRemoteModelOptions(provider, profile.model);
     options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value = profile.base_url;
-    replaceDataList("#remote-model-options", provider.models.map((model) => model.id));
 
     const keyInput = options.root.querySelector<HTMLInputElement>(".remote-api-key")!;
     keyInput.value = "";
@@ -492,6 +684,7 @@ export function createSettingsSurface(
 
   function renderModelSettings(settings: ModelConnectionSettingsResponse): void {
     modelSettings = settings;
+    modelRouteDrafts = structuredClone(settings.routes);
     const providerSelect = options.root.querySelector<HTMLSelectElement>(".remote-provider")!;
     providerSelect.replaceChildren(...settings.providers.map((provider) => {
       const option = document.createElement("option");
@@ -499,14 +692,195 @@ export function createSettingsSurface(
       option.textContent = provider.label;
       return option;
     }));
-    options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value =
-      settings.local.base_url;
-    options.root.querySelector<HTMLInputElement>(".local-model-name")!.value =
-      settings.local.model;
-    renderRemoteProvider(settings.remote.provider);
-    selectModelSource(settings.source);
+    options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked = settings.share_live_code;
+    activeModelRoute = sourceMode === "code" ? "code" : "live";
+    renderModelRoute(activeModelRoute);
     options.root.querySelector<HTMLElement>(".settings-active-model")!.textContent =
-      `${settings.source === "local" ? "本地" : "远端"} · ${settings.active_model}`;
+      settings.share_live_code
+        ? `Live + Code 共用 · ${settings.routes.live.source === "local" ? "本地" : "云端"}`
+        : "Live / Code 独立路由";
+  }
+
+  function snapshotActiveModelRoute(): void {
+    if (!modelRouteDrafts) return;
+    modelRouteDrafts[activeModelRoute] = {
+      source: activeModelSource,
+      local: {
+        model: options.root.querySelector<HTMLInputElement>(".local-model-name")!.value.trim(),
+        base_url: options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value.trim(),
+      },
+      remote: {
+        provider: options.root.querySelector<HTMLSelectElement>(".remote-provider")!.value,
+        model: getRemoteModelValue(),
+        base_url: options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value.trim(),
+      },
+    };
+  }
+
+  function renderModelRoute(routeName: "live" | "code"): void {
+    if (!modelSettings || !modelRouteDrafts) return;
+    activeModelRoute = routeName;
+    const route = modelRouteDrafts[routeName];
+    options.root.querySelectorAll<HTMLButtonElement>("[data-model-route]").forEach((button) => {
+      const selected = button.dataset.modelRoute === routeName;
+      button.dataset.active = String(selected);
+      button.setAttribute("aria-selected", String(selected));
+    });
+    options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value = route.local.base_url;
+    options.root.querySelector<HTMLInputElement>(".local-model-name")!.value = route.local.model;
+    renderRemoteProvider(route.remote.provider);
+    const provider = modelSettings.providers.find((candidate) => candidate.id === route.remote.provider)
+      || modelSettings.providers[0];
+    if (provider) renderRemoteModelOptions(provider, route.remote.model);
+    options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value = route.remote.base_url;
+    selectModelSource(route.source);
+  }
+
+  function modelInstallValues(): Record<string, unknown> {
+    const source = options.root.querySelector<HTMLSelectElement>(".model-installer-source")!.value;
+    return {
+      source,
+      install_dir: options.root.querySelector<HTMLInputElement>(".model-installer-directory")!.value,
+      addon_path: options.root.querySelector<HTMLInputElement>(".model-addon-path")!.value,
+      gguf_path: options.root.querySelector<HTMLInputElement>(".local-gguf-path")!.value,
+      repo_id: options.root.querySelector<HTMLInputElement>(".hf-repo-id")!.value.trim(),
+      filename: options.root.querySelector<HTMLInputElement>(".hf-filename")!.value.trim(),
+      token: options.root.querySelector<HTMLInputElement>(".hf-token")!.value,
+    };
+  }
+
+  function formatBytes(value = 0): string {
+    if (!Number.isFinite(value) || value <= 0) return "未知";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let size = value;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+    return `${size.toFixed(unit >= 3 ? 2 : 1)} ${units[unit]}`;
+  }
+
+  function setInstallerStatus(message: string, state: "idle" | "saving" | "saved" | "error"): void {
+    const output = options.root.querySelector<HTMLOutputElement>(".model-installer-status")!;
+    output.value = message;
+    output.dataset.state = state;
+  }
+
+  function setInstallerStep(step: "source" | "plan" | "consent" | "progress"): void {
+    const order = ["source", "plan", "consent", "progress"];
+    const activeIndex = order.indexOf(step);
+    options.root.querySelectorAll<HTMLElement>("[data-installer-step]").forEach((item) => {
+      const index = order.indexOf(item.dataset.installerStep || "");
+      item.dataset.active = String(index === activeIndex);
+      item.dataset.complete = String(index < activeIndex);
+    });
+  }
+
+  async function planModelInstall(): Promise<void> {
+    modelInstallPlan = null;
+    options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.disabled = true;
+    setInstallerStep("plan");
+    setInstallerStatus("正在检查文件、空间与模型信息…", "saving");
+    try {
+      const response = await options.onPlanModelInstall(modelInstallValues());
+      if (!response.ok) throw new Error(response.error || "无法生成安装计划");
+      modelInstallPlan = response;
+      if (response.available_files?.length) {
+        replaceDataList("#hf-file-options", response.available_files.map((item) => item.filename));
+        const filename = options.root.querySelector<HTMLInputElement>(".hf-filename")!;
+        if (!filename.value && response.filename) filename.value = response.filename;
+      }
+      const details = response.source === "offline"
+        ? `${response.title}；需写入约 ${formatBytes(response.required_bytes)}；离线校验并安装 Ollama + R1`
+        : response.source === "local_gguf"
+          ? `${response.filename}；导入约 ${formatBytes(response.required_bytes)}${response.runtime_ready === false ? "；该位置缺少 Javis Ollama，请先安装 R1 附加包" : "；可自动适配"}`
+          : `${response.title} / ${response.filename || "请选择 GGUF"}；下载约 ${formatBytes(response.download_bytes)}；许可：${response.license || "未声明"}${response.gated ? "；需要访问授权" : ""}${response.runtime_ready === false ? "；该位置缺少 Javis Ollama，请先安装 R1 附加包" : "；将自动下载、校验并适配"}`;
+      setInstallerStatus(details, "saved");
+      setInstallerStep("consent");
+      const approved = options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.checked;
+      options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.disabled =
+        !approved || (response.source !== "offline" && response.runtime_ready === false);
+    } catch (error) {
+      setInstallerStatus(error instanceof Error ? error.message : "无法生成安装计划", "error");
+    }
+  }
+
+  async function installModel(): Promise<void> {
+    if (modelInstallInProgress) {
+      setInstallerStatus("已有安装任务正在进行，请勿重复提交", "idle");
+      return;
+    }
+    if (!modelInstallPlan) {
+      setInstallerStatus("请先生成并核对安装计划", "error");
+      return;
+    }
+    const approved = options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.checked;
+    if (!approved) {
+      setInstallerStatus("需要勾选用户确认后才能安装", "error");
+      return;
+    }
+    modelInstallInProgress = true;
+    const installButton = options.root.querySelector<HTMLButtonElement>(".model-installer-install")!;
+    const planButton = options.root.querySelector<HTMLButtonElement>(".model-installer-plan-button")!;
+    installButton.disabled = true;
+    planButton.disabled = true;
+    setInstallerStep("progress");
+    const progressPanel = options.root.querySelector<HTMLElement>(".model-installer-progress")!;
+    const progressBar = progressPanel.querySelector<HTMLProgressElement>("progress")!;
+    const progressLabel = progressPanel.querySelector<HTMLElement>("span")!;
+    progressPanel.hidden = false;
+    progressBar.value = 0;
+    progressLabel.textContent = "0%";
+    const startedAt = Date.now();
+    let progressRequestPending = false;
+    const refreshProgress = async (): Promise<void> => {
+      if (progressRequestPending) return;
+      progressRequestPending = true;
+      try {
+        const progress = await options.onGetModelInstallProgress();
+        progressBar.value = progress.percent;
+        progressLabel.textContent = `${Math.round(progress.percent)}% · ${progress.phase}`;
+        if (progress.state === "running") setInstallerStatus(progress.phase, "saving");
+      } catch {
+        // The install request remains authoritative if one progress poll is missed.
+      } finally {
+        progressRequestPending = false;
+      }
+    };
+    const progressTimer = window.setInterval(() => void refreshProgress(), 750);
+    void refreshProgress();
+    const elapsedTimer = window.setInterval(() => {
+      const elapsedMinutes = Math.max(1, Math.floor((Date.now() - startedAt) / 60_000));
+      if (progressBar.value === 0) setInstallerStatus(`安装任务已提交（${elapsedMinutes} 分钟）；正在等待进度…`, "saving");
+    }, 15_000);
+    setInstallerStatus("自动安装已开始；正在读取真实进度…", "saving");
+    try {
+      const response = await options.onInstallModel({
+        ...modelInstallValues(),
+        approved: true,
+        confirmation: "install-local-model",
+      });
+      if (!response.ok) throw new Error(response.error || "模型安装失败");
+      if (response.model) options.root.querySelector<HTMLInputElement>(".local-model-name")!.value = response.model;
+      if (response.base_url) options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value = response.base_url;
+      if (modelRouteDrafts && response.model && response.base_url) {
+        for (const route of Object.values(modelRouteDrafts)) {
+          route.local = { model: response.model, base_url: response.base_url };
+        }
+        await saveModelSettings();
+      }
+      modelInstallPlan = null;
+      progressBar.value = 100;
+      progressLabel.textContent = "100% · 安装与自动适配已完成";
+      setInstallerStatus(response.message || "安装完成；重启 Javis 后启用", "saved");
+    } catch (error) {
+      setInstallerStatus(error instanceof Error ? error.message : "模型安装失败", "error");
+    } finally {
+      window.clearInterval(progressTimer);
+      window.clearInterval(elapsedTimer);
+      modelInstallInProgress = false;
+      planButton.disabled = false;
+      installButton.disabled = !modelInstallPlan
+        || !options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.checked;
+    }
   }
 
   async function refreshLocalModels(announce = true): Promise<void> {
@@ -516,10 +890,13 @@ export function createSettingsSurface(
       const response = await options.onRefreshLocalModels(baseUrl);
       replaceDataList("#local-model-options", response.models);
       const channel = options.root.querySelector<HTMLElement>('[data-model-channel="local"]')!;
-      channel.dataset.state = response.connected ? "pass" : "fail";
+      channel.dataset.state = response.connected ? "pass" : response.state === "not_installed" ? "idle" : "fail";
       channel.querySelector("small")!.textContent = response.message;
       if (announce) {
-        setModelStatus(response.message, response.connected ? "saved" : "error");
+        setModelStatus(
+          response.message,
+          response.connected ? "saved" : response.state === "not_installed" ? "idle" : "error",
+        );
       }
     } catch (error) {
       if (announce) {
@@ -531,6 +908,32 @@ export function createSettingsSurface(
     }
   }
 
+  async function refreshRemoteModels(announce = true): Promise<void> {
+    if (!modelSettings) return;
+    const providerId = options.root.querySelector<HTMLSelectElement>(".remote-provider")!.value;
+    const provider = modelSettings.providers.find((candidate) => candidate.id === providerId);
+    if (!provider) return;
+    const selectedModel = getRemoteModelValue();
+    const baseUrl = options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value;
+    const apiKey = options.root.querySelector<HTMLInputElement>(".remote-api-key")!.value.trim();
+    if (announce) setModelStatus(`正在同步 ${provider.label} 的账户模型目录…`, "saving");
+    try {
+      const response = await options.onRefreshRemoteModels(provider.id, baseUrl, apiKey);
+      if (response.models.length) remoteModelCatalogs.set(provider.id, response.models);
+      renderRemoteModelOptions(provider, selectedModel);
+      options.root.querySelector<HTMLElement>(".remote-model-catalog-summary")!.textContent = response.message;
+      const channel = options.root.querySelector<HTMLElement>('[data-model-channel="remote"]')!;
+      channel.dataset.state = response.connected ? "pass" : "idle";
+      channel.querySelector("small")!.textContent = response.message;
+      if (announce) setModelStatus(response.message, response.connected ? "saved" : "idle");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法同步供应商模型";
+      options.root.querySelector<HTMLElement>(".remote-model-catalog-summary")!.textContent =
+        `${message}；已保留内置兼容模型目录`;
+      if (announce) setModelStatus(message, "error");
+    }
+  }
+
   async function loadModelSettings(): Promise<void> {
     setModelStatus("正在读取模型配置…", "saving");
     try {
@@ -539,6 +942,7 @@ export function createSettingsSurface(
       renderModelSettings(response);
       setModelStatus("模型配置已就绪", "idle");
       void refreshLocalModels(false);
+      void refreshRemoteModels(false);
     } catch (error) {
       setModelStatus(
         error instanceof Error ? error.message : "无法读取模型配置",
@@ -548,13 +952,20 @@ export function createSettingsSurface(
   }
 
   function collectModelSettings(): Record<string, unknown> {
+    snapshotActiveModelRoute();
     const apiKey = options.root.querySelector<HTMLInputElement>(".remote-api-key")!.value.trim();
     const remote: Record<string, unknown> = {
       provider: options.root.querySelector<HTMLSelectElement>(".remote-provider")!.value,
-      model: options.root.querySelector<HTMLInputElement>(".remote-model-name")!.value.trim(),
+      model: getRemoteModelValue(),
       base_url: options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value.trim(),
     };
     if (apiKey) remote.api_key = apiKey;
+    if (modelRouteDrafts) {
+      modelRouteDrafts[activeModelRoute].remote = {
+        ...(modelRouteDrafts[activeModelRoute].remote || {}),
+        ...remote,
+      } as ModelConnectionSettingsResponse["routes"]["live"]["remote"];
+    }
     return {
       source: activeModelSource,
       local: {
@@ -562,6 +973,8 @@ export function createSettingsSurface(
         base_url: options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value.trim(),
       },
       remote,
+      share_live_code: options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked,
+      routes: modelRouteDrafts,
     };
   }
 
@@ -571,7 +984,7 @@ export function createSettingsSurface(
       const response = await options.onSaveModelSettings(collectModelSettings());
       if (!response.applied) throw new Error(response.error || "模型配置保存失败");
       renderModelSettings(response);
-      setModelStatus("已保存并应用到 Live", "saved");
+      setModelStatus("Live 与 Code 模型路由已保存并立即生效", "saved");
       return true;
     } catch (error) {
       setModelStatus(
@@ -595,22 +1008,36 @@ export function createSettingsSurface(
 
   async function testModelConnections(): Promise<void> {
     if (!await saveModelSettings()) return;
-    setModelStatus("正在连接本地与远端模型…", "saving");
+    snapshotActiveModelRoute();
+    const shared = options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked;
+    const routes = modelRouteDrafts
+      ? (shared ? [modelRouteDrafts.live] : [modelRouteDrafts.live, modelRouteDrafts.code])
+      : [];
+    const localEnabled = routes.some((route) => route.source === "local");
+    const remoteEnabled = routes.some((route) => route.source === "remote");
+    setModelStatus("正在检测当前启用的模型连接…", "saving");
     try {
       const report = await options.onTestModelConnections();
-      renderModelConnectionCheck(
-        "local",
-        report.checks.find((check) => check.id === "local_model_connection"),
-      );
-      renderModelConnectionCheck(
-        "remote",
-        report.checks.find((check) => check.id === "remote_model_connection"),
-      );
+      const localCheck = report.checks.find((check) => check.id === "local_model_connection");
+      const remoteCheck = report.checks.find((check) => check.id === "remote_model_connection");
+      if (localEnabled) renderModelConnectionCheck("local", localCheck);
+      else {
+        const channel = options.root.querySelector<HTMLElement>('[data-model-channel="local"]')!;
+        channel.dataset.state = "idle";
+        channel.querySelector("small")!.textContent = "当前未启用（不影响云端模式）";
+      }
+      if (remoteEnabled) renderModelConnectionCheck("remote", remoteCheck);
+      else {
+        const channel = options.root.querySelector<HTMLElement>('[data-model-channel="remote"]')!;
+        channel.dataset.state = "idle";
+        channel.querySelector("small")!.textContent = "当前未启用（不影响本地模式）";
+      }
       const hasFailure = report.checks.some((check) =>
-        ["local_model_connection", "remote_model_connection"].includes(check.id)
+        ((check.id === "local_model_connection" && localEnabled)
+          || (check.id === "remote_model_connection" && remoteEnabled))
         && check.status === "fail"
       );
-      setModelStatus(report.summary, hasFailure ? "error" : "saved");
+      setModelStatus(hasFailure ? report.summary : "当前启用的模型连接已检测", hasFailure ? "error" : "saved");
     } catch (error) {
       setModelStatus(
         error instanceof Error ? error.message : "模型连接检测失败",
@@ -755,10 +1182,31 @@ export function createSettingsSurface(
       setModelStatus("来源已选择，点击“保存并应用”后生效", "idle");
     });
   });
+  options.root.querySelectorAll<HTMLButtonElement>("[data-model-route]").forEach((button) => {
+    button.addEventListener("click", () => {
+      snapshotActiveModelRoute();
+      renderModelRoute(button.dataset.modelRoute === "code" ? "code" : "live");
+      setModelStatus(`正在编辑 ${button.dataset.modelRoute === "code" ? "Code" : "Live"} 路由`, "idle");
+    });
+  });
+  options.root.querySelector<HTMLInputElement>(".model-share-routes")!.addEventListener("change", (event) => {
+    const shared = (event.currentTarget as HTMLInputElement).checked;
+    setModelStatus(shared ? "保存后 Code 将使用 Live 的同一配置" : "保存后 Live 与 Code 可独立配置", "idle");
+  });
   options.root.querySelector<HTMLSelectElement>(".remote-provider")!.addEventListener("change", (event) => {
     renderRemoteProvider((event.currentTarget as HTMLSelectElement).value);
     setModelStatus("已载入该提供商的独立配置", "idle");
+    void refreshRemoteModels(false);
   });
+  options.root.querySelector<HTMLSelectElement>(".remote-model-name")!.addEventListener("change", (event) => {
+    const customInput = options.root.querySelector<HTMLInputElement>(".remote-model-custom-name")!;
+    customInput.hidden = (event.currentTarget as HTMLSelectElement).value !== "__custom__";
+    if (!customInput.hidden) customInput.focus();
+  });
+  options.root.querySelector<HTMLButtonElement>(".remote-model-refresh")!.addEventListener(
+    "click",
+    () => void refreshRemoteModels(),
+  );
   options.root.querySelector<HTMLButtonElement>(".local-model-refresh")!.addEventListener(
     "click",
     () => void refreshLocalModels(),
@@ -771,6 +1219,58 @@ export function createSettingsSurface(
     "click",
     () => void testModelConnections(),
   );
+  options.root.querySelector<HTMLButtonElement>(".model-open-installer")!.addEventListener("click", () => {
+    const panel = options.root.querySelector<HTMLElement>(".model-installer-panel")!;
+    panel.hidden = !panel.hidden;
+  });
+  options.root.querySelector<HTMLSelectElement>(".model-installer-source")!.addEventListener("change", (event) => {
+    const source = (event.currentTarget as HTMLSelectElement).value;
+    options.root.querySelectorAll<HTMLElement>("[data-installer-source]").forEach((panel) => {
+      panel.hidden = panel.dataset.installerSource !== source;
+    });
+    modelInstallPlan = null;
+    options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.disabled = true;
+    setInstallerStatus("来源已更改，请重新生成安装计划", "idle");
+    setInstallerStep("source");
+  });
+  options.root.querySelector<HTMLButtonElement>(".model-installer-pick-directory")!.addEventListener("click", async () => {
+    const selected = await options.onPickTarget("directory");
+    if (selected) options.root.querySelector<HTMLInputElement>(".model-installer-directory")!.value = selected;
+  });
+  options.root.querySelector<HTMLButtonElement>(".model-addon-browse")!.addEventListener("click", async () => {
+    const selected = await options.onPickTarget("directory");
+    if (!selected) return;
+    if (!await recognizeAddonPath(selected, false)) {
+      setInstallerStatus("所选目录中没有有效的 Javis-R1-8B-Addon.manifest.json", "error");
+    }
+  });
+  options.root.querySelector<HTMLButtonElement>(".local-gguf-browse")!.addEventListener("click", async () => {
+    const selected = await options.onPickTarget("file");
+    if (selected) {
+      options.root.querySelector<HTMLInputElement>(".local-gguf-path")!.value = selected;
+      setInstallerStatus("已选择本地 GGUF；请选择已安装 Javis Ollama 的位置并生成计划", "idle");
+    }
+  });
+  options.root.querySelector<HTMLButtonElement>(".hf-search")!.addEventListener("click", async () => {
+    setInstallerStatus("正在搜索 Hugging Face GGUF 模型…", "saving");
+    try {
+      const response = await options.onSearchHuggingFace(options.root.querySelector<HTMLInputElement>(".hf-search-query")!.value);
+      if (!response.ok) throw new Error(response.error || "搜索失败");
+      replaceDataList("#hf-repo-options", response.models.map((item) => item.repo_id));
+      if (response.models.length) options.root.querySelector<HTMLInputElement>(".hf-repo-id")!.value = response.models[0].repo_id;
+      setInstallerStatus(`找到 ${response.models.length} 个 GGUF 模型仓库；请选择后生成安装计划`, "saved");
+    } catch (error) {
+      setInstallerStatus(error instanceof Error ? error.message : "搜索失败", "error");
+    }
+  });
+  options.root.querySelector<HTMLButtonElement>(".model-installer-plan-button")!.addEventListener("click", () => void planModelInstall());
+  options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.addEventListener("change", (event) => {
+    options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.disabled =
+      !(event.currentTarget as HTMLInputElement).checked
+      || !modelInstallPlan
+      || (modelInstallPlan.source !== "offline" && modelInstallPlan.runtime_ready === false);
+  });
+  options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.addEventListener("click", () => void installModel());
   options.root.querySelectorAll<HTMLElement>("[data-path-key]").forEach((row) => {
     row.querySelector<HTMLButtonElement>(".settings-path-select")!.addEventListener(
       "click",

@@ -1,13 +1,15 @@
 param(
     [switch]$SkipBundle,
     [switch]$SkipRuntime,
+    [switch]$SkipDesktopBuild,
+    [switch]$SkipAddonBuild,
     [switch]$SkipInstallVerification
 )
 
 $ErrorActionPreference = "Stop"
 $JavisRoot = Split-Path -Parent $PSScriptRoot
 $JavisApp = Join-Path $JavisRoot "app"
-$JavisPython = Join-Path $JavisRoot "venv\Scripts\python.exe"
+$JavisPython = Join-Path $JavisRoot "tools\python-runtime-3.11\python.exe"
 $JavisNpm = Join-Path $JavisRoot "tools\nodejs\npm.cmd"
 $JavisCargoBin = Join-Path $JavisRoot "tools\rust\cargo\bin"
 $JavisNodeBin = Join-Path $JavisRoot "tools\nodejs"
@@ -34,13 +36,62 @@ $JavisWebView2LoaderSource = if ($JavisWebView2Crate) {
 $WasapiSource = Join-Path $JavisRoot "voice\native\WASAPILoopbackRecorder.cs"
 $WasapiHelper = Join-Path $JavisRoot "voice\native\javis-wasapi-loopback.exe"
 $CSharpCompiler = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-$JavisInstaller = Join-Path $JavisTargetRoot "bundle\nsis\Javis_3.0.0_x64-setup.exe"
-$ArtifactDir = Join-Path $JavisRoot "artifacts\Javis-v3.0.0-test"
-$DesktopDelivery = Join-Path ([Environment]::GetFolderPath("Desktop")) "Javis-v3.0.0-Verified"
-$DesktopZip = Join-Path $DesktopDelivery "Javis-v3.0.0-Windows-x64.zip"
-$DesktopZipHash = Join-Path $DesktopDelivery "ZIP-SHA256.txt"
+$InnerInstaller = Join-Path $JavisTargetRoot "bundle\nsis\Javis_3.0.0_x64-setup.exe"
+$OllamaRuntime = Join-Path $JavisRoot "tools\ollama-runtime"
+$PythonRuntimeRoot = Join-Path $JavisRoot "tools\python-runtime-3.11"
+$SitePackagesRoot = Join-Path $JavisRoot "venv\Lib\site-packages"
+$SttModelRoot = Join-Path $JavisRoot "models\faster-whisper-base"
+$ModelRoot = Join-Path $JavisRoot "ollama_models\models"
 
-foreach ($required in @($JavisPython, $JavisNpm, $JavisCargo, $JavisRustc, $JavisGnuLinker, $CSharpCompiler, $WasapiSource, $JavisWebView2LoaderSource)) {
+$Layout = (& $JavisPython (Join-Path $JavisRoot "scripts\javis_release_layout.py") `
+    --root $JavisRoot `
+    --test-drive "D:") | ConvertFrom-Json
+$BuildTemp = $Layout.build_temp
+$ArtifactDir = $Layout.artifact_dir
+$MainInstaller = $Layout.package_output
+$MainInstallerName = "Javis-v3.0.0-Setup.exe"
+if ((Split-Path -Leaf $MainInstaller) -ne $MainInstallerName) {
+    throw "Unexpected main installer name: $MainInstaller"
+}
+$DeliveryInstaller = $Layout.delivery_installer
+$DeliveryDir = $Layout.delivery_dir
+$InstallTestRoot = $Layout.install_test_root
+$InstallTestData = $Layout.install_test_data
+$PayloadWork = Join-Path $BuildTemp "payloads"
+
+if ([IO.Path]::GetFullPath($JavisRoot).Substring(0, 2).ToUpperInvariant() -ne "G:") {
+    throw "Javis development and build root must stay on G:."
+}
+foreach ($path in @($BuildTemp, $ArtifactDir, $MainInstaller, $PayloadWork)) {
+    if ([IO.Path]::GetFullPath($path).Substring(0, 2).ToUpperInvariant() -ne "G:") {
+        throw "Build path escaped G:: $path"
+    }
+}
+
+New-Item -ItemType Directory -Path $BuildTemp -Force | Out-Null
+$env:TEMP = Join-Path $BuildTemp "temp"
+$env:TMP = $env:TEMP
+$env:PIP_CACHE_DIR = Join-Path $JavisRoot ".cache\pip"
+$env:PNPM_HOME = Join-Path $JavisRoot ".pnpm-store"
+$env:CARGO_HOME = Join-Path $JavisRoot "tools\rust\cargo"
+$env:RUSTUP_HOME = Join-Path $JavisRoot "tools\rust\rustup"
+$env:CARGO_TARGET_DIR = Join-Path $JavisApp "src-tauri\target"
+$env:PYTHONPATH = $SitePackagesRoot
+New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+
+foreach ($required in @(
+    $JavisPython,
+    $JavisNpm,
+    $JavisCargo,
+    $JavisRustc,
+    $JavisGnuLinker,
+    $CSharpCompiler,
+    $WasapiSource,
+    $JavisWebView2LoaderSource,
+    (Join-Path $OllamaRuntime "ollama.exe"),
+    (Join-Path $PythonRuntimeRoot "python.exe"),
+    (Join-Path $SttModelRoot "model.bin")
+)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required local build dependency is missing: $required"
     }
@@ -56,15 +107,24 @@ if ($LASTEXITCODE -ne 0) {
     throw "Strict App build preflight failed."
 }
 
+& $JavisPython (Join-Path $JavisRoot "scripts\javis_full_installer.py") `
+    --model-root $ModelRoot `
+    --model "deepseek-r1:8b" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled deepseek-r1:8b validation failed."
+}
+
 if (-not $SkipRuntime) {
     & $JavisPython (Join-Path $JavisRoot "scripts\stage_javis_runtime.py") `
         --root $JavisRoot `
+        --python-root $PythonRuntimeRoot `
+        --site-packages $SitePackagesRoot `
+        --stt-model-root $SttModelRoot `
         --output $JavisRuntimeArchive
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged Python runtime staging failed."
     }
 }
-
 if (-not (Test-Path -LiteralPath $JavisRuntimeArchive)) {
     throw "Runtime archive is missing: $JavisRuntimeArchive"
 }
@@ -77,46 +137,69 @@ if ($WebView2LoaderSourceHash -ne $WebView2LoaderResourceHash) {
 }
 
 $env:PATH = "$JavisNodeBin;$JavisRustToolchainBin;$JavisMinGwBin;$JavisCargoBin;$env:PATH"
-$env:CARGO_HOME = Join-Path $JavisRoot "tools\rust\cargo"
-$env:RUSTUP_HOME = Join-Path $JavisRoot "tools\rust\rustup"
 $env:CARGO = $JavisCargo
 $env:RUSTC = $JavisRustc
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = $JavisGnuLinker
 $env:CC_x86_64_pc_windows_gnu = $JavisGnuLinker
 
-Push-Location $JavisApp
-try {
-    & $JavisNpm run build
-    if ($LASTEXITCODE -ne 0) {
-        throw "Frontend build failed."
-    }
-    if (-not $SkipBundle) {
-        & $JavisNpm run tauri -- build
+if (-not $SkipDesktopBuild) {
+    Push-Location $JavisApp
+    try {
+        & $JavisNpm run build
         if ($LASTEXITCODE -ne 0) {
-            throw "Tauri bundle failed."
+            throw "Frontend build failed."
+        }
+        if (-not $SkipBundle) {
+            & $JavisNpm run tauri -- build
+            if ($LASTEXITCODE -ne 0) {
+                throw "Tauri bundle failed."
+            }
         }
     }
-}
-finally {
-    Pop-Location
+    finally {
+        Pop-Location
+    }
 }
 
 if ($SkipBundle) {
-    Write-Host "Javis App v3.0 frontend and runtime build complete."
+    Write-Host "Javis App frontend and Python runtime build complete on G:."
     exit 0
 }
-if (-not (Test-Path -LiteralPath $JavisInstaller)) {
-    throw "Build completed without the v3 NSIS installer."
+if (-not (Test-Path -LiteralPath $InnerInstaller)) {
+    throw "Build completed without the inner v3 NSIS installer."
 }
 
-if (Test-Path -LiteralPath $ArtifactDir) {
+$ResolvedArtifact = [IO.Path]::GetFullPath($ArtifactDir)
+$ResolvedRoot = [IO.Path]::GetFullPath($JavisRoot).TrimEnd('\')
+if (-not $ResolvedArtifact.StartsWith($ResolvedRoot + "\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to recreate artifact directory outside G:\Javis: $ResolvedArtifact"
+}
+if ((Test-Path -LiteralPath $ArtifactDir) -and -not $SkipAddonBuild) {
     Remove-Item -LiteralPath $ArtifactDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $ArtifactDir -Force | Out-Null
-$ArtifactInstaller = Join-Path $ArtifactDir (Split-Path -Leaf $JavisInstaller)
-Copy-Item -LiteralPath $JavisInstaller -Destination $ArtifactInstaller -Force
-Copy-Item -LiteralPath (Join-Path $JavisResources "javis-runtime-manifest.json") -Destination $ArtifactDir -Force
-Copy-Item -LiteralPath (Join-Path $JavisRoot "app\release.manifest.json") -Destination $ArtifactDir -Force
+New-Item -ItemType Directory -Path $PayloadWork -Force | Out-Null
+
+Copy-Item -LiteralPath $InnerInstaller -Destination $MainInstaller -Force
+if ((Get-Item -LiteralPath $MainInstaller).Length -ge 4GB) {
+    throw "Main installer exceeds the Windows executable size boundary."
+}
+if (-not ("Javis.NativeBinary" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace Javis {
+    public static class NativeBinary {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool GetBinaryType(string path, out uint binaryType);
+    }
+}
+"@
+}
+$BinaryType = [uint32]0
+if (-not [Javis.NativeBinary]::GetBinaryType($MainInstaller, [ref]$BinaryType) -or $BinaryType -notin @(0, 6)) {
+    throw "Windows does not recognize the NSIS launcher as a loadable executable."
+}
 
 $RuntimeReport = Join-Path $ArtifactDir "RUNTIME-TEST-REPORT.md"
 & $JavisPython (Join-Path $JavisRoot "scripts\verify_javis_release.py") `
@@ -128,15 +211,48 @@ if ($LASTEXITCODE -ne 0) {
     throw "Packaged runtime verification failed."
 }
 
+if (-not $SkipAddonBuild) {
+    & $JavisPython (Join-Path $JavisRoot "scripts\javis_full_installer.py") `
+        --build-addon `
+        --model-root $ModelRoot `
+        --model "deepseek-r1:8b" `
+        --ollama-root $OllamaRuntime `
+        --output-dir $ArtifactDir `
+        --work-dir $PayloadWork | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Optional R1 add-on assembly failed."
+    }
+}
+
+$AddonDir = Join-Path $ArtifactDir "Javis-R1-8B-Addon"
+$AddonManifest = Join-Path $AddonDir "Javis-R1-8B-Addon.manifest.json"
+$AddonReport = Join-Path $ArtifactDir "Javis-R1-8B-Addon.report.json"
+foreach ($required in @($MainInstaller, $AddonManifest, $AddonReport)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Release artifact is missing: $required"
+    }
+}
 $InstallReport = Join-Path $ArtifactDir "INSTALL-TEST-REPORT.md"
 if (-not $SkipInstallVerification) {
+    $ResolvedDelivery = [IO.Path]::GetFullPath($DeliveryDir).TrimEnd('\')
+    if (-not $ResolvedDelivery.Equals("D:\Javis-v3.0.0-User-Test", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to recreate unexpected D-drive delivery directory: $ResolvedDelivery"
+    }
+    if (Test-Path -LiteralPath $ResolvedDelivery) {
+        Remove-Item -LiteralPath $ResolvedDelivery -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $ResolvedDelivery -Force | Out-Null
+    Copy-Item -LiteralPath $MainInstaller -Destination $DeliveryInstaller -Force
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $JavisRoot "scripts\verify_javis_v3_installer.ps1") `
-        -Installer $ArtifactInstaller `
+        -Installer $DeliveryInstaller `
         -Report $InstallReport `
-        -Manifest (Join-Path $JavisResources "javis-runtime-manifest.json")
+        -Manifest (Join-Path $JavisResources "javis-runtime-manifest.json") `
+        -SourceRoot $JavisRoot `
+        -InstallRoot $InstallTestRoot `
+        -DataRoot $InstallTestData
     if ($LASTEXITCODE -ne 0) {
-        throw "Installed App verification failed."
+        throw "Independent D-drive installation verification failed."
     }
 }
 else {
@@ -145,43 +261,23 @@ else {
         ""
         "Overall: UNTESTED"
         ""
-        "Installer verification was explicitly skipped."
+        "D-drive independent installation verification was explicitly skipped."
     ) | Set-Content -LiteralPath $InstallReport -Encoding utf8
 }
 
-$InstallerHash = (Get-FileHash -LiteralPath $ArtifactInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-$RuntimeHash = (Get-FileHash -LiteralPath $JavisRuntimeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 $HashFile = Join-Path $ArtifactDir "SHA256SUMS.txt"
-$DeliveryFiles = @(
-    $ArtifactInstaller,
-    (Join-Path $ArtifactDir "javis-runtime-manifest.json"),
-    (Join-Path $ArtifactDir "release.manifest.json"),
-    $RuntimeReport,
-    $InstallReport
-)
-$HashLines = foreach ($File in $DeliveryFiles) {
-    $Hash = (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$Hash  $(Split-Path -Leaf $File)"
-}
-$HashLines += "$RuntimeHash  bundled:javis-runtime.zip"
-$HashLines | Set-Content -LiteralPath $HashFile -Encoding ascii
-
-New-Item -ItemType Directory -Path $DesktopDelivery -Force | Out-Null
-if (Test-Path -LiteralPath $DesktopZip) {
-    Remove-Item -LiteralPath $DesktopZip -Force
-}
-Compress-Archive -Path (Join-Path $ArtifactDir "*") -DestinationPath $DesktopZip -CompressionLevel Optimal
-if (-not (Test-Path -LiteralPath $DesktopZip)) {
-    throw "Desktop delivery ZIP was not created."
-}
-$DesktopZipSha256 = (Get-FileHash -LiteralPath $DesktopZip -Algorithm SHA256).Hash.ToLowerInvariant()
-"$DesktopZipSha256  $(Split-Path -Leaf $DesktopZip)" | Set-Content -LiteralPath $DesktopZipHash -Encoding ascii
-foreach ($DeliveryReport in @("INSTALL-TEST-REPORT.md", "RUNTIME-TEST-REPORT.md", "SHA256SUMS.txt")) {
-    Copy-Item -LiteralPath (Join-Path $ArtifactDir $DeliveryReport) -Destination $DesktopDelivery -Force
+& $JavisPython (Join-Path $JavisRoot "scripts\finalize_javis_release.py") `
+    --artifact-dir $ArtifactDir `
+    --runtime-manifest (Join-Path $JavisResources "javis-runtime-manifest.json") `
+    --release-manifest (Join-Path $JavisRoot "app\release.manifest.json") | Out-Null
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $HashFile)) {
+    throw "Final release hash and manifest validation failed."
 }
 
-Write-Host "Javis App v3.0 build complete."
-Write-Host "Installer: $ArtifactInstaller"
+Write-Host "Javis v3.0 main installer and optional R1 add-on build complete."
+Write-Host "G-drive main installer: $MainInstaller"
+Write-Host "Optional R1 add-on: $AddonDir"
 Write-Host "Checksums: $HashFile"
-Write-Host "Desktop ZIP: $DesktopZip"
-Write-Host "Desktop ZIP checksum: $DesktopZipHash"
+if (-not $SkipInstallVerification) {
+    Write-Host "D-drive verified installer: $DeliveryInstaller"
+}

@@ -2,13 +2,13 @@
   "schema_version": 1,
   "product": "Javis",
   "version": "3.0.0",
-  "created_at": "2026-08-01T13:15:29.150634+00:00",
+  "created_at": "2026-08-05T11:52:36.616209+00:00",
   "archive": {
     "name": "javis-runtime.zip",
-    "sha256": "16681ea731f853737e68d12d366250922e6c959dc52626f5d51b148814bb8696",
-    "files": 26910,
-    "uncompressed_bytes": 2065097054,
-    "compressed_bytes": 1020254580
+    "sha256": "eca59dca7856614cba1cca3b1045805a4365b2fe3e2c86f4d78d42fda402abde",
+    "files": 26963,
+    "uncompressed_bytes": 2065160834,
+    "compressed_bytes": 1020290437
   },
   "backend": {
     "complete_source": true,
@@ -41,7 +41,7 @@
     ]
   },
   "python": {
-    "source": "C:\\Users\\34247\\AppData\\Roaming\\uv\\python\\cpython-3.11.15-windows-x86_64-none",
+    "source": "G:\\Javis\\tools\\python-runtime-3.11",
     "site_packages": "G:\\Javis\\venv\\Lib\\site-packages",
     "optional_excludes": [
       "torch",
@@ -53,7 +53,7 @@
     ]
   },
   "models": {
-    "faster_whisper_base": "C:\\Users\\34247\\.cache\\huggingface\\hub\\models--Systran--faster-whisper-base\\snapshots\\ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+    "faster_whisper_base": "G:\\Javis\\models\\faster-whisper-base",
     "network_downloads": false
   },
   "systems": [
@@ -65,8 +65,9 @@
   ],
   "external_components": [
     "deepseek_api",
+    "cuda_training_stack",
     "ollama_models",
-    "cuda_training_stack"
+    "ollama_portable_runtime"
   ],
   "persistent_paths": [
     "app/brain_data",

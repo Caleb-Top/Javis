@@ -82,6 +82,31 @@ test("continuous native voice stays open across turns and barges in before final
   assert.equal(capture.isContinuous(), false);
 });
 
+test("native stream connection errors are reported without escaping the Live action", async () => {
+  const socket = new FakeVoiceSocket();
+  const errors: string[] = [];
+  const client = {
+    sessionId: () => "session-error",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: (message) => { errors.push(message); },
+  });
+
+  const started = capture.startContinuous();
+  socket.onerror?.();
+
+  await assert.rejects(started, /native audio stream connection failed/);
+  assert.deepEqual(errors, ["语音服务尚未就绪，正在等待本地运行时。"]);
+
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(main, /const toggleVoice[\s\S]*?try \{[\s\S]*?voiceCapture\.toggle\(\)[\s\S]*?catch/);
+});
+
 test("the App sends only final transcripts and resumes listening after request terminals", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 

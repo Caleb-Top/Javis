@@ -10,8 +10,10 @@ from typing import Any
 
 try:
     from scripts.app_package_manifest import build_app_package_manifest
+    from scripts.javis_full_installer import collect_ollama_model
 except ModuleNotFoundError:
     from app_package_manifest import build_app_package_manifest
+    from javis_full_installer import collect_ollama_model
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,14 +63,26 @@ def _package_boundary(root: Path) -> tuple[dict[str, Any], bool]:
     manifest = build_app_package_manifest(root)
     exclude = set(manifest.get("exclude", []))
     external = set(manifest.get("external", []))
+    bundled = set(manifest.get("bundled_release_components", []))
+    optional = set(manifest.get("optional_addon_components", []))
     included = set(manifest.get("include", []))
     safe = (
         {"venv", "Lib", "python-embed", ".git", "logs"}.issubset(exclude)
-        and {"ollama_models", "data", "workspace", "memory/*.sqlite"}.issubset(external)
+        and {"data", "workspace", "memory/*.sqlite"}.issubset(external)
+        and "ollama_models" not in bundled
+        and "ollama_models" in optional
         and {"main.py", "blueprint", "core", "control", "memory", "tools"}.issubset(included)
         and "start.py" not in included
     )
     return manifest, safe
+
+
+def _bundled_r1_available(root: Path) -> bool:
+    try:
+        report = collect_ollama_model(root / "ollama_models" / "models", "deepseek-r1:8b")
+        return bool(report["files"]) and report["bytes"] > 0
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return False
 
 
 def collect_build_preflight(root: Path = ROOT) -> dict[str, Any]:
@@ -91,12 +105,18 @@ def collect_build_preflight(root: Path = ROOT) -> dict[str, Any]:
         "bundled_node": _tool_exists(root, "tools/nodejs/node.exe", "node"),
         "cargo": _tool_exists(root, "tools/rust/cargo/bin/cargo.exe", "cargo"),
         "rustc": _tool_exists(root, "tools/rust/cargo/bin/rustc.exe", "rustc"),
+        "optional_ollama_runtime": (root / "tools" / "ollama-runtime" / "ollama.exe").is_file(),
+        "optional_r1_model": _bundled_r1_available(root),
+        "bundled_python_runtime": (root / "tools" / "python-runtime-3.11" / "python.exe").is_file(),
+        "bundled_stt_model": (root / "models" / "faster-whisper-base" / "model.bin").is_file(),
         "frontend_dependencies": (
             (app / "node_modules").is_dir()
             and (app / "node_modules" / ".bin" / "tsc.cmd").is_file()
             and (app / "node_modules" / ".bin" / "vite.cmd").is_file()
         ),
         "tauri_crate_cached": _tauri_crate_cached(root),
+        "tauri_local_tools_enabled": bool(bundle.get("useLocalToolsDir")) if isinstance(bundle, dict) else False,
+        "tauri_local_nsis_cached": (tauri_root / "target" / ".tauri" / "NSIS" / "makensis.exe").is_file(),
         "bundle_active": bool(bundle.get("active")) if isinstance(bundle, dict) else False,
         "bundle_targets": bool(bundle.get("targets")) if isinstance(bundle, dict) else False,
         "bundle_icons": bool(icon_files) and all(path.is_file() for path in icon_files),
@@ -111,8 +131,14 @@ def collect_build_preflight(root: Path = ROOT) -> dict[str, Any]:
         ("node-runtime-missing", "bundled_node"),
         ("cargo-missing", "cargo"),
         ("rustc-missing", "rustc"),
+        ("optional-ollama-runtime-missing", "optional_ollama_runtime"),
+        ("optional-r1-model-missing", "optional_r1_model"),
+        ("bundled-python-runtime-missing", "bundled_python_runtime"),
+        ("bundled-stt-model-missing", "bundled_stt_model"),
         ("frontend-dependencies-missing", "frontend_dependencies"),
         ("tauri-crate-cache-missing", "tauri_crate_cached"),
+        ("tauri-local-tools-disabled", "tauri_local_tools_enabled"),
+        ("tauri-local-nsis-cache-missing", "tauri_local_nsis_cached"),
         ("bundle-disabled", "bundle_active"),
         ("bundle-target-missing", "bundle_targets"),
         ("bundle-icon-missing", "bundle_icons"),

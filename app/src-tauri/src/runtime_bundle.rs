@@ -2,9 +2,10 @@ use std::{
     env,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 use tauri::{AppHandle, Manager};
+
+use crate::process_command::hidden_command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ARCHIVE_NAME: &str = "javis-runtime.zip";
@@ -59,7 +60,7 @@ pub fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     remove_generated_dir(&incoming, &data_root)?;
     fs::create_dir_all(&incoming).map_err(|error| error.to_string())?;
 
-    let output = Command::new("tar.exe")
+    let output = hidden_command("tar.exe")
         .args(["-m", "-xf"])
         .arg(&archive)
         .arg("-C")
@@ -124,7 +125,7 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
   Where-Object { $_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath) -eq $expected) } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }
 "#;
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("JAVIS_RUNTIME_ROOT", runtime)
         .output()
@@ -153,7 +154,7 @@ fn verify_checksum(archive: &Path, checksum_file: &Path) -> Result<(), String> {
     if expected.len() != 64 {
         return Err("invalid packaged runtime checksum".to_string());
     }
-    let output = Command::new("certutil.exe")
+    let output = hidden_command("certutil.exe")
         .args(["-hashfile"])
         .arg(archive)
         .arg("SHA256")
@@ -207,7 +208,7 @@ fn validate_runtime(root: &Path) -> Result<(), String> {
 fn run_import_probe(root: &Path) -> Result<(), String> {
     let python = root.join("python").join("python.exe");
     let app_root = root.join("app");
-    let output = Command::new(&python)
+    let output = hidden_command(&python)
         .args([
             "-c",
             "import fastapi,uvicorn,httpx,faster_whisper,pytesseract,edge_tts,av,ctranslate2,win32com.client,pyaudio;from core.agent import Agent;from voice.native_capture import get_diagnostics;print('JAVIS_RUNTIME_OK')",

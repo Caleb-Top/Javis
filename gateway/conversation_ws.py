@@ -156,6 +156,15 @@ class ConversationWebSocketGateway:
         )
 
         async def runner(active_request, token):
+            engine = getattr(self.runtime, "engine", None)
+            use_route = getattr(engine, "use_route", None)
+            if callable(use_route):
+                use_route(active_request.interaction_mode)
+            else:
+                llm = getattr(self.runtime, "llm", None)
+                select_route = getattr(llm, "use_route", None)
+                if callable(select_route):
+                    select_route(active_request.interaction_mode)
             history = [
                 card
                 for card in self.runtime.conversation_store.history(

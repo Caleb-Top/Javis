@@ -252,13 +252,13 @@ async def ws_voice_stream(ws: WebSocket):
     await serve_continuous_voice_stream(ws, continuous_capture_manager)
 
 
-from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,_get_api_key
+from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,discover_remote_provider_models,_get_api_key
 from core.agent import action_log
 from utils.memory import save_conversation,load_conversation,list_conversations,delete_conversation
 
 @app.get("/api/status")
 async def api_status():
-    s=get_status();s["service"]="javis";s["skill"]=CURRENT_SKILL;s["tool_count"]=registry.count;s["skill_count"]=runtime.skill_catalog.stats()["total"];s["operational_skill_count"]=len(runtime.skill_list);s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
+    s=get_status();s["service"]="javis";s["desktop_api_version"]=2;s["capabilities"]={"continuous_voice":True,"model_settings":True,"scoped_diagnostics":True};s["skill"]=CURRENT_SKILL;s["tool_count"]=registry.count;s["skill_count"]=runtime.skill_catalog.stats()["total"];s["operational_skill_count"]=len(runtime.skill_list);s["skills"]=SKILL_LIST;s["brain"]=brain.get_stats()
     try:s["engine"]=engine.get_power_status()
     except Exception as e:logger.debug(f"引擎状态获取异常: {e}")
     return s
@@ -1189,29 +1189,91 @@ async def api_set_model_connections(d: dict = Body(...)):
         llm.reload()
     return result
 
+@app.post("/api/config/models/remote")
+async def api_get_remote_models(d: dict = Body(default={})):
+    return await asyncio.to_thread(
+        discover_remote_provider_models,
+        str(d.get("provider") or ""),
+        str(d.get("base_url") or ""),
+        str(d.get("api_key") or ""),
+    )
+
 @app.post("/api/config/models/local")
 async def api_get_local_models(d: dict = Body(default={})):
     from utils.system_diagnostics import get_ollama_models
+    from utils.model_installer import get_local_runtime_state
 
     settings = get_model_connection_settings()
     base_url = str(
         d.get("base_url")
         or settings.get("local", {}).get("base_url")
-        or "http://127.0.0.1:11434/v1"
+        or "http://127.0.0.1:11435/v1"
     )
     try:
         models = await asyncio.to_thread(get_ollama_models, base_url)
         return {
             "connected": True,
+            "state": "connected",
             "models": models,
             "message": f"Ollama 在线，发现 {len(models)} 个模型",
         }
     except Exception as error:
+        runtime = get_local_runtime_state()
+        managed_url = ":11435" in base_url
+        if managed_url and not runtime["installed"]:
+            return {
+                "connected": False,
+                "state": "not_installed",
+                "models": [],
+                "message": "尚未安装 Javis 本地模型；请点击“安装或导入模型”完成设置",
+            }
         return {
             "connected": False,
+            "state": "offline",
             "models": [],
             "message": f"Ollama 无法连接：{str(error)[:120]}",
         }
+
+@app.get("/api/config/models/install/search")
+async def api_search_installable_models(q: str = "", limit: int = 12):
+    from utils.model_installer import search_huggingface_models
+
+    try:
+        return await asyncio.to_thread(search_huggingface_models, q, limit)
+    except Exception as error:
+        return {"ok": False, "models": [], "error": str(error)[:300]}
+
+@app.post("/api/config/models/install/detect")
+async def api_detect_model_addon(d: dict = Body(...)):
+    from utils.model_installer import detect_model_addon
+
+    return await asyncio.to_thread(detect_model_addon, str(d.get("path") or ""))
+
+@app.get("/api/config/models/install/progress")
+async def api_get_model_install_progress():
+    from utils.model_installer import get_model_install_progress
+
+    return get_model_install_progress()
+
+@app.post("/api/config/models/install/plan")
+async def api_plan_model_install(d: dict = Body(...)):
+    from utils.model_installer import plan_model_install
+
+    try:
+        return await asyncio.to_thread(plan_model_install, d)
+    except Exception as error:
+        return {"ok": False, "error": str(error)[:300]}
+
+@app.post("/api/config/models/install")
+async def api_install_model(d: dict = Body(...)):
+    from utils.model_installer import install_model
+
+    try:
+        return await asyncio.to_thread(install_model, d)
+    except PermissionError as error:
+        return {"ok": False, "error": str(error)[:300], "approval_required": True}
+    except Exception as error:
+        return {"ok": False, "error": str(error)[:300]}
 
 @app.get("/api/config/paths")
 async def api_get_paths():

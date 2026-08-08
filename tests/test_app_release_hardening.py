@@ -85,7 +85,8 @@ class AppReleaseHardeningTests(unittest.TestCase):
         self.assertIn('@tauri-apps/api/core', sidecar)
         for command in ["sidecar_status", "sidecar_start", "sidecar_stop", "sidecar_restart"]:
             self.assertIn(command, sidecar)
-        self.assertIn("ensureStarted", main)
+        self.assertIn("await sidecar.status()", main)
+        self.assertNotIn("sidecar.ensureStarted()", main)
         self.assertIn('addEventListener("error"', boundary)
         self.assertIn('addEventListener("unhandledrejection"', boundary)
         self.assertIn("恢复 Live", boundary)

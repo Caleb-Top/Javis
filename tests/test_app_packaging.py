@@ -29,7 +29,9 @@ class AppPackagingTests(unittest.TestCase):
         self.assertIn("web", result["include"])
         self.assertNotIn("start.py", result["include"])
         self.assertIn("venv", result["exclude"])
-        self.assertIn("ollama_models", result["external"])
+        self.assertNotIn("ollama_models", result["bundled_release_components"])
+        self.assertIn("ollama_models", result["optional_addon_components"])
+        self.assertNotIn("ollama_models", result["external"])
         self.assertIn("data", result["external"])
 
     def test_app_scaffold_has_live_entry_files(self):
@@ -77,6 +79,11 @@ class AppPackagingTests(unittest.TestCase):
         self.assertEqual(cfg["productName"], "Javis")
         self.assertEqual(cfg["app"]["windows"][0]["title"], "Javis Live")
         self.assertEqual(cfg["build"]["frontendDist"], "../dist")
+
+    def test_tauri_build_tools_are_cached_inside_the_g_drive_target(self):
+        cfg = json.loads((ROOT / "app" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(cfg["bundle"]["useLocalToolsDir"])
 
     def test_live_shell_has_voice_and_code_controls(self):
         main = (ROOT / "app" / "src" / "main.ts").read_text(encoding="utf-8")

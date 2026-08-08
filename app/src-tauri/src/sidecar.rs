@@ -1,4 +1,4 @@
-use crate::app_log;
+use crate::{app_log, bundled_ollama::BundledOllama};
 use std::{
     env,
     io::{Read, Write},
@@ -54,6 +54,7 @@ impl Default for SidecarRuntime {
 pub struct SidecarManager {
     runtime: Mutex<SidecarRuntime>,
     packaged_root: Option<PathBuf>,
+    ollama: BundledOllama,
 }
 
 impl Default for SidecarManager {
@@ -61,15 +62,21 @@ impl Default for SidecarManager {
         Self {
             runtime: Mutex::new(SidecarRuntime::default()),
             packaged_root: None,
+            ollama: BundledOllama::new(PathBuf::new()),
         }
     }
 }
 
 impl SidecarManager {
     pub fn with_root(packaged_root: PathBuf) -> Self {
+        let data_root = packaged_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         Self {
             runtime: Mutex::new(SidecarRuntime::default()),
             packaged_root: Some(packaged_root),
+            ollama: BundledOllama::new(data_root),
         }
     }
 
@@ -87,12 +94,13 @@ impl SidecarManager {
             ProbeResult::Offline => "offline",
         };
         format!(
-            "{{\"state\":\"{}\",\"owned\":{},\"owned_pid\":{},\"restart_attempts\":{},\"last_error\":\"{}\"}}",
+            "{{\"state\":\"{}\",\"owned\":{},\"owned_pid\":{},\"restart_attempts\":{},\"last_error\":\"{}\",\"ollama\":\"{}\"}}",
             state,
             runtime.owned_pid.is_some(),
             runtime.owned_pid.map(|pid| pid.to_string()).unwrap_or_else(|| "null".to_string()),
             runtime.restart_attempts,
             json_escape(&runtime.last_error),
+            self.ollama.status(),
         )
     }
 
@@ -127,6 +135,8 @@ impl SidecarManager {
         if !entry.is_file() {
             return Err(format!("missing runtime entry: {}", entry.display()));
         }
+        let ollama_state = self.ollama.start(app)?;
+        app_log::append(app, "info", "ollama", &format!("bundled runtime: {ollama_state}"))?;
         let (stdout, stderr) = app_log::runtime_log_files(app)?;
         let token = ownership_token();
         let mut command = Command::new(&python);
@@ -137,13 +147,23 @@ impl SidecarManager {
             .env("PORT", PORT.to_string())
             .env("JAVIS_SIDECAR_OWNERSHIP", &token)
             .env("JAVIS_DATA_ROOT", &root)
+            .env("JAVIS_BUNDLED_MODEL", "deepseek-r1:8b")
+            .env("JAVIS_BUNDLED_OLLAMA_URL", self.ollama.openai_base_url())
+            .env("OLLAMA_MODELS", self.ollama.model_root())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         #[cfg(target_os = "windows")]
         command.creation_flags(CREATE_NO_WINDOW);
-        let child = command.spawn().map_err(|error| {
-            format!("failed to start runtime with {}: {error}", python.display())
-        })?;
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = self.ollama.stop_owned();
+                return Err(format!(
+                    "failed to start runtime with {}: {error}",
+                    python.display()
+                ));
+            }
+        };
         let pid = child.id();
         {
             let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
@@ -172,6 +192,8 @@ impl SidecarManager {
         let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
         if runtime.ownership_token.is_none() || runtime.owned_pid.is_none() {
             runtime.attached_existing = false;
+            drop(runtime);
+            self.ollama.stop_owned()?;
             return Ok("no owned Sidecar process".to_string());
         }
         if let Some(child) = runtime.child.as_mut() {
@@ -182,6 +204,8 @@ impl SidecarManager {
         runtime.owned_pid = None;
         runtime.ownership_token = None;
         runtime.attached_existing = false;
+        drop(runtime);
+        self.ollama.stop_owned()?;
         Ok("owned Sidecar stopped".to_string())
     }
 
@@ -216,7 +240,10 @@ fn probe_backend(port: u16) -> ProbeResult {
         return ProbeResult::PortConflict;
     }
     let is_ok = response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200");
-    if is_ok && response.contains("service\":\"javis") {
+    let compatible = response.contains("service\":\"javis")
+        && response.contains("desktop_api_version\":2")
+        && response.contains("continuous_voice\":true");
+    if is_ok && compatible {
         ProbeResult::Ready
     } else {
         ProbeResult::PortConflict

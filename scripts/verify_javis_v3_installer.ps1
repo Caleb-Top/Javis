@@ -4,17 +4,26 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Report,
     [Parameter(Mandatory = $true)]
-    [string]$Manifest
+    [string]$Manifest,
+    [string]$SourceRoot = "",
+    [string]$InstallRoot = "D:\Javis-v3-install-test",
+    [string]$DataRoot = "D:\Javis-v3-data-test"
 )
 
 $ErrorActionPreference = "Stop"
-$InstallRoot = Join-Path $env:TEMP "Javis-v3-install-test"
-$DataRoot = Join-Path $env:TEMP "Javis-v3-data-test"
 $RuntimeRoot = Join-Path $DataRoot "runtime"
 $Canary = Join-Path $RuntimeRoot "app\workspace\v3-preservation-canary.txt"
 $Checks = [System.Collections.Generic.List[object]]::new()
 $PreviousDataRoot = $env:JAVIS_APP_DATA_ROOT
 $ExpectedRuntimeHash = (Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json).archive.sha256
+$VisibleHelperDetected = $false
+$VerifierProcessIds = [Collections.Generic.HashSet[int]]::new()
+$ProcessCursor = $PID
+while ($ProcessCursor -gt 0 -and $VerifierProcessIds.Add([int]$ProcessCursor)) {
+    $CurrentProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessCursor" -ErrorAction SilentlyContinue
+    if (-not $CurrentProcess) { break }
+    $ProcessCursor = [int]$CurrentProcess.ParentProcessId
+}
 
 function Add-Check([string]$Name, [bool]$Passed, [string]$Detail) {
     $Checks.Add([pscustomobject]@{
@@ -29,16 +38,21 @@ function Get-JavisTestProcesses {
     $ResolvedData = [IO.Path]::GetFullPath($DataRoot).TrimEnd('\')
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
-            $ExecutablePath = if ($_.ExecutablePath) { [IO.Path]::GetFullPath($_.ExecutablePath) } else { "" }
-            $CommandLine = [string]$_.CommandLine
-            ($ExecutablePath -and (
-                $ExecutablePath.StartsWith($ResolvedInstall + "\", [StringComparison]::OrdinalIgnoreCase) -or
-                $ExecutablePath.StartsWith($ResolvedData + "\", [StringComparison]::OrdinalIgnoreCase)
-            )) -or
-            ($CommandLine -and (
-                $CommandLine.IndexOf($ResolvedInstall, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                $CommandLine.IndexOf($ResolvedData, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            ))
+            if (-not $VerifierProcessIds.Contains([int]$_.ProcessId)) {
+                $ExecutablePath = if ($_.ExecutablePath) { [IO.Path]::GetFullPath($_.ExecutablePath) } else { "" }
+                $CommandLine = [string]$_.CommandLine
+                ($ExecutablePath -and (
+                    $ExecutablePath.StartsWith($ResolvedInstall + "\", [StringComparison]::OrdinalIgnoreCase) -or
+                    $ExecutablePath.StartsWith($ResolvedData + "\", [StringComparison]::OrdinalIgnoreCase)
+                )) -or
+                ($CommandLine -and (
+                    $CommandLine.IndexOf($ResolvedInstall, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $CommandLine.IndexOf($ResolvedData, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                ))
+            }
+            else {
+                $false
+            }
         }
 }
 
@@ -84,10 +98,63 @@ function Stop-JavisPortOwner {
 function Wait-JavisStatus([int]$Seconds) {
     $Deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $Deadline) {
+        if (Test-VisibleJavisHelper) {
+            $script:VisibleHelperDetected = $true
+        }
         try {
             $Status = Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/status" -TimeoutSec 2
-            if ($Status.service -eq "javis") {
+            if (
+                $Status.service -eq "javis" -and
+                $Status.desktop_api_version -eq 2 -and
+                $Status.capabilities.continuous_voice -eq $true
+            ) {
                 return $Status
+            }
+        }
+        catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    return $null
+}
+
+function Test-VisibleJavisHelper {
+    foreach ($Process in @(Get-JavisTestProcesses)) {
+        if ($Process.Name -notin @("tar.exe", "certutil.exe", "powershell.exe", "python.exe", "pythonw.exe")) {
+            continue
+        }
+        $Live = Get-Process -Id $Process.ProcessId -ErrorAction SilentlyContinue
+        if ($Live -and $Live.MainWindowHandle -ne 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-JavisVoiceWebSocket {
+    $Socket = [System.Net.WebSockets.ClientWebSocket]::new()
+    $Timeout = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(8))
+    try {
+        $null = $Socket.ConnectAsync([Uri]"ws://127.0.0.1:8080/ws_voice_stream", $Timeout.Token).GetAwaiter().GetResult()
+        return $Socket.State -eq [System.Net.WebSockets.WebSocketState]::Open
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $null = $Socket.Dispose()
+        $null = $Timeout.Dispose()
+    }
+}
+
+function Wait-BundledOllamaModel([int]$Seconds) {
+    $Deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $Deadline) {
+        try {
+            $Catalog = Invoke-RestMethod -Uri "http://127.0.0.1:11435/api/tags" -TimeoutSec 2
+            $Names = @($Catalog.models | ForEach-Object { [string]$_.name })
+            if ($Names | Where-Object { $_ -eq "deepseek-r1:8b" -or $_ -like "deepseek-r1:8b*" }) {
+                return $Catalog
             }
         }
         catch {
@@ -134,10 +201,9 @@ function Remove-TestInstall {
     if (-not (Test-Path -LiteralPath $InstallRoot)) {
         return
     }
-    $ResolvedTemp = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
     $ResolvedTarget = [IO.Path]::GetFullPath($InstallRoot)
-    if (-not $ResolvedTarget.StartsWith($ResolvedTemp + "\", [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove install test path outside TEMP: $ResolvedTarget"
+    if (-not $ResolvedTarget.StartsWith("D:\Javis-v3-install-test", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove install test path outside the D-drive test root: $ResolvedTarget"
     }
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         Stop-JavisProcesses | Out-Null
@@ -156,10 +222,9 @@ function Remove-TestData {
     if (-not (Test-Path -LiteralPath $DataRoot)) {
         return
     }
-    $ResolvedTemp = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
     $ResolvedTarget = [IO.Path]::GetFullPath($DataRoot)
-    if (-not $ResolvedTarget.StartsWith($ResolvedTemp + "\", [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove data test path outside TEMP: $ResolvedTarget"
+    if (-not $ResolvedTarget.StartsWith("D:\Javis-v3-data-test", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove data test path outside the D-drive test root: $ResolvedTarget"
     }
     for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
         Stop-JavisProcesses | Out-Null
@@ -176,6 +241,15 @@ function Remove-TestData {
 
 Stop-JavisPortOwner
 Stop-JavisProcesses | Out-Null
+$ResolvedInstaller = [IO.Path]::GetFullPath($Installer)
+if (-not $ResolvedInstaller.StartsWith("D:\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Independent installer verification only accepts the final package from D:: $ResolvedInstaller"
+}
+$DDrive = Get-PSDrive -Name D -PSProvider FileSystem
+$RequiredFreeBytes = 5GB
+if ($DDrive.Free -lt $RequiredFreeBytes) {
+    throw "D: requires at least 5 GB free for the main App installation test; available=$([math]::Round($DDrive.Free / 1GB, 2)) GB"
+}
 Remove-TestInstall
 Remove-TestData
 New-Item -ItemType Directory -Path (Split-Path -Parent $Canary) -Force | Out-Null
@@ -183,8 +257,13 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $Canary) -Force | Out-Nul
 $env:JAVIS_APP_DATA_ROOT = $DataRoot
 
 try {
-    $Install = Start-Process -FilePath $Installer -ArgumentList @("/S", "/D=$InstallRoot") -PassThru -Wait
-    Add-Check "NSIS silent install" ($Install.ExitCode -eq 0) "exit=$($Install.ExitCode); root=$InstallRoot"
+    $Install = Start-Process -FilePath $Installer -ArgumentList @("/S", "/DATA=$DataRoot", "/D=$InstallRoot") -PassThru -Wait
+    Add-Check "Main setup silent install" ($Install.ExitCode -eq 0) "exit=$($Install.ExitCode); root=$InstallRoot; data=$DataRoot"
+
+    $BundledOllama = Join-Path $DataRoot "local-ai\ollama\ollama.exe"
+    $BundledModel = Join-Path $DataRoot "local-ai\models\manifests\registry.ollama.ai\library\deepseek-r1\8b"
+    Add-Check "Main setup excludes Ollama" (-not (Test-Path -LiteralPath $BundledOllama -PathType Leaf)) $BundledOllama
+    Add-Check "Main setup excludes R1 weights" (-not (Test-Path -LiteralPath $BundledModel -PathType Leaf)) $BundledModel
 
     $AppExe = Get-ChildItem -LiteralPath $InstallRoot -Recurse -Filter "javis-app.exe" -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
@@ -205,11 +284,32 @@ try {
 
         $BaselineAppHash = (Get-FileHash -LiteralPath $AppExe.FullName -Algorithm SHA256).Hash
         Add-Check "Installed App binary baseline" ($BaselineAppHash.Length -eq 64) "installed=$BaselineAppHash"
+        if ($SourceRoot) {
+            $SourceFiles = @(
+                Get-ChildItem -LiteralPath (Join-Path $SourceRoot "app\src") -Recurse -File -ErrorAction Stop
+                Get-ChildItem -LiteralPath (Join-Path $SourceRoot "app\src-tauri\src") -Recurse -File -ErrorAction Stop
+            )
+            $LatestSource = $SourceFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            $FreshBinary = $LatestSource -and $AppExe.LastWriteTimeUtc -ge $LatestSource.LastWriteTimeUtc
+            Add-Check "Installed desktop binary freshness" $FreshBinary "app=$($AppExe.LastWriteTimeUtc.ToString('o')); source=$($LatestSource.LastWriteTimeUtc.ToString('o')); file=$($LatestSource.FullName)"
+        }
         $App = Start-Process -FilePath $AppExe.FullName -PassThru
         $Window = Wait-AppWindow $App.Id 15
         Add-Check "Installed App window" ($null -ne $Window) $(if ($Window) { "responsive handle=$($Window.Handle); visible_ms=$($Window.Milliseconds)" } else { "no responsive window within 15 seconds" })
         $Status = Wait-JavisStatus 180
-        Add-Check "Installed backend /api/status" ($null -ne $Status) $(if ($Status) { "service=$($Status.service)" } else { "offline" })
+        Add-Check "Installed backend /api/status" ($null -ne $Status) $(if ($Status) { "service=$($Status.service); desktop_api=$($Status.desktop_api_version)" } else { "offline or incompatible" })
+        Add-Check "No visible helper console" (-not $VisibleHelperDetected) "tar, certutil, PowerShell and Python helpers remained hidden"
+        $SelfTestReady = $false
+        try {
+            $SelfTest = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/api/diagnostics/self-test" -ContentType "application/json" -Body '{"scope":"runtime"}' -TimeoutSec 30
+            $SelfTestReady = $null -ne $SelfTest
+        }
+        catch {
+            $SelfTestReady = $false
+        }
+        Add-Check "Installed diagnostics contract" $SelfTestReady "/api/diagnostics/self-test"
+        $VoiceSocketReady = Test-JavisVoiceWebSocket
+        Add-Check "Installed continuous voice contract" $VoiceSocketReady "/ws_voice_stream"
 
         $Marker = Join-Path $RuntimeRoot "runtime-version.json"
         $Version = ""
@@ -232,7 +332,7 @@ try {
 
         [IO.File]::AppendAllText($AppExe.FullName, "STALE-INSTALL-TEST")
         $StaleHash = (Get-FileHash -LiteralPath $AppExe.FullName -Algorithm SHA256).Hash
-        $Reinstall = Start-Process -FilePath $Installer -ArgumentList @("/S", "/D=$InstallRoot") -PassThru -Wait
+        $Reinstall = Start-Process -FilePath $Installer -ArgumentList @("/S", "/DATA=$DataRoot", "/D=$InstallRoot") -PassThru -Wait
         $ReinstalledHash = (Get-FileHash -LiteralPath $AppExe.FullName -Algorithm SHA256).Hash
         Add-Check "Same-version reinstall replaces stale App" (
             $Reinstall.ExitCode -eq 0 -and
