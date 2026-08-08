@@ -50,6 +50,7 @@ const DEFAULT_REQUEST_TIMEOUTS: RequestTimeouts = {
   firstResponseMs: 15000,
   overallMs: 60000,
 };
+const MAX_RETIRED_REQUEST_IDS = 128;
 
 type RequestTimeoutPhase = "accepted" | "first-response" | "overall";
 
@@ -60,6 +61,12 @@ type RequestWatchdogs = {
   accepted: boolean;
   firstResponseReceived: boolean;
 };
+
+function isRequestTerminal(type: string): boolean {
+  return type === "request.completed"
+    || type === "request.cancelled"
+    || type === "request.failed";
+}
 
 export function createBackendClient(options: BackendClientOptions): BackendClient {
   const sessionId = options.sessionId.trim();
@@ -72,6 +79,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   };
   const queue = new RequestQueue();
   const requestWatchdogs = new Map<string, RequestWatchdogs>();
+  const retiredRequestIds = new Set<string>();
   let ws: WebSocket | null = null;
   let reconnectAttempt = 0;
   let reconnectTimer = 0;
@@ -142,8 +150,34 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     requestWatchdogs.delete(requestId);
   }
 
+  function retireRequest(requestId: string): void {
+    if (!requestId) return;
+    retiredRequestIds.delete(requestId);
+    retiredRequestIds.add(requestId);
+    if (retiredRequestIds.size <= MAX_RETIRED_REQUEST_IDS) return;
+    const oldestRequestId = retiredRequestIds.values().next().value;
+    if (oldestRequestId) retiredRequestIds.delete(oldestRequestId);
+  }
+
+  function ignoreRetiredEvent(msg: BackendEvent): boolean {
+    const requestId = String(msg.request_id || "");
+    if (!requestId || !retiredRequestIds.has(requestId)) return false;
+    if (isRequestTerminal(String(msg.type || ""))) {
+      retiredRequestIds.delete(requestId);
+      return false;
+    }
+    return true;
+  }
+
+  function normalizeLifecycleEvent(msg: BackendEvent): BackendEvent {
+    if (!isRequestTerminal(String(msg.type || ""))) return msg;
+    if (String(msg.request_id || "") || !currentRequestId) return msg;
+    return { ...msg, request_id: currentRequestId };
+  }
+
   function timeoutRequest(requestId: string, phase: RequestTimeoutPhase): void {
     if (!requestWatchdogs.has(requestId)) return;
+    retireRequest(requestId);
     clearRequestWatchdogs(requestId);
     queue.cancel(requestId);
     sendWire({
@@ -243,6 +277,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     const type = String(msg.type || "");
     const requestId = String(msg.request_id || "");
     const payload = msg.payload ?? {};
+    const activeRequestId = currentRequestId;
     const lifecycleRequestId = requestId || currentRequestId || "";
     if (type === "request.accepted" && requestId === currentRequestId) {
       markRequestAccepted(requestId);
@@ -250,7 +285,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     if (type === "response.delta" && requestId) markFirstResponse(requestId);
     if (type === "approval.required") pendingApprovalId = String(payload.approval_id || "");
 
-    const terminal = type === "request.completed" || type === "request.cancelled" || type === "request.failed";
+    const terminal = isRequestTerminal(type);
     if (terminal && lifecycleRequestId) clearRequestWatchdogs(lifecycleRequestId);
     if (terminal && (!requestId || requestId === currentRequestId)) {
       currentRequestId = null;
@@ -262,7 +297,11 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
         : type === "request.failed" ? "error"
           : type === "response.delta" ? "speaking"
             : "thinking";
-    if (type.startsWith("activity.") || type === "approval.required" || type === "request.failed" || type === "response.delta") {
+    const staleFailure = type === "request.failed"
+      && Boolean(activeRequestId)
+      && Boolean(requestId)
+      && requestId !== activeRequestId;
+    if (!staleFailure && (type.startsWith("activity.") || type === "approval.required" || type === "request.failed" || type === "response.delta")) {
       const detail = payload.detail || payload.text || payload.tool || msg.text || msg.detail || type;
       runtimeStateCoordinator.signal({
         source: "websocket",
@@ -323,6 +362,8 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       } catch {
         return;
       }
+      msg = normalizeLifecycleEvent(msg);
+      if (ignoreRetiredEvent(msg)) return;
       applyRuntimeEvent(msg);
       options.onEvent?.(msg);
     };
@@ -344,6 +385,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     const clean = text.trim();
     if (!clean) return null;
     if (currentRequestId) {
+      retireRequest(currentRequestId);
       queue.cancel(currentRequestId);
       clearRequestWatchdogs(currentRequestId);
       pendingApprovalId = "";
@@ -412,6 +454,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   function cancel(reason = "user interrupt"): boolean {
     if (!currentRequestId) return false;
     const requestId = currentRequestId;
+    retireRequest(requestId);
     clearRequestWatchdogs(requestId);
     currentRequestId = null;
     pendingApprovalId = "";

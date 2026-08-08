@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createBackendClient } from "../src/bridge/backendClient.ts";
+import { runtimeStateCoordinator } from "../src/state/RuntimeStateCoordinator.ts";
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -45,6 +46,24 @@ function installBrowserFakes(): void {
       setTimeout,
     },
   });
+}
+
+function canonicalEvent(
+  sessionId: string,
+  type: string,
+  requestId: string,
+  sequence: number,
+  payload: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    schema_version: 2,
+    session_id: sessionId,
+    request_id: requestId,
+    sequence,
+    timestamp: "2026-08-08T12:00:00.000Z",
+    type,
+    payload,
+  };
 }
 
 test("the native client attaches and uses one canonical conversation", () => {
@@ -288,3 +307,145 @@ test("replacement clears old watchdogs and late acceptance cannot reclaim the ac
   );
   assert.equal(client.activeRequestId(), null);
 });
+
+test("local timeout drops late canonical progress while allowing its terminal event", async () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const events: Record<string, unknown>[] = [];
+  const client = createBackendClient({
+    sessionId: "session-retired-timeout",
+    requestTimeouts: {
+      acceptedMs: 10,
+      firstResponseMs: 20,
+      overallMs: 40,
+    },
+    onEvent: (event) => { events.push(event); },
+  });
+
+  const requestId = client.send("retire after timeout");
+  const socket = FakeWebSocket.instances[0];
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "request.failed");
+  assert.equal(events[0].local, true);
+
+  socket.open();
+  const runtimeAfterTimeout = runtimeStateCoordinator.snapshot();
+  socket.emit(canonicalEvent(
+    "session-retired-timeout",
+    "request.accepted",
+    requestId as string,
+    1,
+  ));
+  socket.emit(canonicalEvent(
+    "session-retired-timeout",
+    "response.delta",
+    requestId as string,
+    2,
+    { text: "too late" },
+  ));
+
+  assert.equal(events.length, 1);
+  assert.deepEqual(runtimeStateCoordinator.snapshot(), runtimeAfterTimeout);
+
+  socket.emit(canonicalEvent(
+    "session-retired-timeout",
+    "request.completed",
+    requestId as string,
+    3,
+  ));
+  assert.equal(events.length, 2);
+  assert.equal(events[1].type, "request.completed");
+  assert.equal(events[1].request_id, requestId);
+});
+
+test("replacement drops old progress and old failure cannot poison the new runtime", () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const events: Record<string, unknown>[] = [];
+  const client = createBackendClient({
+    sessionId: "session-retired-replacement",
+    requestTimeouts: {
+      acceptedMs: 50,
+      firstResponseMs: 50,
+      overallMs: 100,
+    },
+    onEvent: (event) => { events.push(event); },
+  });
+  client.connect();
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+
+  const oldRequestId = client.send("old request");
+  const newRequestId = client.send("new request");
+  socket.emit(canonicalEvent(
+    "session-retired-replacement",
+    "request.accepted",
+    oldRequestId as string,
+    1,
+  ));
+  socket.emit(canonicalEvent(
+    "session-retired-replacement",
+    "response.delta",
+    oldRequestId as string,
+    2,
+    { text: "stale" },
+  ));
+
+  assert.equal(events.length, 0);
+  assert.equal(runtimeStateCoordinator.snapshot().state, "thinking");
+  assert.equal(runtimeStateCoordinator.snapshot().requestId, newRequestId);
+
+  socket.emit(canonicalEvent(
+    "session-retired-replacement",
+    "request.failed",
+    oldRequestId as string,
+    3,
+    { error: "old request failed" },
+  ));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].request_id, oldRequestId);
+  assert.equal(runtimeStateCoordinator.snapshot().state, "thinking");
+  assert.equal(runtimeStateCoordinator.snapshot().requestId, newRequestId);
+
+  socket.emit(canonicalEvent(
+    "session-retired-replacement",
+    "request.completed",
+    newRequestId as string,
+    4,
+  ));
+  assert.equal(client.activeRequestId(), null);
+});
+
+for (const terminalType of ["request.completed", "request.cancelled"] as const) {
+  test(`${terminalType} without a request ID is normalized to the active request`, async () => {
+    installBrowserFakes();
+    FakeWebSocket.instances = [];
+    const events: Record<string, unknown>[] = [];
+    const sessionId = `session-empty-id-${terminalType}`;
+    const client = createBackendClient({
+      sessionId,
+      requestTimeouts: {
+        acceptedMs: 10,
+        firstResponseMs: 10,
+        overallMs: 10,
+      },
+      onEvent: (event) => { events.push(event); },
+    });
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+
+    const requestId = client.send("finish without echoing the request id");
+    socket.emit(canonicalEvent(sessionId, terminalType, "", 1));
+
+    assert.equal(client.activeRequestId(), null);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].request_id, requestId);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(
+      events.filter((event) => event.type === "request.failed" && event.local === true).length,
+      0,
+    );
+  });
+}
