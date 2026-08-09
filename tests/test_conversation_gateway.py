@@ -109,7 +109,9 @@ class QueuedWebSocket:
             self.sent.append(message)
             self._sent_changed.notify_all()
 
-    async def wait_for_type(self, event_type, *, request_id="", timeout=1):
+    # Release qualification can run while large archives are being unpacked;
+    # test gateway behavior instead of failing on transient scheduler latency.
+    async def wait_for_type(self, event_type, *, request_id="", timeout=5):
         async def wait():
             async with self._sent_changed:
                 while True:
