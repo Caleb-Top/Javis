@@ -97,13 +97,134 @@ _GGML_TENSOR_LAYOUTS = {
 }
 _INSTALL_LOCK = threading.Lock()
 _PROGRESS_LOCK = threading.Lock()
+_INSTALL_CONTROL = threading.Condition(threading.RLock())
+_ACTIVE_INSTALL_JOB_ID = ""
+_INSTALL_JOB_ACTIVE = False
+_INSTALL_PAUSE_REQUESTED = False
+_INSTALL_CANCEL_REQUESTED = False
 _INSTALL_PROGRESS: dict[str, Any] = {
     "state": "idle",
     "phase": "等待安装",
     "percent": 0,
     "completed_bytes": 0,
     "total_bytes": 0,
+    "job_id": "",
+    "cancellable": False,
+    "pausable": False,
+    "paused": False,
+    "cancelled": False,
 }
+
+
+class ModelInstallCancelled(RuntimeError):
+    """Raised at a cooperative checkpoint after the user cancels an install."""
+
+
+def _begin_install_job() -> str:
+    global _ACTIVE_INSTALL_JOB_ID, _INSTALL_JOB_ACTIVE
+    global _INSTALL_PAUSE_REQUESTED, _INSTALL_CANCEL_REQUESTED
+    with _INSTALL_CONTROL:
+        _ACTIVE_INSTALL_JOB_ID = uuid.uuid4().hex
+        _INSTALL_JOB_ACTIVE = True
+        _INSTALL_PAUSE_REQUESTED = False
+        _INSTALL_CANCEL_REQUESTED = False
+        return _ACTIVE_INSTALL_JOB_ID
+
+
+def _finish_install_job() -> None:
+    global _INSTALL_JOB_ACTIVE, _INSTALL_PAUSE_REQUESTED, _INSTALL_CANCEL_REQUESTED
+    with _INSTALL_CONTROL:
+        _INSTALL_JOB_ACTIVE = False
+        _INSTALL_PAUSE_REQUESTED = False
+        _INSTALL_CANCEL_REQUESTED = False
+        _INSTALL_CONTROL.notify_all()
+
+
+def _install_control_result(job_id: str) -> tuple[bool, dict[str, Any]]:
+    normalized = str(job_id or "").strip().lower()
+    if not _INSTALL_JOB_ACTIVE or not normalized or normalized != _ACTIVE_INSTALL_JOB_ID:
+        return False, {"ok": False, "error": "install_job_not_active"}
+    progress = get_model_install_progress()
+    if not progress.get("cancellable", False):
+        return False, {"ok": False, "error": "install_job_not_controllable", "job_id": normalized}
+    return True, {"ok": True, "job_id": normalized}
+
+
+def pause_model_install(job_id: str) -> dict[str, Any]:
+    global _INSTALL_PAUSE_REQUESTED
+    with _INSTALL_CONTROL:
+        accepted, result = _install_control_result(job_id)
+        if not accepted:
+            return result
+        if not get_model_install_progress().get("pausable", False):
+            return {"ok": False, "error": "install_job_not_pausable", "job_id": result["job_id"]}
+        _INSTALL_PAUSE_REQUESTED = True
+        current = get_model_install_progress()
+        _set_progress(
+            "pausing",
+            "正在安全暂停本地模型安装",
+            current.get("percent", 0),
+            current.get("completed_bytes", 0),
+            current.get("total_bytes", 0),
+        )
+        return result
+
+
+def resume_model_install(job_id: str) -> dict[str, Any]:
+    global _INSTALL_PAUSE_REQUESTED
+    with _INSTALL_CONTROL:
+        accepted, result = _install_control_result(job_id)
+        if not accepted:
+            return result
+        _INSTALL_PAUSE_REQUESTED = False
+        current = get_model_install_progress()
+        _set_progress(
+            "resuming",
+            "正在继续本地模型安装",
+            current.get("percent", 0),
+            current.get("completed_bytes", 0),
+            current.get("total_bytes", 0),
+        )
+        _INSTALL_CONTROL.notify_all()
+        return result
+
+
+def cancel_model_install(job_id: str) -> dict[str, Any]:
+    global _INSTALL_CANCEL_REQUESTED
+    with _INSTALL_CONTROL:
+        accepted, result = _install_control_result(job_id)
+        if not accepted:
+            return result
+        _INSTALL_CANCEL_REQUESTED = True
+        current = get_model_install_progress()
+        _set_progress(
+            "cancelling",
+            "正在取消并回滚本地模型安装",
+            current.get("percent", 0),
+            current.get("completed_bytes", 0),
+            current.get("total_bytes", 0),
+        )
+        _INSTALL_CONTROL.notify_all()
+        return result
+
+
+def _install_control_checkpoint() -> None:
+    """Pause or cancel only at a boundary where rollback remains safe."""
+    with _INSTALL_CONTROL:
+        if _INSTALL_CANCEL_REQUESTED:
+            raise ModelInstallCancelled("用户已取消本地模型安装")
+        while _INSTALL_PAUSE_REQUESTED:
+            current = get_model_install_progress()
+            _set_progress(
+                "paused",
+                "本地模型安装已暂停",
+                current.get("percent", 0),
+                current.get("completed_bytes", 0),
+                current.get("total_bytes", 0),
+            )
+            _INSTALL_CONTROL.wait()
+            if _INSTALL_CANCEL_REQUESTED:
+                raise ModelInstallCancelled("用户已取消本地模型安装")
 
 
 def _set_progress(
@@ -112,7 +233,20 @@ def _set_progress(
     percent: float,
     completed_bytes: int = 0,
     total_bytes: int = 0,
+    *,
+    pausable: bool | None = None,
 ) -> None:
+    with _INSTALL_CONTROL:
+        active = _INSTALL_JOB_ACTIVE
+        job_id = _ACTIVE_INSTALL_JOB_ID if active else ""
+    control_locked_states = {
+        "cancelling",
+        "committing",
+        "rolling_back",
+        "completed",
+        "failed",
+        "cancelled",
+    }
     with _PROGRESS_LOCK:
         _INSTALL_PROGRESS.update({
             "state": state,
@@ -120,6 +254,14 @@ def _set_progress(
             "percent": max(0, min(100, round(float(percent), 1))),
             "completed_bytes": max(0, int(completed_bytes)),
             "total_bytes": max(0, int(total_bytes)),
+            "job_id": job_id,
+            "cancellable": active and state not in control_locked_states,
+            "pausable": (
+                active and state not in control_locked_states
+                if pausable is None else bool(pausable)
+            ),
+            "paused": state == "paused",
+            "cancelled": state == "cancelled",
         })
 
 
@@ -136,6 +278,7 @@ def _sha256(
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(chunk_size), b""):
+            _install_control_checkpoint()
             digest.update(chunk)
             if on_chunk:
                 on_chunk(len(chunk))
@@ -566,6 +709,7 @@ def _safe_extract(
     destination: Path,
     on_chunk: Callable[[int], None] | None = None,
 ) -> None:
+    _install_control_checkpoint()
     root = destination.resolve()
     with zipfile.ZipFile(archive_path) as archive:
         members, _expected_total = _validated_zip_members(archive)
@@ -576,6 +720,7 @@ def _safe_extract(
         destination.mkdir(parents=True, exist_ok=True)
         extracted_total = 0
         for member in members:
+            _install_control_checkpoint()
             member_path = (root / member.filename).resolve()
             if member.is_dir():
                 member_path.mkdir(parents=True, exist_ok=True)
@@ -584,6 +729,7 @@ def _safe_extract(
             with archive.open(member) as source, member_path.open("wb") as output:
                 extracted_member = 0
                 for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+                    _install_control_checkpoint()
                     extracted_member += len(chunk)
                     extracted_total += len(chunk)
                     if extracted_member > member.file_size or extracted_member > MAX_ZIP_MEMBER_BYTES:
@@ -887,6 +1033,7 @@ def _install_offline(values: dict[str, Any], target: Path) -> dict[str, Any]:
         if not (extracted / "ollama" / "ollama.exe").is_file():
             raise ValueError("附加包暂存区缺少 Ollama 运行时")
         _set_progress("verifying", "暂存内容校验通过", 90)
+        _install_control_checkpoint()
         transaction = _OverlayTransaction(staging, extracted, target / "local-ai")
         _set_progress("committing", "正在提交已校验的本地模型文件", 94)
         transaction.commit(target)
@@ -972,6 +1119,7 @@ def _copy_authorized_gguf(source: Path, destination: Path, authorized: dict[str,
     copied = 0
     with source.open("rb") as input_stream, destination.open("xb") as output_stream:
         for chunk in iter(lambda: input_stream.read(8 * 1024 * 1024), b""):
+            _install_control_checkpoint()
             copied += len(chunk)
             if copied > expected_size:
                 raise PermissionError("GGUF 来源在授权后发生改变（大小超出计划）")
@@ -1027,6 +1175,7 @@ def _install_local_gguf(
         final_gguf = target / "local-ai" / "imported" / filename
         adapter.write_text(f'FROM "{final_gguf}"\n', encoding="utf-8")
         _revalidate_authorized_token(plan_token, authorized)
+        _install_control_checkpoint()
         transaction = _OverlayTransaction(staging, staged_tree, target / "local-ai")
         _set_progress("committing", "正在提交已验证的本地 GGUF", 94)
         transaction.commit(target)
@@ -1085,6 +1234,7 @@ def _download_hf_file(
     destination: Path,
     expected_size: int,
 ) -> None:
+    _install_control_checkpoint()
     if expected_size <= 0 or expected_size > MAX_HF_DOWNLOAD_BYTES:
         raise ValueError("Hugging Face 文件大小超过安全下载上限")
     current_url = url
@@ -1092,6 +1242,7 @@ def _download_hf_file(
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         for redirect_count in range(MAX_HF_REDIRECTS + 1):
+            _install_control_checkpoint()
             _assert_public_https_url(current_url)
             response = requests.get(
                 current_url,
@@ -1127,6 +1278,7 @@ def _download_hf_file(
                 downloaded = 0
                 with destination.open("xb") as stream:
                     for chunk in response.iter_content(8 * 1024 * 1024):
+                        _install_control_checkpoint()
                         if not chunk:
                             continue
                         downloaded += len(chunk)
@@ -1203,6 +1355,7 @@ def _download_huggingface(
         final_gguf = final_model_root / Path(filename).name
         adapter.write_text(f'FROM "{final_gguf}"\n', encoding="utf-8")
         _revalidate_authorized_token(plan_token, authorized)
+        _install_control_checkpoint()
         transaction = _OverlayTransaction(staging, staged_tree, target / "local-ai")
         _set_progress("committing", "正在提交已验证的 Hugging Face 模型", 94)
         transaction.commit(target)
@@ -1233,6 +1386,7 @@ def _download_huggingface(
 
 
 def _adapt_gguf_with_ollama(runtime: Path, models: Path, modelfile: Path, model_name: str) -> None:
+    _install_control_checkpoint()
     models.mkdir(parents=True, exist_ok=True)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -1252,6 +1406,7 @@ def _adapt_gguf_with_ollama(runtime: Path, models: Path, modelfile: Path, model_
     try:
         ready = False
         for _ in range(60):
+            _install_control_checkpoint()
             if server.poll() is not None:
                 raise RuntimeError("Ollama 适配服务启动失败")
             try:
@@ -1264,7 +1419,13 @@ def _adapt_gguf_with_ollama(runtime: Path, models: Path, modelfile: Path, model_
             time.sleep(0.25)
         if not ready:
             raise RuntimeError("Ollama 适配服务启动超时")
-        result = subprocess.run(
+        _set_progress(
+            "running",
+            "正在由 Ollama 创建本地模型",
+            get_model_install_progress().get("percent", 82),
+            pausable=False,
+        )
+        creator = subprocess.Popen(
             [str(runtime), "create", model_name, "-f", str(modelfile)],
             env=env,
             stdout=subprocess.PIPE,
@@ -1272,11 +1433,31 @@ def _adapt_gguf_with_ollama(runtime: Path, models: Path, modelfile: Path, model_
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=1800,
             creationflags=creationflags,
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"Ollama 自动适配失败：{result.stdout[-300:]}")
+        output = ""
+        try:
+            deadline = time.monotonic() + 1800
+            while True:
+                _install_control_checkpoint()
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(creator.args, 1800)
+                try:
+                    output, _ = creator.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            if creator.poll() is None:
+                creator.terminate()
+                try:
+                    creator.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    creator.kill()
+                    creator.wait(timeout=10)
+            raise
+        if creator.returncode != 0:
+            raise RuntimeError(f"Ollama 自动适配失败：{output[-300:]}")
     finally:
         server.terminate()
         try:
@@ -1379,6 +1560,7 @@ def install_model(values: dict[str, Any]) -> dict[str, Any]:
         raise PermissionError("必须由用户在安装计划中明确确认后才能安装或下载")
     if not _INSTALL_LOCK.acquire(blocking=False):
         raise RuntimeError("已有本地模型安装任务正在进行，请勿重复提交")
+    _begin_install_job()
     transaction: _OverlayTransaction | None = None
     config_snapshot: _PathSnapshot | None = None
     record_snapshot: _PathSnapshot | None = None
@@ -1408,6 +1590,7 @@ def install_model(values: dict[str, Any]) -> dict[str, Any]:
             expected_hash = str(authorized.get("sha256") or "")
             if not hmac.compare_digest(str(result.get("sha256") or ""), expected_hash):
                 raise RuntimeError("安装结果与已确认计划的 SHA-256 不一致")
+        _install_control_checkpoint()
         _set_progress("committing", "正在保存所选 Live/Code 本地模型配置", 98)
         approved_targets = list(authorized.get("targets") or [])
         from utils import config_api as config_module
@@ -1454,9 +1637,11 @@ def install_model(values: dict[str, Any]) -> dict[str, Any]:
                 transaction.rollback()
             except Exception as rollback_error:
                 rollback_errors.append(f"模型文件恢复失败：{rollback_error}")
-        _set_progress("failed", str(error)[:200], get_model_install_progress().get("percent", 0))
+        terminal_state = "cancelled" if isinstance(error, ModelInstallCancelled) else "failed"
+        _set_progress(terminal_state, str(error)[:200], get_model_install_progress().get("percent", 0))
         if rollback_errors:
             raise RuntimeError(f"{error}；{'；'.join(rollback_errors)}") from error
         raise
     finally:
+        _finish_install_job()
         _INSTALL_LOCK.release()

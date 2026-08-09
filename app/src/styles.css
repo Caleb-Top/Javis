@@ -1041,6 +1041,9 @@ body[data-desktop-mode="code"] .code-surface,
 .model-installer-progress[hidden] { display: none; }
 .model-installer-progress progress { width: 100%; height: 10px; accent-color: #2f72c8; }
 .model-installer-progress span { min-width: 120px; color: #245c9c; font-size: 11px; text-align: right; }
+.model-installer-controls { display: flex; justify-content: flex-end; gap: 8px; }
+.model-installer-controls[hidden] { display: none; }
+.model-installer-cancel { color: #a23434; border-color: rgba(162, 52, 52, 0.28); }
 .model-installer-status { color: var(--shell-muted); font-size: 11px; line-height: 1.55; white-space: normal; }
 .model-installer-status[data-state="saved"] { color: #157f62; }
 .model-installer-status[data-state="error"] { color: #b5473f; }

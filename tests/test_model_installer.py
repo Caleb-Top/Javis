@@ -4,6 +4,8 @@ import json
 import socket
 import struct
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -205,6 +207,112 @@ class ModelInstallerTests(unittest.TestCase):
                 })
         finally:
             model_installer._INSTALL_LOCK.release()
+
+    def test_active_install_can_pause_resume_and_cancel_by_job_id(self):
+        entered = threading.Event()
+        worker_errors: list[BaseException] = []
+        checkpoint_count = 0
+
+        def controlled_install(_values, _target):
+            nonlocal checkpoint_count
+            entered.set()
+            while True:
+                model_installer._install_control_checkpoint()
+                checkpoint_count += 1
+                time.sleep(0.005)
+
+        def run_install():
+            try:
+                model_installer.install_model({
+                    "source": "offline",
+                    "addon_path": "unused",
+                    "install_dir": str(Path(tempfile.gettempdir()) / "javis-control-test"),
+                    "targets": [],
+                    "approved": True,
+                    "confirmation": model_installer.APPROVAL_MARKER,
+                })
+            except BaseException as error:  # Captured for assertions in the test thread.
+                worker_errors.append(error)
+
+        with (
+            patch.object(model_installer, "_authorize_install_plan", return_value={"targets": []}),
+            patch.object(model_installer, "_install_offline", side_effect=controlled_install),
+        ):
+            worker = threading.Thread(target=run_install, daemon=True)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1))
+            progress = model_installer.get_model_install_progress()
+            job_id = progress["job_id"]
+            self.assertRegex(job_id, r"^[0-9a-f]{32}$")
+
+            paused = model_installer.pause_model_install(job_id)
+            self.assertTrue(paused["ok"])
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                if model_installer.get_model_install_progress()["state"] == "paused":
+                    break
+                time.sleep(0.005)
+            self.assertEqual(model_installer.get_model_install_progress()["state"], "paused")
+            count_while_paused = checkpoint_count
+            time.sleep(0.03)
+            self.assertEqual(checkpoint_count, count_while_paused)
+
+            resumed = model_installer.resume_model_install(job_id)
+            self.assertTrue(resumed["ok"])
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and checkpoint_count == count_while_paused:
+                time.sleep(0.005)
+            self.assertGreater(checkpoint_count, count_while_paused)
+
+            cancelled = model_installer.cancel_model_install(job_id)
+            self.assertTrue(cancelled["ok"])
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(worker_errors), 1)
+        self.assertIsInstance(worker_errors[0], model_installer.ModelInstallCancelled)
+        final = model_installer.get_model_install_progress()
+        self.assertEqual(final["job_id"], job_id)
+        self.assertEqual(final["state"], "cancelled")
+        self.assertTrue(final["cancelled"])
+
+    def test_install_controls_reject_a_stale_job_id(self):
+        stale = "0" * 32
+        for control in (
+            model_installer.pause_model_install,
+            model_installer.resume_model_install,
+            model_installer.cancel_model_install,
+        ):
+            with self.subTest(control=control.__name__):
+                result = control(stale)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"], "install_job_not_active")
+
+    def test_cancel_request_stops_hash_and_extract_before_writing(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            source = root / "payload.bin"
+            source.write_bytes(b"payload")
+            archive = root / "payload.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("local-ai/model.bin", b"model")
+
+            operations = (
+                ("hash", lambda: model_installer._sha256(source), None),
+                ("extract", lambda: model_installer._safe_extract(archive, root / "extracted"), root / "extracted"),
+            )
+            for name, operation, destination in operations:
+                with self.subTest(operation=name):
+                    job_id = model_installer._begin_install_job()
+                    model_installer._set_progress("running", "test", 10)
+                    self.assertTrue(model_installer.cancel_model_install(job_id)["ok"])
+                    try:
+                        with self.assertRaises(model_installer.ModelInstallCancelled):
+                            operation()
+                    finally:
+                        model_installer._finish_install_job()
+                    if destination is not None:
+                        self.assertFalse(destination.exists())
 
     def test_existing_gguf_plan_guides_user_to_install_runtime_first(self):
         with tempfile.TemporaryDirectory() as root_value:

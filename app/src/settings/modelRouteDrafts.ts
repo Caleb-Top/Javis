@@ -7,10 +7,35 @@ export type ModelInstallProgressState =
   | "verifying"
   | "staging"
   | "running"
+  | "pausing"
+  | "paused"
+  | "resuming"
+  | "cancelling"
   | "committing"
   | "rolling_back"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
+
+export type ModelInstallControlAvailability = {
+  pause: boolean;
+  resume: boolean;
+  cancel: boolean;
+};
+
+export function getModelInstallControlAvailability(progress: {
+  state: ModelInstallProgressState;
+  jobId: string;
+  cancellable: boolean;
+  pausable: boolean;
+}): ModelInstallControlAvailability {
+  if (!progress.jobId) return { pause: false, resume: false, cancel: false };
+  return {
+    pause: progress.pausable && !["pausing", "paused", "cancelling"].includes(progress.state),
+    resume: progress.state === "paused",
+    cancel: progress.cancellable && progress.state !== "cancelling",
+  };
+}
 
 export type InstalledLocalProfile = {
   model: string;
@@ -24,7 +49,7 @@ type RouteWithLocalProfile = {
 export function isActiveModelInstallState(
   state: ModelInstallProgressState,
 ): boolean {
-  return !["idle", "completed", "failed"].includes(state);
+  return !["idle", "completed", "failed", "cancelled"].includes(state);
 }
 
 export function getModelInstallTargets(

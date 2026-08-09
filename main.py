@@ -1259,6 +1259,27 @@ async def api_get_model_install_progress():
 
     return get_model_install_progress()
 
+
+@app.post("/api/config/models/install/pause")
+async def api_pause_model_install(d: dict = Body(...)):
+    from utils.model_installer import pause_model_install
+
+    return pause_model_install(str(d.get("job_id") or ""))
+
+
+@app.post("/api/config/models/install/resume")
+async def api_resume_model_install(d: dict = Body(...)):
+    from utils.model_installer import resume_model_install
+
+    return resume_model_install(str(d.get("job_id") or ""))
+
+
+@app.post("/api/config/models/install/cancel")
+async def api_cancel_model_install(d: dict = Body(...)):
+    from utils.model_installer import cancel_model_install
+
+    return cancel_model_install(str(d.get("job_id") or ""))
+
 @app.post("/api/config/models/install/plan")
 async def api_plan_model_install(d: dict = Body(...)):
     from utils.model_installer import plan_model_install
@@ -1270,12 +1291,14 @@ async def api_plan_model_install(d: dict = Body(...)):
 
 @app.post("/api/config/models/install")
 async def api_install_model(d: dict = Body(...)):
-    from utils.model_installer import install_model
+    from utils.model_installer import ModelInstallCancelled, install_model
 
     try:
         return await asyncio.to_thread(install_model, d)
     except PermissionError as error:
         return {"ok": False, "error": str(error)[:300], "approval_required": True}
+    except ModelInstallCancelled as error:
+        return {"ok": False, "error": str(error)[:300], "cancelled": True}
     except Exception as error:
         return {"ok": False, "error": str(error)[:300]}
 

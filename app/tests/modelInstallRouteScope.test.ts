@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   applyInstalledLocalProfile,
+  getModelInstallControlAvailability,
   getModelInstallTargets,
   isActiveModelInstallState,
 } from "../src/settings/modelRouteDrafts.ts";
@@ -83,12 +84,55 @@ test("every non-terminal installer phase remains visibly active", () => {
     "verifying",
     "staging",
     "running",
+    "pausing",
+    "paused",
+    "resuming",
+    "cancelling",
     "committing",
     "rolling_back",
   ] as const) {
     assert.equal(isActiveModelInstallState(state), true, state);
   }
-  for (const state of ["idle", "completed", "failed"] as const) {
+  for (const state of ["idle", "completed", "failed", "cancelled"] as const) {
     assert.equal(isActiveModelInstallState(state), false, state);
   }
+});
+
+test("installer controls follow the active job state and server capabilities", () => {
+  assert.deepEqual(
+    getModelInstallControlAvailability({
+      state: "running",
+      jobId: "job-1",
+      cancellable: true,
+      pausable: true,
+    }),
+    { pause: true, resume: false, cancel: true },
+  );
+  assert.deepEqual(
+    getModelInstallControlAvailability({
+      state: "paused",
+      jobId: "job-1",
+      cancellable: true,
+      pausable: true,
+    }),
+    { pause: false, resume: true, cancel: true },
+  );
+  assert.deepEqual(
+    getModelInstallControlAvailability({
+      state: "committing",
+      jobId: "job-1",
+      cancellable: false,
+      pausable: false,
+    }),
+    { pause: false, resume: false, cancel: false },
+  );
+  assert.deepEqual(
+    getModelInstallControlAvailability({
+      state: "running",
+      jobId: "",
+      cancellable: true,
+      pausable: true,
+    }),
+    { pause: false, resume: false, cancel: false },
+  );
 });

@@ -44,6 +44,7 @@ import {
   type ModelConnectionSettingsResponse,
   type ModelDiagnosticReport,
   type ModelInstallPlan,
+  type ModelInstallControlResponse,
   type ModelInstallProgress,
   type RemoteModelCatalogResponse,
   type HuggingFaceSearchResponse,
@@ -548,6 +549,8 @@ settingsSurface = createSettingsSurface({
     client.post<ModelAddonDetectionResponse>("/api/config/models/install/detect", { path }),
   onGetModelInstallProgress: () =>
     client.get<ModelInstallProgress>("/api/config/models/install/progress"),
+  onControlModelInstall: (action, jobId) =>
+    client.post<ModelInstallControlResponse>(`/api/config/models/install/${action}`, { job_id: jobId }),
   onTestModelConnections: () =>
     client.post<ModelDiagnosticReport>("/api/diagnostics/self-test", {
       scope: "model",
