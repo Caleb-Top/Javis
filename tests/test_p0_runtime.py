@@ -328,15 +328,25 @@ class P0RuntimeTests(unittest.TestCase):
         self.assertEqual(answer, "记得。你是 Eric。")
 
     def test_prompt_builder_always_injects_core_identity_memory(self):
+        from core.memory_kernel import CoreMemoryKernel
         from core.prompt_builder import MemoryLayerBuilder
 
-        prompt = MemoryLayerBuilder.build(brain=None)
+        with tempfile.TemporaryDirectory() as td:
+            rules_dir = Path(td)
+            (rules_dir / "core_identity.md").write_text(
+                "# 核心身份规则\n- **主人**: Eric\n",
+                encoding="utf-8",
+            )
+            kernel = CoreMemoryKernel(rules_dir)
+            with patch("core.prompt_builder.get_core_memory_kernel", return_value=kernel):
+                prompt = MemoryLayerBuilder.build(brain=None)
 
         self.assertIn("当前用户叫 Eric", prompt)
         self.assertIn("不要说“还没建立正式身份关系”", prompt)
 
     def test_agent_identity_question_short_circuits_before_llm(self):
         from core.agent import Agent
+        from core.memory_kernel import CoreMemoryKernel
 
         class FailingLLM:
             async def chat_with_tools(self, *args, **kwargs):
@@ -346,8 +356,16 @@ class P0RuntimeTests(unittest.TestCase):
             def get_schemas(self):
                 return []
 
-        agent = Agent(FailingLLM(), EmptyTools())
-        events = asyncio.run(_collect_async(agent.chat("你好，你还记得我是谁吗")))
+        with tempfile.TemporaryDirectory() as td:
+            rules_dir = Path(td)
+            (rules_dir / "core_identity.md").write_text(
+                "# 核心身份规则\n- **主人**: Eric\n",
+                encoding="utf-8",
+            )
+            kernel = CoreMemoryKernel(rules_dir)
+            agent = Agent(FailingLLM(), EmptyTools())
+            with patch("core.agent.get_core_memory_kernel", return_value=kernel):
+                events = asyncio.run(_collect_async(agent.chat("你好，你还记得我是谁吗")))
 
         text = "".join(e.get("text", "") for e in events if e.get("type") == "text_delta")
         self.assertIn("你是 Eric", text)

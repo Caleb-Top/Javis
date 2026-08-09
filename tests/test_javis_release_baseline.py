@@ -379,6 +379,35 @@ class CandidateManifestContractTests(unittest.TestCase):
 
 
 class ReleaseGateContractTests(unittest.TestCase):
+    def test_release_gate_uses_external_cache_and_test_only_tauri_resources(self):
+        from scripts.javis_release_gate import GateCheck, _subprocess_runner
+
+        root = Path("G:/Javis-worktrees/p1-integration")
+        shared = Path("G:/Javis")
+        completed = CompletedProcess([], 0, stdout="ok", stderr="")
+        with (
+            patch("scripts.javis_release_gate._shared_tool_root", return_value=shared),
+            patch("scripts.javis_release_gate.subprocess.run", return_value=completed) as run,
+        ):
+            runner = _subprocess_runner(root)
+            runner(GateCheck("rust", (Path("cargo.exe"), "test"), root))
+
+        environment = run.call_args.kwargs["env"]
+        self.assertTrue(
+            Path(environment["CARGO_TARGET_DIR"]).is_relative_to(Path("G:/Javis-build-cache")),
+            environment["CARGO_TARGET_DIR"],
+        )
+        self.assertTrue(Path(environment["TEMP"]).is_relative_to(Path("G:/Javis-build-cache")))
+        self.assertEqual(json.loads(environment["TAURI_CONFIG"])["bundle"]["resources"], [])
+        path_entries = environment["PATH"].split(";")
+        self.assertEqual(
+            path_entries[:2],
+            [
+                str(shared / "tools/rust/rustup/toolchains/stable-x86_64-pc-windows-gnu/bin"),
+                str(shared / "tools/mingw32/bin"),
+            ],
+        )
+
     def test_failure_is_fail_closed_and_later_gates_are_not_run(self):
         from scripts.javis_release_gate import build_gate_plan, run_gate_plan
 

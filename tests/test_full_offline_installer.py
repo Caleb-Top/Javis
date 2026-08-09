@@ -58,7 +58,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_model_pack_contains_exact_manifest_and_every_referenced_blob(self):
         from scripts.javis_full_installer import collect_ollama_model
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             model_root, manifest = self._model_fixture(Path(temp_dir))
             expected_bytes = len(b"model-bytesconfig-bytes") + manifest.stat().st_size
 
@@ -79,7 +79,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_model_pack_rejects_a_manifest_with_a_missing_blob(self):
         from scripts.javis_full_installer import collect_ollama_model
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             model_root, _ = self._model_fixture(Path(temp_dir))
             (model_root / "blobs" / "sha256-model").unlink()
 
@@ -94,6 +94,10 @@ class FullOfflineInstallerTests(unittest.TestCase):
         self.assertEqual(Path(layout["source_root"]).drive.upper(), "G:")
         for key in ("build_temp", "artifact_dir", "cargo_target", "package_output"):
             self.assertEqual(Path(layout[key]).drive.upper(), "G:", key)
+        build_cache = Path(ROOT.anchor) / "Javis-build-cache"
+        self.assertTrue(Path(layout["build_temp"]).is_relative_to(build_cache))
+        self.assertTrue(Path(layout["cargo_target"]).is_relative_to(build_cache))
+        self.assertFalse(Path(layout["artifact_dir"]).is_relative_to(build_cache))
         for key in ("delivery_dir", "delivery_installer", "install_test_root", "install_test_data"):
             self.assertEqual(Path(layout[key]).drive.upper(), "D:", key)
         self.assertEqual(Path(layout["package_output"]).name, CURRENT_ARTIFACTS["package"])
@@ -102,7 +106,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_optional_r1_addon_has_a_consent_wizard_manifest(self):
         from scripts.javis_full_installer import build_r1_addon
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             model_root, _ = self._model_fixture(temp)
             ollama_root = temp / "ollama"
@@ -143,7 +147,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_model_payload_zip_contains_only_the_selected_model(self):
         from scripts.javis_full_installer import stage_model_payload
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             model_root, _ = self._model_fixture(temp)
             output = temp / "deepseek-r1-8b.zip"
@@ -169,7 +173,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_ollama_payload_preserves_the_portable_runtime_tree(self):
         from scripts.javis_full_installer import stage_ollama_payload
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             source = temp / "ollama"
             (source / "lib" / "ollama" / "cuda_v12").mkdir(parents=True)
@@ -195,7 +199,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_external_bundle_keeps_the_windows_executable_small(self):
         from scripts.javis_full_installer import build_external_bundle, read_external_bundle_index
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             stub = temp / "stub.exe"
             app_setup = temp / "app-setup.exe"
@@ -226,7 +230,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_release_builder_emits_one_verified_executable_and_manifest(self):
         from scripts.javis_full_installer import build_offline_release, read_external_bundle_index
 
-        with tempfile.TemporaryDirectory(dir=ROOT / "tmp") as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             model_root, _ = self._model_fixture(temp)
             ollama_root = temp / "ollama"

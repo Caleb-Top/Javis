@@ -311,8 +311,13 @@ def _resolve_tools(root: Path) -> tuple[Path, Path, Path]:
 def _subprocess_runner(root: Path) -> Runner:
     root = Path(root).resolve()
     dependency_root = _shared_tool_root(root)
-    gate_temp = root / "tmp" / "release-gate"
+    build_cache_root = dependency_root.parent / f"{dependency_root.name}-build-cache"
+    gate_root = build_cache_root / "release-gate" / root.name
+    gate_temp = gate_root / "temp"
     gate_temp.mkdir(parents=True, exist_ok=True)
+    toolchain_bin = dependency_root / "tools/rust/rustup/toolchains/stable-x86_64-pc-windows-gnu/bin"
+    mingw_bin = dependency_root / "tools/mingw32/bin"
+    cargo_bin = dependency_root / "tools/rust/cargo/bin"
     environment = os.environ.copy()
     environment.update(
         {
@@ -321,7 +326,11 @@ def _subprocess_runner(root: Path) -> Runner:
             "TMP": str(gate_temp),
             "CARGO_HOME": str(dependency_root / "tools/rust/cargo"),
             "RUSTUP_HOME": str(dependency_root / "tools/rust/rustup"),
-            "CARGO_TARGET_DIR": str(root / "app/src-tauri/target"),
+            "CARGO_TARGET_DIR": str(gate_root / "rust-target"),
+            "TAURI_CONFIG": json.dumps({"bundle": {"resources": []}}, separators=(",", ":")),
+            "PATH": os.pathsep.join(
+                (str(toolchain_bin), str(mingw_bin), str(cargo_bin), environment.get("PATH", ""))
+            ),
         }
     )
 

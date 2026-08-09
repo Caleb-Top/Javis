@@ -225,7 +225,13 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
         self.assertNotIn("$env:RUSTUP_TOOLCHAIN", build)
         self.assertNotIn("$env:CARGO_BUILD_TARGET", build)
         self.assertNotIn("build --target", build)
-        self.assertIn('"src-tauri\\target\\release"', build)
+        self.assertIn("$JavisCargoTarget = $Layout.cargo_target", build)
+        self.assertIn('$JavisTargetRoot = Join-Path $JavisCargoTarget "release"', build)
+        self.assertNotIn('Join-Path $JavisApp "src-tauri\\target"', build)
+        self.assertIn('$ReleaseGateReport = Join-Path $BuildTemp "release-gate-report.json"', build)
+        self.assertIn('$env:PIP_CACHE_DIR = Join-Path $BuildTemp "pip-cache"', build)
+        self.assertIn('$env:PNPM_HOME = Join-Path $BuildTemp "pnpm-store"', build)
+        self.assertNotIn('Join-Path $JavisRoot "tmp\\release-gate-report.json"', build)
 
 
 if __name__ == "__main__":
