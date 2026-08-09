@@ -204,6 +204,9 @@ const client = createBackendClient({
     controlDrawer?.handleEvent(event);
   },
 });
+client.subscribeReliability((snapshot) => {
+  AppLogger.write("info", "backend-reliability", JSON.stringify(snapshot));
+});
 const conversationDrawer = createConversationDrawer(client, drawerManager);
 controlDrawer = createControlDrawer(client, drawerManager);
 let firstRunReturnMode: DesktopMode = "live";

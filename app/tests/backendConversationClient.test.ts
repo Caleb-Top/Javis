@@ -11,6 +11,7 @@ class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
 
   readyState = FakeWebSocket.CONNECTING;
+  closeCalls = 0;
   sent: Record<string, unknown>[] = [];
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
@@ -26,6 +27,21 @@ class FakeWebSocket {
   open(): void {
     this.readyState = FakeWebSocket.OPEN;
     this.onopen?.();
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.();
+  }
+
+  remoteClose(): void {
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.();
+  }
+
+  fail(): void {
+    this.onerror?.();
   }
 
   send(value: string): void {
@@ -147,6 +163,14 @@ test("acknowledgement timeout removes a disconnected request and reports one loc
   assert.equal(localFailures.length, 1);
   assert.equal(localFailures[0].request_id, requestId);
   assert.equal((localFailures[0].payload as Record<string, unknown>).phase, "accepted");
+  const reliability = client.reliabilitySnapshot();
+  assert.deepEqual(reliability.timeoutCounts, {
+    accepted: 1,
+    "first-response": 0,
+    overall: 0,
+  });
+  assert.equal(reliability.lastTimeoutPhase, "accepted");
+  assert.equal(reliability.requestPhase, "timed-out");
 });
 
 test("accepted requests fail once when the first response does not arrive", async () => {
@@ -177,6 +201,13 @@ test("accepted requests fail once when the first response does not arrive", asyn
   assert.equal(localFailures[0].request_id, requestId);
   assert.equal((localFailures[0].payload as Record<string, unknown>).phase, "first-response");
   assert.equal(client.activeRequestId(), null);
+  assert.deepEqual(client.reliabilitySnapshot().timeoutCounts, {
+    accepted: 0,
+    "first-response": 1,
+    overall: 0,
+  });
+  assert.equal(client.reliabilitySnapshot().lastTimeoutPhase, "first-response");
+  assert.equal(client.reliabilitySnapshot().requestPhase, "timed-out");
   assert.deepEqual(socket.sent.at(-1), {
     type: "conversation.cancel",
     payload: {
@@ -217,6 +248,179 @@ test("a responding request fails once at the overall deadline", async () => {
   assert.equal(localFailures[0].request_id, requestId);
   assert.equal((localFailures[0].payload as Record<string, unknown>).phase, "overall");
   assert.equal(client.activeRequestId(), null);
+  assert.deepEqual(client.reliabilitySnapshot().timeoutCounts, {
+    accepted: 0,
+    "first-response": 0,
+    overall: 1,
+  });
+  assert.equal(client.reliabilitySnapshot().lastTimeoutPhase, "overall");
+  assert.equal(client.reliabilitySnapshot().requestPhase, "timed-out");
+});
+
+test("reliability snapshots are redacted copies and publish request phase changes", () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const observed: ReturnType<ReturnType<typeof createBackendClient>["reliabilitySnapshot"]>[] = [];
+  const client = createBackendClient({
+    sessionId: "private-session-id",
+    requestTimeouts: {
+      acceptedMs: 100,
+      firstResponseMs: 100,
+      overallMs: 200,
+    },
+  });
+  const unsubscribe = client.subscribeReliability((snapshot) => observed.push(snapshot));
+
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].schemaVersion, 1);
+  assert.equal(observed[0].requestPhase, "idle");
+  assert.equal(observed[0].connectionPhase, "idle");
+
+  client.connect();
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  const requestId = client.send("private spoken request");
+  assert.equal(client.reliabilitySnapshot().requestPhase, "waiting-accepted");
+
+  socket.emit({ type: "request.accepted", request_id: requestId });
+  assert.equal(client.reliabilitySnapshot().requestPhase, "waiting-first-response");
+  socket.emit({
+    type: "response.delta",
+    request_id: requestId,
+    payload: { text: "private response" },
+  });
+  assert.equal(client.reliabilitySnapshot().requestPhase, "responding");
+  socket.emit({ type: "request.completed", request_id: requestId });
+  assert.equal(client.reliabilitySnapshot().requestPhase, "terminal");
+
+  const mutableCopy = client.reliabilitySnapshot();
+  mutableCopy.timeoutCounts.accepted = 99;
+  assert.equal(client.reliabilitySnapshot().timeoutCounts.accepted, 0);
+
+  const serialized = JSON.stringify(client.reliabilitySnapshot());
+  for (const secret of [
+    "private-session-id",
+    "private spoken request",
+    "private response",
+    requestId as string,
+    "request_id",
+    "session_id",
+    "audio",
+    "api_key",
+  ]) {
+    assert.equal(serialized.includes(secret), false, `snapshot leaked ${secret}`);
+  }
+
+  const observationCount = observed.length;
+  unsubscribe();
+  client.send("not observed after unsubscribe");
+  assert.equal(observed.length, observationCount);
+  client.cancel("test cleanup");
+});
+
+test("connection diagnostics count reconnect and recovery once and ignore retired sockets", () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const reconnectCallbacks: Array<() => void> = [];
+  Object.assign(window, {
+    clearTimeout: () => undefined,
+    setTimeout: (callback: () => void) => {
+      reconnectCallbacks.push(callback);
+      return reconnectCallbacks.length;
+    },
+  });
+  const client = createBackendClient({ sessionId: "connection-diagnostics" });
+
+  client.connect();
+  const first = FakeWebSocket.instances[0];
+  assert.equal(client.reliabilitySnapshot().connectionPhase, "connecting");
+  first.open();
+  assert.equal(client.reliabilitySnapshot().connectionCount, 1);
+  assert.equal(client.reliabilitySnapshot().recoveryCount, 0);
+  assert.equal(client.reliabilitySnapshot().connectionPhase, "connected");
+
+  first.fail();
+  assert.equal(client.reliabilitySnapshot().connectionErrorCount, 1);
+  first.remoteClose();
+  assert.equal(client.reliabilitySnapshot().disconnectCount, 1);
+  assert.equal(client.reliabilitySnapshot().reconnectCount, 1);
+  assert.equal(client.reliabilitySnapshot().reconnectStreak, 1);
+  assert.equal(client.reliabilitySnapshot().connectionPhase, "reconnecting");
+
+  reconnectCallbacks.shift()?.();
+  const second = FakeWebSocket.instances[1];
+  second.open();
+  const recovered = client.reliabilitySnapshot();
+  assert.equal(recovered.connectionCount, 2);
+  assert.equal(recovered.recoveryCount, 1);
+  assert.equal(recovered.reconnectCount, 1);
+  assert.equal(recovered.reconnectStreak, 0);
+  assert.equal(recovered.connectionPhase, "recovered");
+
+  first.fail();
+  first.remoteClose();
+  assert.deepEqual(client.reliabilitySnapshot(), recovered);
+  assert.deepEqual(client.connectionSnapshot(), { http: false, websocket: true });
+  assert.equal(reconnectCallbacks.length, 0);
+});
+
+test("dispose clears watchdogs and reconnects, closes sockets, and prevents later work", async () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  let nextTimerId = 1;
+  const timers = new Map<number, () => void>();
+  const cancelled = new Set<number>();
+  Object.assign(window, {
+    clearTimeout: (timerId: number) => { cancelled.add(timerId); },
+    setTimeout: (callback: () => void) => {
+      const timerId = nextTimerId;
+      nextTimerId += 1;
+      timers.set(timerId, callback);
+      return timerId;
+    },
+  });
+  const events: Record<string, unknown>[] = [];
+  const observed: unknown[] = [];
+  const client = createBackendClient({
+    sessionId: "dispose-with-pending-work",
+    backendOrigin: "http://127.0.0.1:49152/path-is-ignored",
+    onEvent: (event) => events.push(event),
+  });
+  client.subscribeReliability((snapshot) => observed.push(snapshot));
+
+  client.connect();
+  const first = FakeWebSocket.instances[0];
+  assert.equal(first.url, "ws://127.0.0.1:49152/ws");
+  first.open();
+  const requestId = client.send("must be disposed");
+  first.remoteClose();
+  assert.equal(client.activeRequestId(), requestId);
+  assert.equal(client.reliabilitySnapshot().reconnectCount, 1);
+
+  const observationsBeforeDispose = observed.length;
+  client.dispose();
+  client.dispose();
+  assert.equal(client.activeRequestId(), null);
+  assert.equal(client.queueSize(), 0);
+  assert.equal(observed.length, observationsBeforeDispose);
+
+  for (const [timerId, callback] of timers) {
+    if (!cancelled.has(timerId)) callback();
+  }
+  await Promise.resolve();
+  assert.equal(FakeWebSocket.instances.length, 1);
+  assert.equal(events.length, 0);
+  assert.equal(client.send("ignored after dispose"), null);
+  client.connect();
+  assert.equal(FakeWebSocket.instances.length, 1);
+
+  const socketOwner = createBackendClient({ sessionId: "dispose-open-socket" });
+  socketOwner.connect();
+  const openSocket = FakeWebSocket.instances[1];
+  openSocket.open();
+  socketOwner.dispose();
+  assert.equal(openSocket.closeCalls, 1);
+  assert.equal(socketOwner.activeRequestId(), null);
 });
 
 test("a normal terminal event clears every request watchdog", async () => {

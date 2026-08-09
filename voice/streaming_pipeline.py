@@ -13,6 +13,11 @@ from typing import Callable
 
 Transcriber = Callable[[bytes, int, bool], str]
 TranscriptionSink = Callable[[bytes, int, bool, dict], None]
+MAX_DIAGNOSTIC_COUNTER = (1 << 63) - 1
+
+
+def _bounded_increment(value: int) -> int:
+    return min(MAX_DIAGNOSTIC_COUNTER, max(0, int(value)) + 1)
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,7 @@ class StreamingVoicePipeline:
         self._frames_since_partial = 0
         self._last_partial = ""
         self._turn = 0
+        self._frames_total = 0
         self._dropped_frames = 0
         self._overrun_reported = False
 
@@ -206,7 +212,7 @@ class StreamingVoicePipeline:
     def _append_utterance(self, frame: bytes, events: list[dict]) -> None:
         if len(self._utterance) >= self.max_utterance_frames:
             self._utterance.popleft()
-            self._dropped_frames += 1
+            self._dropped_frames = _bounded_increment(self._dropped_frames)
             if not self._overrun_reported:
                 events.append(
                     {
@@ -249,6 +255,7 @@ class StreamingVoicePipeline:
             raise ValueError(
                 f"expected {self.frame_samples * 2} PCM bytes, received {len(frame)}"
             )
+        self._frames_total = _bounded_increment(self._frames_total)
 
         raw_samples = _decode_pcm(frame)
         echo_cleaned = self._cancel_echo(frame)
@@ -309,7 +316,7 @@ class StreamingVoicePipeline:
         if self._silence_count < self.endpoint_frames:
             return events
 
-        self._turn += 1
+        self._turn = _bounded_increment(self._turn)
         audio_ms = len(self._utterance) * self.config.frame_ms
         input_rms, input_peak = _normalized_pcm_levels(b"".join(self._utterance))
         final_text = self._submit_transcription(
@@ -353,6 +360,7 @@ class StreamingVoicePipeline:
         signal_db = 20.0 * math.log10(max(1.0, self._signal_rms))
         noise_db = 20.0 * math.log10(max(1.0, self._noise_rms))
         return {
+            "frames": self._frames_total,
             "turns": self._turn,
             "dropped_frames": self._dropped_frames,
             "buffered_frames": len(self._utterance),

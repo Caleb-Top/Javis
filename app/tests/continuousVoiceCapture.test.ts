@@ -34,6 +34,19 @@ class FakeVoiceSocket {
     this.readyState = FakeVoiceSocket.CLOSED;
     this.onclose?.();
   }
+
+  remoteClose(): void {
+    this.readyState = FakeVoiceSocket.CLOSED;
+    this.onclose?.();
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 200): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.equal(predicate(), true, `condition was not met within ${timeoutMs} ms`);
 }
 
 test("continuous native voice stays open across turns and barges in before final submit", async () => {
@@ -132,6 +145,7 @@ test("native stream connection errors are reported without escaping the Live act
   } as unknown as BackendClient;
   const capture = createVoiceCapture(client, {
     openStream: () => socket as unknown as WebSocket,
+    reconnectDelaysMs: [100],
     onBargeIn: () => undefined,
     onAudio: () => undefined,
     onState: () => undefined,
@@ -143,9 +157,219 @@ test("native stream connection errors are reported without escaping the Live act
 
   await assert.rejects(started, /native audio stream connection failed/);
   assert.deepEqual(errors, ["语音服务尚未就绪，正在等待本地运行时。"]);
+  await capture.pauseContinuous();
 
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   assert.match(main, /const toggleVoice[\s\S]*?try \{[\s\S]*?voiceCapture\.toggle\(\)[\s\S]*?catch/);
+});
+
+test("continuous voice reconnects through ten forced disconnects and resets backoff after ready", async () => {
+  const sockets: FakeVoiceSocket[] = [];
+  const transcripts: string[] = [];
+  const errors: string[] = [];
+  const client = {
+    sessionId: () => "session-reconnect-ten",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => {
+      const socket = new FakeVoiceSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    reconnectDelaysMs: [0, 1000],
+    onBargeIn: () => undefined,
+    onTranscript: (text) => { transcripts.push(text); },
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: (message) => { errors.push(message); },
+  });
+
+  const started = capture.startContinuous();
+  sockets[0].open();
+  sockets[0].emit({ type: "audio.stream.ready" });
+  await started;
+
+  for (let turn = 0; turn < 10; turn += 1) {
+    const retired = sockets.at(-1)!;
+    retired.remoteClose();
+    await waitFor(() => sockets.length === turn + 2, 150);
+    const recovered = sockets.at(-1)!;
+    recovered.open();
+    recovered.emit({ type: "audio.stream.ready" });
+    assert.equal(capture.isContinuous(), true);
+
+    if (turn === 0) {
+      const socketCount = sockets.length;
+      const errorCount = errors.length;
+      retired.emit({ type: "transcript.final", text: "stale transcript" });
+      retired.onerror?.();
+      retired.onclose?.();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(sockets.length, socketCount);
+      assert.equal(errors.length, errorCount);
+      assert.deepEqual(transcripts, []);
+      assert.equal(capture.isContinuous(), true);
+    }
+  }
+
+  assert.equal(sockets.length, 11);
+  await capture.pauseContinuous();
+});
+
+test("a disconnect before ready rejects startup once while recovery continues", async () => {
+  const sockets: FakeVoiceSocket[] = [];
+  const errors: string[] = [];
+  const client = {
+    sessionId: () => "session-startup-recovery",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => {
+      const socket = new FakeVoiceSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    reconnectDelaysMs: [0, 1],
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: (message) => { errors.push(message); },
+  });
+
+  const started = capture.startContinuous();
+  sockets[0].open();
+  sockets[0].remoteClose();
+  await assert.rejects(started, /native audio stream disconnected/);
+  await waitFor(() => sockets.length === 2);
+  sockets[1].open();
+  sockets[1].emit({ type: "audio.stream.ready" });
+
+  assert.equal(capture.isContinuous(), true);
+  assert.deepEqual(errors, ["native audio stream disconnected"]);
+  await capture.stop();
+});
+
+test("pause cancels pending reconnects and rejects an unsettled startup", async () => {
+  const sockets: FakeVoiceSocket[] = [];
+  const client = {
+    sessionId: () => "session-user-pause",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => {
+      const socket = new FakeVoiceSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    reconnectDelaysMs: [40],
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: () => undefined,
+  });
+
+  const started = capture.startContinuous();
+  sockets[0].open();
+  sockets[0].emit({ type: "audio.stream.ready" });
+  await started;
+  sockets[0].remoteClose();
+  await capture.pauseContinuous();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(sockets.length, 1);
+  assert.equal(capture.isContinuous(), false);
+
+  const pendingStart = capture.startContinuous();
+  const outcome = pendingStart.then(
+    () => "resolved",
+    (error: Error) => `rejected:${error.message}`,
+  );
+  await capture.stop();
+  const settled = await Promise.race([
+    outcome,
+    new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 80)),
+  ]);
+  assert.match(settled, /^rejected:.*cancelled/);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(sockets.length, 2);
+  assert.equal(capture.isContinuous(), false);
+});
+
+test("startup settles when payload or ready-state callbacks throw", async () => {
+  const payloadSocket = new FakeVoiceSocket();
+  const client = {
+    sessionId: () => "session-startup-callbacks",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const payloadCapture = createVoiceCapture(client, {
+    openStream: () => payloadSocket as unknown as WebSocket,
+    reconnectDelaysMs: [100],
+    deviceIndex: () => { throw new Error("device configuration failed"); },
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: () => undefined,
+  });
+
+  const payloadStart = payloadCapture.startContinuous();
+  assert.doesNotThrow(() => payloadSocket.open());
+  await assert.rejects(payloadStart, /device configuration failed/);
+  await payloadCapture.stop();
+
+  const readySocket = new FakeVoiceSocket();
+  let listeningSignals = 0;
+  const readyCapture = createVoiceCapture(client, {
+    openStream: () => readySocket as unknown as WebSocket,
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: (state) => {
+      if (state === "listening" && ++listeningSignals === 2) {
+        throw new Error("ready renderer failed");
+      }
+    },
+    onError: () => undefined,
+  });
+  const readyStart = readyCapture.startContinuous();
+  readySocket.open();
+  try {
+    readySocket.emit({ type: "audio.stream.ready" });
+  } catch {
+    // A presentation callback cannot be allowed to strand the lifecycle promise.
+  }
+  const readyOutcome = await Promise.race([
+    readyStart.then(() => "resolved", () => "rejected"),
+    new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 80)),
+  ]);
+  assert.equal(readyOutcome, "resolved");
+  await readyCapture.stop();
+});
+
+test("startup ready timeout rejects instead of leaving the Live action pending", async () => {
+  const socket = new FakeVoiceSocket();
+  const client = {
+    sessionId: () => "session-ready-timeout",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
+    reconnectDelaysMs: [1000],
+    streamReadyTimeoutMs: 10,
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: () => undefined,
+  });
+
+  const outcome = capture.startContinuous().then(
+    () => "resolved",
+    (error: Error) => `rejected:${error.message}`,
+  );
+  const settled = await Promise.race([
+    outcome,
+    new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 80)),
+  ]);
+  await capture.stop();
+  assert.match(settled, /^rejected:native audio stream ready timed out$/);
 });
 
 test("the App sends only final transcripts and resumes listening after request terminals", () => {

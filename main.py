@@ -18,6 +18,7 @@ _STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_
 
 from core.runtime import create_runtime
 from core.agent_run_recorder import AgentRunRecorder
+from gateway.conversation_stall_harness import ConversationStallHarness
 from gateway.conversation_ws import ConversationWebSocketGateway
 from control.command_tasks import CommandTaskRunner
 from evolution.service import EvolutionService
@@ -35,8 +36,10 @@ from voice.native_capture import (
 )
 from voice.continuous_capture import continuous_capture_manager
 from voice.native_playback import NativePlaybackManager
-from voice.stt import preload_model
-from voice.streaming_ws import serve_continuous_voice_stream
+from voice.runtime_diagnostics import VoiceDiagnosticsCollector
+from voice.stt import get_diagnostics as get_stt_diagnostics, preload_model
+from voice.streaming_ws import get_gateway_diagnostics, serve_continuous_voice_stream
+from voice.tts import get_diagnostics as get_tts_diagnostics
 from utils.local_surface_commands import match_local_surface_command
 
 def _event_store_path() -> Path:
@@ -108,6 +111,14 @@ agent = runtime.agent
 SKILL_LIST = runtime.skill_list
 CURRENT_SKILL = runtime.current_skill
 native_playback_manager = NativePlaybackManager(service=continuous_capture_manager.service)
+voice_diagnostics_collector = VoiceDiagnosticsCollector(
+    capture_getter=get_capture_diagnostics,
+    continuous_getter=continuous_capture_manager.status,
+    gateway_getter=get_gateway_diagnostics,
+    playback_getter=native_playback_manager.status,
+    stt_getter=get_stt_diagnostics,
+    tts_getter=get_tts_diagnostics,
+)
 
 def _register_always_on_tools():
     runtime.register_always_on_tools()
@@ -230,6 +241,7 @@ async def _handle_ws_permission_change(command, ws):
         })
 
 
+conversation_stall_harness = ConversationStallHarness.from_environment()
 conversation_gateway = ConversationWebSocketGateway(
     runtime,
     transcribe=_transcribe_voice_payload,
@@ -239,6 +251,7 @@ conversation_gateway = ConversationWebSocketGateway(
         "tool": _handle_ws_tool,
         "permission_change": _handle_ws_permission_change,
     },
+    stall_harness=conversation_stall_harness,
 )
 
 
@@ -265,16 +278,7 @@ async def api_status():
 
 @app.get("/api/voice/diagnostics")
 async def api_voice_diagnostics():
-    from voice.stt import get_diagnostics as get_stt_diagnostics
-    from voice.tts import get_diagnostics as get_tts_diagnostics
-
-    return {
-        "capture": get_capture_diagnostics(),
-        "continuous": continuous_capture_manager.status(),
-        "playback": native_playback_manager.status(),
-        "stt": get_stt_diagnostics(),
-        "tts": get_tts_diagnostics(),
-    }
+    return await voice_diagnostics_collector.collect()
 
 @app.post("/api/voice/playback/speak")
 async def api_voice_playback_speak(data: dict = Body(default={})):

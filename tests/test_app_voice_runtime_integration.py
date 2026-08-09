@@ -76,6 +76,8 @@ class PackagedVoiceRuntimeTests(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("Source voice reconnect regression: PASS", output)
+        self.assertIn("Source voice observability regression: PASS", output)
+        self.assertIn("Source real watchdog stall harness: PASS", output)
         self.assertIn("Source frontend voice lifecycle: PASS", output)
 
     def test_runtime_overlays_venv_packages_and_local_models(self):

@@ -4,6 +4,7 @@ import { runtimeStateCoordinator } from "../state/RuntimeStateCoordinator.ts";
 
 export type BackendClientOptions = {
   sessionId: string;
+  backendOrigin?: string;
   afterSequence?(): number;
   onConnection?(snapshot: ConnectionSnapshot): void;
   onEvent?(event: BackendEvent): void;
@@ -15,6 +16,43 @@ export type RequestTimeouts = {
   firstResponseMs: number;
   overallMs: number;
 };
+
+export type RequestTimeoutPhase = "accepted" | "first-response" | "overall";
+
+export type RequestReliabilityPhase =
+  | "idle"
+  | "waiting-accepted"
+  | "waiting-first-response"
+  | "responding"
+  | "terminal"
+  | "timed-out";
+
+export type ConnectionReliabilityPhase =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "error"
+  | "reconnecting"
+  | "recovered";
+
+export type BackendReliabilitySnapshot = {
+  schemaVersion: 1;
+  revision: number;
+  processStartedAt: number;
+  updatedAt: number;
+  timeoutCounts: Record<RequestTimeoutPhase, number>;
+  lastTimeoutPhase: RequestTimeoutPhase | null;
+  requestPhase: RequestReliabilityPhase;
+  connectionPhase: ConnectionReliabilityPhase;
+  connectionCount: number;
+  disconnectCount: number;
+  connectionErrorCount: number;
+  reconnectCount: number;
+  recoveryCount: number;
+  reconnectStreak: number;
+};
+
+export type BackendReliabilityListener = (snapshot: BackendReliabilitySnapshot) => void;
 
 export type BackendEvent = Record<string, unknown> & {
   type?: string;
@@ -31,6 +69,7 @@ export type ConnectionSnapshot = {
 
 export type BackendClient = {
   connect(): void;
+  dispose(): void;
   send(text: string): string | null;
   sendVoice(audioBase64: string): string | null;
   cancel(reason?: string): boolean;
@@ -42,6 +81,8 @@ export type BackendClient = {
   sessionId(): string;
   queueSize(): number;
   connectionSnapshot(): ConnectionSnapshot;
+  reliabilitySnapshot(): BackendReliabilitySnapshot;
+  subscribeReliability(listener: BackendReliabilityListener): () => void;
 };
 
 const RECONNECT_DELAYS = [1000, 2000, 3000, 5000, 8000, 15000];
@@ -51,8 +92,6 @@ const DEFAULT_REQUEST_TIMEOUTS: RequestTimeouts = {
   overallMs: 60000,
 };
 const MAX_RETIRED_REQUEST_IDS = 128;
-
-type RequestTimeoutPhase = "accepted" | "first-response" | "overall";
 
 type RequestWatchdogs = {
   acceptedTimer: number | null;
@@ -72,7 +111,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   const sessionId = options.sessionId.trim();
   if (!sessionId) throw new Error("BackendClient requires a conversation session id");
 
-  const endpoints = resolveBackendEndpoints();
+  const endpoints = resolveBackendEndpoints(options.backendOrigin);
   const requestTimeouts: RequestTimeouts = {
     ...DEFAULT_REQUEST_TIMEOUTS,
     ...options.requestTimeouts,
@@ -86,6 +125,63 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   let connection: ConnectionSnapshot = { http: false, websocket: false };
   let currentRequestId: string | null = null;
   let pendingApprovalId = "";
+  let disposed = false;
+  const reliabilityListeners = new Set<BackendReliabilityListener>();
+  const processStartedAt = Date.now();
+  let reliability: BackendReliabilitySnapshot = {
+    schemaVersion: 1,
+    revision: 0,
+    processStartedAt,
+    updatedAt: processStartedAt,
+    timeoutCounts: {
+      accepted: 0,
+      "first-response": 0,
+      overall: 0,
+    },
+    lastTimeoutPhase: null,
+    requestPhase: "idle",
+    connectionPhase: "idle",
+    connectionCount: 0,
+    disconnectCount: 0,
+    connectionErrorCount: 0,
+    reconnectCount: 0,
+    recoveryCount: 0,
+    reconnectStreak: 0,
+  };
+
+  function reliabilitySnapshot(): BackendReliabilitySnapshot {
+    return {
+      ...reliability,
+      timeoutCounts: { ...reliability.timeoutCounts },
+    };
+  }
+
+  function publishReliability(
+    patch: Partial<Omit<BackendReliabilitySnapshot, "schemaVersion" | "revision" | "processStartedAt" | "updatedAt">>,
+  ): void {
+    reliability = {
+      ...reliability,
+      ...patch,
+      timeoutCounts: patch.timeoutCounts
+        ? { ...patch.timeoutCounts }
+        : reliability.timeoutCounts,
+      revision: reliability.revision + 1,
+      updatedAt: Date.now(),
+    };
+    reliabilityListeners.forEach((listener) => {
+      try {
+        listener(reliabilitySnapshot());
+      } catch {
+        // Diagnostics must never interrupt the request or connection lifecycle.
+      }
+    });
+  }
+
+  function subscribeReliability(listener: BackendReliabilityListener): () => void {
+    reliabilityListeners.add(listener);
+    listener(reliabilitySnapshot());
+    return () => reliabilityListeners.delete(listener);
+  }
 
   function publishConnection(patch: Partial<ConnectionSnapshot>): void {
     connection = { ...connection, ...patch };
@@ -110,6 +206,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   }
 
   async function checkBackendHealth(): Promise<boolean> {
+    if (disposed) return false;
     try {
       await get<Record<string, unknown>>("/api/status");
       publishConnection({ http: true });
@@ -129,13 +226,20 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   }
 
   function scheduleReconnect(): void {
+    if (disposed) return;
     window.clearTimeout(reconnectTimer);
     const delay = RECONNECT_DELAYS[Math.min(reconnectAttempt, RECONNECT_DELAYS.length - 1)];
     reconnectAttempt += 1;
+    publishReliability({
+      connectionPhase: "reconnecting",
+      reconnectCount: reliability.reconnectCount + 1,
+      reconnectStreak: reconnectAttempt,
+    });
     reconnectTimer = window.setTimeout(connect, delay);
   }
 
   function sendWire(payload: unknown): boolean {
+    if (disposed) return false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(payload));
     return true;
@@ -180,6 +284,14 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     retireRequest(requestId);
     clearRequestWatchdogs(requestId);
     queue.cancel(requestId);
+    publishReliability({
+      timeoutCounts: {
+        ...reliability.timeoutCounts,
+        [phase]: reliability.timeoutCounts[phase] + 1,
+      },
+      lastTimeoutPhase: phase,
+      requestPhase: "timed-out",
+    });
     sendWire({
       type: "conversation.cancel",
       payload: {
@@ -223,6 +335,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       firstResponseReceived: false,
     };
     requestWatchdogs.set(requestId, watchdogs);
+    publishReliability({ requestPhase: "waiting-accepted" });
     watchdogs.acceptedTimer = window.setTimeout(
       () => timeoutRequest(requestId, "accepted"),
       requestTimeouts.acceptedMs,
@@ -241,7 +354,11 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       window.clearTimeout(watchdogs.acceptedTimer);
       watchdogs.acceptedTimer = null;
     }
-    if (watchdogs.firstResponseReceived) return;
+    if (watchdogs.firstResponseReceived) {
+      publishReliability({ requestPhase: "responding" });
+      return;
+    }
+    publishReliability({ requestPhase: "waiting-first-response" });
     watchdogs.firstResponseTimer = window.setTimeout(
       () => timeoutRequest(requestId, "first-response"),
       requestTimeouts.firstResponseMs,
@@ -256,6 +373,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       window.clearTimeout(watchdogs.firstResponseTimer);
       watchdogs.firstResponseTimer = null;
     }
+    publishReliability({ requestPhase: "responding" });
   }
 
   function flushQueue(): void {
@@ -321,15 +439,31 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
         terminal: true,
       });
     }
+    if (terminal && (!requestId || requestId === activeRequestId)) {
+      publishReliability({ requestPhase: "terminal" });
+    }
   }
 
   function connect(): void {
+    if (disposed) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-    ws = new WebSocket(`${endpoints.websocket}/ws`);
-    ws.onopen = () => {
+    const socket = new WebSocket(`${endpoints.websocket}/ws`);
+    ws = socket;
+    publishReliability({
+      connectionPhase: reconnectAttempt > 0 ? "reconnecting" : "connecting",
+    });
+    socket.onopen = () => {
+      if (disposed || ws !== socket) return;
+      const recovered = reconnectAttempt > 0;
       reconnectAttempt = 0;
       publishConnection({ websocket: true });
+      publishReliability({
+        connectionPhase: recovered ? "recovered" : "connected",
+        connectionCount: reliability.connectionCount + 1,
+        recoveryCount: reliability.recoveryCount + (recovered ? 1 : 0),
+        reconnectStreak: 0,
+      });
       runtimeStateCoordinator.signal({
         source: "websocket",
         state: "idle",
@@ -339,8 +473,12 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       attachConversation();
       flushQueue();
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (disposed || ws !== socket) return;
       publishConnection({ websocket: false });
+      publishReliability({
+        disconnectCount: reliability.disconnectCount + 1,
+      });
       runtimeStateCoordinator.signal({
         source: "websocket",
         state: "offline",
@@ -349,13 +487,21 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       });
       scheduleReconnect();
     };
-    ws.onerror = () => runtimeStateCoordinator.signal({
-      source: "websocket",
-      state: "error",
-      timestamp: Date.now(),
-      detail: "连接发生错误",
-    });
-    ws.onmessage = (event) => {
+    socket.onerror = () => {
+      if (disposed || ws !== socket) return;
+      publishReliability({
+        connectionPhase: "error",
+        connectionErrorCount: reliability.connectionErrorCount + 1,
+      });
+      runtimeStateCoordinator.signal({
+        source: "websocket",
+        state: "error",
+        timestamp: Date.now(),
+        detail: "连接发生错误",
+      });
+    };
+    socket.onmessage = (event) => {
+      if (disposed || ws !== socket) return;
       let msg: BackendEvent;
       try {
         msg = JSON.parse(event.data) as BackendEvent;
@@ -382,6 +528,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   }
 
   function send(text: string): string | null {
+    if (disposed) return null;
     const clean = text.trim();
     if (!clean) return null;
     if (currentRequestId) {
@@ -415,6 +562,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   }
 
   function sendVoice(audioBase64: string): string | null {
+    if (disposed) return null;
     const clean = audioBase64.trim();
     if (!clean) return null;
     const requestId = createRequestId();
@@ -452,12 +600,14 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   }
 
   function cancel(reason = "user interrupt"): boolean {
+    if (disposed) return false;
     if (!currentRequestId) return false;
     const requestId = currentRequestId;
     retireRequest(requestId);
     clearRequestWatchdogs(requestId);
     currentRequestId = null;
     pendingApprovalId = "";
+    publishReliability({ requestPhase: "terminal" });
     if (queue.cancel(requestId)) {
       return true;
     }
@@ -484,6 +634,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   }
 
   function confirm(confirmed: boolean, approvalId = pendingApprovalId): boolean {
+    if (disposed) return false;
     if (!currentRequestId || !approvalId) return false;
     return sendWire({
       type: "conversation.confirm",
@@ -497,8 +648,38 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     });
   }
 
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = 0;
+    reconnectAttempt = 0;
+    Array.from(requestWatchdogs.keys()).forEach(clearRequestWatchdogs);
+    queue.drain();
+    retiredRequestIds.clear();
+    currentRequestId = null;
+    pendingApprovalId = "";
+    reliabilityListeners.clear();
+    connection = { ...connection, websocket: false };
+
+    const socket = ws;
+    ws = null;
+    if (!socket) return;
+    socket.onopen = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.onmessage = null;
+    if (socket.readyState === WebSocket.CLOSED) return;
+    try {
+      socket.close();
+    } catch {
+      // Disposal is best-effort and must remain idempotent.
+    }
+  }
+
   return {
     connect,
+    dispose,
     send,
     sendVoice,
     cancel,
@@ -510,5 +691,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     sessionId: () => sessionId,
     queueSize: () => queue.size(),
     connectionSnapshot: () => ({ ...connection }),
+    reliabilitySnapshot,
+    subscribeReliability,
   };
 }

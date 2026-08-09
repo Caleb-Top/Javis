@@ -109,6 +109,34 @@ function Invoke-SourceRegressionGate {
         Write-Host "Source voice reconnect regression: $(if ($VoicePassed) { 'PASS' } else { 'FAIL' })"
     }
 
+    if (-not $Python) {
+        Add-Check "Source voice observability regression" $false "Python runtime not found"
+        Write-Host "Source voice observability regression: FAIL"
+    }
+    else {
+        $PreviousBytecodeSetting = $env:PYTHONDONTWRITEBYTECODE
+        $env:PYTHONDONTWRITEBYTECODE = "1"
+        Push-Location $ResolvedSource
+        try {
+            $ObservabilityOutput = @(& $Python -B -m pytest `
+                "tests/test_continuous_voice_gateway.py" `
+                "tests/test_streaming_voice_pipeline.py" `
+                "tests/test_conversation_stall_harness.py" `
+                "tests/test_conversation_gateway.py" `
+                "tests/test_voice_diagnostics_collector.py" `
+                "tests/test_main_voice_observability_contract.py" `
+                -q -p no:cacheprovider 2>&1)
+            $ObservabilityExit = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+            $env:PYTHONDONTWRITEBYTECODE = $PreviousBytecodeSetting
+        }
+        $ObservabilityPassed = $ObservabilityExit -eq 0
+        Add-Check "Source voice observability regression" $ObservabilityPassed ($ObservabilityOutput -join " ")
+        Write-Host "Source voice observability regression: $(if ($ObservabilityPassed) { 'PASS' } else { 'FAIL' })"
+    }
+
     if (-not $Node) {
         Add-Check "Source frontend voice lifecycle" $false "Node.js runtime not found"
         Write-Host "Source frontend voice lifecycle: FAIL"
@@ -118,7 +146,8 @@ function Invoke-SourceRegressionGate {
         try {
             $FrontendOutput = @(& $Node --experimental-strip-types --test `
                 "app/tests/backendConversationClient.test.ts" `
-                "app/tests/continuousVoiceCapture.test.ts" 2>&1)
+                "app/tests/continuousVoiceCapture.test.ts" `
+                "app/tests/backendReliabilityDiagnostics.test.ts" 2>&1)
             $FrontendExit = $LASTEXITCODE
         }
         finally {
@@ -127,6 +156,29 @@ function Invoke-SourceRegressionGate {
         $FrontendPassed = $FrontendExit -eq 0
         Add-Check "Source frontend voice lifecycle" $FrontendPassed ($FrontendOutput -join " ")
         Write-Host "Source frontend voice lifecycle: $(if ($FrontendPassed) { 'PASS' } else { 'FAIL' })"
+    }
+
+    if (-not $Python -or -not $Node) {
+        Add-Check "Source real watchdog stall harness" $false "Python or Node.js runtime not found"
+        Write-Host "Source real watchdog stall harness: FAIL"
+    }
+    else {
+        Push-Location $ResolvedSource
+        try {
+            $WatchdogOutput = @(& $Python -B `
+                "scripts/verify_conversation_watchdogs.py" `
+                --node $Node `
+                --work-dir $ResolvedSource `
+                --time-scale 0.01 `
+                --passes 2 2>&1)
+            $WatchdogExit = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+        $WatchdogPassed = $WatchdogExit -eq 0
+        Add-Check "Source real watchdog stall harness" $WatchdogPassed ($WatchdogOutput -join " ")
+        Write-Host "Source real watchdog stall harness: $(if ($WatchdogPassed) { 'PASS' } else { 'FAIL' })"
     }
 
     return -not ($Checks | Where-Object { $_.Status -eq "FAIL" })

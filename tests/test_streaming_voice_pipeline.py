@@ -240,6 +240,7 @@ class StreamingVoicePipelineTests(unittest.TestCase):
         for index in range(40):
             pipeline.push_frame(pcm_frame(noise=2000, phase=index))
         noise_metrics = pipeline.metrics()
+        self.assertEqual(noise_metrics["frames"], 40)
         self.assertIn("noise_rms", noise_metrics)
         self.assertIn("signal_rms", noise_metrics)
         self.assertIn("snr_db", noise_metrics)
@@ -250,6 +251,7 @@ class StreamingVoicePipelineTests(unittest.TestCase):
         for index in range(60):
             fresh.push_frame(pcm_frame(tone=9000, noise=2000, phase=index))
         speech_metrics = fresh.metrics()
+        self.assertEqual(speech_metrics["frames"], 60)
         self.assertGreater(speech_metrics["snr_db"], noise_metrics["snr_db"] + 6.0)
 
     def test_pcm_transcription_uses_wav_and_a_fast_partial_decode(self):
@@ -285,6 +287,26 @@ class StreamingVoicePipelineTests(unittest.TestCase):
 
 
 class ContinuousVoiceServiceTests(unittest.TestCase):
+    def test_reconfigure_discards_old_owner_events_but_keeps_sequence_monotonic(self):
+        service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
+        service.configure()
+        old_terminal = service._publish(
+            {
+                "type": "transcript.final",
+                "text": "must-not-replay",
+                "turn": 1,
+            }
+        )
+
+        service.configure()
+
+        self.assertEqual(service.events_after(0), [])
+        current_ready = service.mark_ready(
+            {"rate": RATE, "trackLabel": "current microphone"}
+        )
+        self.assertGreater(current_ready["sequence"], old_terminal["sequence"])
+        self.assertNotIn("must-not-replay", repr(service.events_after(0)))
+
     def test_default_stt_adapter_uses_the_real_pcm_keyword_contract(self):
         with patch("voice.continuous_capture.transcribe_pcm", return_value="ok") as helper:
             service = ContinuousVoiceService()
@@ -353,7 +375,33 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         self.assertIn("transcript.final", [event["type"] for event in events])
         self.assertNotIn("pcm", repr(events).lower())
         self.assertNotIn("audio_base64", repr(events).lower())
-        self.assertFalse(service.status()["raw_audio_persisted"])
+        status = service.status()
+        self.assertFalse(status["raw_audio_persisted"])
+        self.assertEqual(
+            status["counters"],
+            {
+                "frames": 20,
+                "turns": 1,
+                "transcript_final": 1,
+                "transcript_empty": 0,
+                "audio_error": 0,
+            },
+        )
+
+        service.configure(noise_profile="standard")
+        reset = service.status()
+        self.assertEqual(
+            reset["counters"],
+            {
+                "frames": 0,
+                "turns": 0,
+                "transcript_final": 0,
+                "transcript_empty": 0,
+                "audio_error": 0,
+            },
+        )
+        self.assertEqual(reset["queues"]["transcription"]["peak"], 0)
+        self.assertEqual(reset["queues"]["transcription"]["dropped"], 0)
 
     def test_empty_final_transcript_emits_one_privacy_safe_terminal_event(self):
         service = ContinuousVoiceService(
@@ -408,6 +456,11 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
             self.assertNotIsInstance(empty[field], bool)
             self.assertGreaterEqual(empty[field], 0.0)
             self.assertLessEqual(empty[field], 1.0)
+        counters = service.status()["counters"]
+        self.assertEqual(counters["turns"], 1)
+        self.assertEqual(counters["transcript_final"], 0)
+        self.assertEqual(counters["transcript_empty"], 1)
+        self.assertEqual(counters["audio_error"], 0)
         self.assertGreater(empty["input_rms"], 0.0)
         self.assertGreater(empty["input_peak"], 0.0)
         self.assertLessEqual(empty["input_rms"], empty["input_peak"])
@@ -555,6 +608,11 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
             service.status()["transcription_queue_limit"],
         )
         self.assertEqual(service.status()["transcription_drops"], 1)
+        queue_diagnostics = service.status()["queues"]["transcription"]
+        self.assertEqual(queue_diagnostics["current"], 0)
+        self.assertEqual(queue_diagnostics["peak"], 3)
+        self.assertEqual(queue_diagnostics["limit"], 3)
+        self.assertEqual(queue_diagnostics["dropped"], 1)
 
     def test_full_queue_evicts_partial_before_any_final_turn(self):
         service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
@@ -651,7 +709,7 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         for turn in range(1, 6):
             self.assertEqual(sum(event["turn"] == turn for event in terminals), 1)
 
-    def test_reconfigure_cannot_cross_inflight_terminal_publication(self):
+    def test_reconfigure_waits_for_inflight_terminal_then_discards_old_event(self):
         service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
         service.configure()
         publish_entered = threading.Event()
@@ -717,7 +775,8 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
             if event["type"] in {"transcript.final", "transcript.empty"}
             and event.get("turn") == 1
         ]
-        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals, [])
+        self.assertEqual(service.status()["counters"]["transcript_empty"], 0)
 
     def test_reconfigure_waits_for_inflight_pipeline_before_advancing_generation(self):
         service = ContinuousVoiceService(transcribe=lambda pcm, rate, final: "")
@@ -856,6 +915,9 @@ class ContinuousVoiceServiceTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertTrue(terminal_recorded)
         self.assertEqual(ranges, [(1, 1)])
+        diagnostics = service.status()
+        self.assertEqual(diagnostics["counters"]["audio_error"], 1)
+        self.assertNotIn("current transcription exploded", repr(diagnostics))
 
     def test_playback_pcm_is_forwarded_as_echo_reference(self):
         service = ContinuousVoiceService(
