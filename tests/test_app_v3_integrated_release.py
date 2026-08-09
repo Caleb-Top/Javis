@@ -232,6 +232,8 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
         self.assertIn('$env:PIP_CACHE_DIR = Join-Path $BuildTemp "pip-cache"', build)
         self.assertIn('$env:PNPM_HOME = Join-Path $BuildTemp "pnpm-store"', build)
         self.assertNotIn('Join-Path $JavisRoot "tmp\\release-gate-report.json"', build)
+        self.assertNotIn("$SkipAddonBuild -or $SkipInstallVerification", build)
+        self.assertIn('$FinalizeArguments += "--without-addon"', build)
 
 
 if __name__ == "__main__":

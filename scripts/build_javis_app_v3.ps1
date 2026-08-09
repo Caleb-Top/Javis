@@ -64,8 +64,8 @@ if ([IO.Path]::GetFullPath($JavisRoot).Substring(0, 2).ToUpperInvariant() -ne "G
     throw "Javis development and build root must stay on G:."
 }
 
-if ($SkipBundle -or $SkipRuntime -or $SkipDesktopBuild -or $SkipAddonBuild -or $SkipInstallVerification) {
-    throw "Release mode does not permit skip switches; use a separate development command."
+if ($SkipBundle -or $SkipRuntime -or $SkipDesktopBuild -or $SkipInstallVerification) {
+    throw "Release mode permits only -SkipAddonBuild when an existing separate add-on is retained."
 }
 
 $ReleaseGatePython = Join-Path $JavisRoot "venv\Scripts\python.exe"
@@ -97,7 +97,7 @@ $env:CARGO_TARGET_DIR = $JavisCargoTarget
 $env:PYTHONPATH = $SitePackagesRoot
 New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
 
-foreach ($required in @(
+$RequiredLocalDependencies = @(
     $JavisPython,
     $JavisNpm,
     $JavisCargo,
@@ -106,10 +106,13 @@ foreach ($required in @(
     $CSharpCompiler,
     $WasapiSource,
     $JavisWebView2LoaderSource,
-    (Join-Path $OllamaRuntime "ollama.exe"),
     (Join-Path $PythonRuntimeRoot "python.exe"),
     (Join-Path $SttModelRoot "model.bin")
-)) {
+)
+if (-not $SkipAddonBuild) {
+    $RequiredLocalDependencies += Join-Path $OllamaRuntime "ollama.exe"
+}
+foreach ($required in $RequiredLocalDependencies) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required local build dependency is missing: $required"
     }
@@ -125,11 +128,13 @@ if ($LASTEXITCODE -ne 0) {
     throw "Strict App build preflight failed."
 }
 
-& $JavisPython (Join-Path $JavisRoot "scripts\javis_full_installer.py") `
-    --model-root $ModelRoot `
-    --model "deepseek-r1:8b" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Bundled deepseek-r1:8b validation failed."
+if (-not $SkipAddonBuild) {
+    & $JavisPython (Join-Path $JavisRoot "scripts\javis_full_installer.py") `
+        --model-root $ModelRoot `
+        --model "deepseek-r1:8b" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Bundled deepseek-r1:8b validation failed."
+    }
 }
 
 if (-not $SkipRuntime) {
@@ -192,7 +197,7 @@ $ResolvedRoot = [IO.Path]::GetFullPath($JavisRoot).TrimEnd('\')
 if (-not $ResolvedArtifact.StartsWith($ResolvedRoot + "\", [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to recreate artifact directory outside G:\Javis: $ResolvedArtifact"
 }
-if ((Test-Path -LiteralPath $ArtifactDir) -and -not $SkipAddonBuild) {
+if (Test-Path -LiteralPath $ArtifactDir) {
     Remove-Item -LiteralPath $ArtifactDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $ArtifactDir -Force | Out-Null
@@ -242,10 +247,14 @@ if (-not $SkipAddonBuild) {
     }
 }
 
-$AddonDir = Join-Path $ArtifactDir "Javis-R1-8B-Addon"
-$AddonManifest = Join-Path $AddonDir "Javis-R1-8B-Addon.manifest.json"
-$AddonReport = Join-Path $ArtifactDir "Javis-R1-8B-Addon.report.json"
-foreach ($required in @($MainInstaller, $AddonManifest, $AddonReport)) {
+$RequiredReleaseArtifacts = @($MainInstaller)
+if (-not $SkipAddonBuild) {
+    $AddonDir = Join-Path $ArtifactDir "Javis-R1-8B-Addon"
+    $AddonManifest = Join-Path $AddonDir "Javis-R1-8B-Addon.manifest.json"
+    $AddonReport = Join-Path $ArtifactDir "Javis-R1-8B-Addon.report.json"
+    $RequiredReleaseArtifacts += @($AddonManifest, $AddonReport)
+}
+foreach ($required in $RequiredReleaseArtifacts) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Release artifact is missing: $required"
     }
@@ -284,20 +293,27 @@ else {
 }
 
 $HashFile = Join-Path $ArtifactDir "SHA256SUMS.txt"
-& $JavisPython (Join-Path $JavisRoot "scripts\finalize_javis_release.py") `
-    --artifact-dir $ArtifactDir `
-    --runtime-manifest (Join-Path $JavisResources "javis-runtime-manifest.json") `
-    --release-manifest (Join-Path $JavisRoot "app\release.manifest.json") `
-    --runtime-archive $JavisRuntimeArchive `
-    --gate-report $ReleaseGateReport `
-    --root $JavisRoot | Out-Null
+$FinalizeArguments = @(
+    "--artifact-dir", $ArtifactDir,
+    "--runtime-manifest", (Join-Path $JavisResources "javis-runtime-manifest.json"),
+    "--release-manifest", (Join-Path $JavisRoot "app\release.manifest.json"),
+    "--runtime-archive", $JavisRuntimeArchive,
+    "--gate-report", $ReleaseGateReport,
+    "--root", $JavisRoot
+)
+if ($SkipAddonBuild) {
+    $FinalizeArguments += "--without-addon"
+}
+& $JavisPython (Join-Path $JavisRoot "scripts\finalize_javis_release.py") @FinalizeArguments | Out-Null
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $HashFile)) {
     throw "Final release hash and manifest validation failed."
 }
 
-Write-Host "Javis v3.0 main installer and optional R1 add-on build complete."
+Write-Host "Javis v3.0 main installer build complete."
 Write-Host "G-drive main installer: $MainInstaller"
-Write-Host "Optional R1 add-on: $AddonDir"
+if (-not $SkipAddonBuild) {
+    Write-Host "Optional R1 add-on: $AddonDir"
+}
 Write-Host "Checksums: $HashFile"
 if (-not $SkipInstallVerification) {
     Write-Host "D-drive verified installer: $DeliveryInstaller"
