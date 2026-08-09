@@ -44,6 +44,7 @@ import {
   type ModelConnectionSettingsResponse,
   type ModelDiagnosticReport,
   type ModelInstallPlan,
+  type ModelInstallControlResponse,
   type ModelInstallProgress,
   type RemoteModelCatalogResponse,
   type HuggingFaceSearchResponse,
@@ -119,7 +120,71 @@ let voiceCapture!: ReturnType<typeof createVoiceCapture>;
 const voiceRequestIds = new Set<string>();
 const sidecar = createSidecarClient();
 let backendConnection: ConnectionSnapshot = { http: false, websocket: false };
-let desktopSidecar: SidecarSnapshot = { state: isTauriRuntime() ? "unknown" : "offline" };
+type ObservableSidecarSnapshot = SidecarSnapshot & {
+  ollama_startup?: "idle" | "starting" | "ready" | "failed" | "not-installed";
+};
+let desktopSidecar: ObservableSidecarSnapshot = { state: isTauriRuntime() ? "unknown" : "offline" };
+let modelSetupPrompted = false;
+let modelSetupPendingAfterFirstRun = false;
+let modelSetupRuntimeValidated = false;
+
+type ModelSetupState = ModelConnectionSettingsResponse & {
+  setup_required?: boolean;
+  setup_required_routes?: Array<"live" | "code">;
+  setup_recommended_action?: "install_local_model" | "configure_remote_api" | "none";
+};
+
+function localCatalogContainsModel(models: string[], selectedModel: string): boolean {
+  const selected = selectedModel.trim().toLowerCase();
+  if (!selected) return false;
+  const aliases = new Set([selected]);
+  if (!selected.includes(":")) aliases.add(`${selected}:latest`);
+  return models.some((model) => {
+    const candidate = String(model || "").trim().toLowerCase();
+    return aliases.has(candidate)
+      || (!candidate.includes(":") && aliases.has(`${candidate}:latest`));
+  });
+}
+
+async function findMissingConfiguredLocalRoutes(
+  settings: ModelSetupState,
+): Promise<{
+  missingRoutes: Array<"live" | "code">;
+  complete: boolean;
+}> {
+  const routeNames = (["live", "code"] as const).filter((routeName) => {
+    const route = settings.routes?.[routeName];
+    return route?.source === "local" && Boolean(route.local.model.trim());
+  });
+  const catalogs = new Map<string, Promise<LocalModelCatalogResponse>>();
+  const checks = await Promise.all(routeNames.map(async (routeName) => {
+    const route = settings.routes[routeName];
+    const baseUrl = route.local.base_url;
+    if (!catalogs.has(baseUrl)) {
+      catalogs.set(
+        baseUrl,
+        client.post<LocalModelCatalogResponse>("/api/config/models/local", {
+          base_url: baseUrl,
+        }),
+      );
+    }
+    const catalog = await catalogs.get(baseUrl)!.catch(() => ({
+      connected: false,
+      models: [],
+      message: "Ollama catalog probe failed",
+    }));
+    if (!catalog.connected) return { routeName, checked: false, missing: false };
+    return {
+      routeName,
+      checked: true,
+      missing: !localCatalogContainsModel(catalog.models, route.local.model),
+    };
+  }));
+  return {
+    missingRoutes: checks.filter((check) => check.missing).map((check) => check.routeName),
+    complete: checks.every((check) => check.checked),
+  };
+}
 
 function mergeConnectionDetails(): void {
   const online = backendConnection.http || backendConnection.websocket;
@@ -131,8 +196,47 @@ function mergeConnectionDetails(): void {
     队列: client.queueSize(),
     Kernel: backendConnection.http ? "Running" : "Unavailable",
     Sidecar: isTauriRuntime() ? desktopSidecar.state : "浏览器预览",
+    Ollama: isTauriRuntime()
+      ? (desktopSidecar.ollama_startup === "starting"
+        ? "starting"
+        : desktopSidecar.ollama ?? "unknown")
+      : "external",
     Control: "Audited",
   });
+}
+
+function openModelSettingsForRoute(route: unknown): void {
+  document.dispatchEvent(new CustomEvent("javis:open-model-settings", {
+    detail: { route },
+  }));
+}
+
+async function restartLocalRuntime(route: unknown): Promise<void> {
+  liveCaption.setText("本地模型运行时正在重启…");
+  let snapshot = await sidecar.restart() as ObservableSidecarSnapshot;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    desktopSidecar = snapshot;
+    mergeConnectionDetails();
+    const backendReady = snapshot.state === "healthy" || snapshot.state === "attached";
+    if (backendReady && snapshot.ollama_startup === "ready") {
+      liveCaption.setText("本地模型运行时已重启，请重新发送刚才的请求");
+      return;
+    }
+    if (
+      !backendReady
+      || snapshot.ollama_startup === "failed"
+      || snapshot.ollama_startup === "not-installed"
+    ) break;
+    liveCaption.setText("Javis 后端已恢复，本地模型运行时仍在启动…");
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    snapshot = await sidecar.status() as ObservableSidecarSnapshot;
+  }
+  const message = snapshot.ollama_error
+    || snapshot.last_error
+    || "本地模型运行时启动超时，请检查模型安装与连接";
+  liveCaption.setText(message);
+  AppLogger.write("warn", "restart failed", message);
+  openModelSettingsForRoute(route);
 }
 
 const client = createBackendClient({
@@ -143,6 +247,7 @@ const client = createBackendClient({
     mergeConnectionDetails();
   },
   onEvent: (event) => {
+    let acceptedServerFailure = false;
     if (event.type === "request.failed" && event.local === true) {
       if (event.request_id) voiceRequestIds.delete(event.request_id);
       liveCaption.setText(
@@ -153,7 +258,11 @@ const client = createBackendClient({
     } else if (isConversationEvent(event)) {
       const previous = conversationEvents.current();
       const snapshot = conversationEvents.accept(event);
-      if (snapshot.lastSequence !== previous.lastSequence) {
+      const eventAccepted = snapshot.lastSequence !== previous.lastSequence;
+      acceptedServerFailure = event.type === "request.failed"
+        && eventAccepted
+        && previous.activeRequestId === event.request_id;
+      if (eventAccepted) {
         writeStringPreference(conversationCursorKey, String(snapshot.lastSequence));
       }
       if (event.type === "request.accepted" && snapshot.activeRequestId === event.request_id) {
@@ -166,6 +275,11 @@ const client = createBackendClient({
         liveCaption.setText(snapshot.response, event.request_id);
       } else if (event.type === "request.cancelled" && previous.activeRequestId === event.request_id) {
         liveCaption.setText("已中断", event.request_id);
+      } else if (acceptedServerFailure) {
+        liveCaption.setText(
+          String(event.payload?.error || event.payload?.reason || "请求失败，请检查模型设置"),
+          event.request_id,
+        );
       }
       if (
         event.type === "request.completed"
@@ -196,6 +310,13 @@ const client = createBackendClient({
         queueMicrotask(() => voiceCapture.resumeListeningState());
       }
     }
+    if (acceptedServerFailure) {
+      if (event.payload?.recovery_action === "restart_local_runtime") {
+        void restartLocalRuntime(event.payload?.route);
+      } else if (event.payload?.recovery_action === "open_model_settings") {
+        openModelSettingsForRoute(event.payload?.route);
+      }
+    }
     if (event.type === "app_action") {
       document.dispatchEvent(new CustomEvent("javis:surface-command", {
         detail: event.action,
@@ -219,7 +340,14 @@ const firstRun = createFirstRunPanel({
         : "live";
     void setDesktopMode("code");
   },
-  onClose: () => void setDesktopMode(firstRunReturnMode),
+  onClose: () => {
+    if (modelSetupPendingAfterFirstRun) {
+      modelSetupPendingAfterFirstRun = false;
+      void openModelSetupIfRequired(desktopSidecar);
+      return;
+    }
+    void setDesktopMode(firstRunReturnMode);
+  },
 });
 const showCodeSurface = (): void => {
   const transition = setDesktopMode("code");
@@ -421,6 +549,8 @@ settingsSurface = createSettingsSurface({
     client.post<ModelAddonDetectionResponse>("/api/config/models/install/detect", { path }),
   onGetModelInstallProgress: () =>
     client.get<ModelInstallProgress>("/api/config/models/install/progress"),
+  onControlModelInstall: (action, jobId) =>
+    client.post<ModelInstallControlResponse>(`/api/config/models/install/${action}`, { job_id: jobId }),
   onTestModelConnections: () =>
     client.post<ModelDiagnosticReport>("/api/diagnostics/self-test", {
       scope: "model",
@@ -450,6 +580,63 @@ sidecar.subscribe((snapshot) => {
   }
 });
 
+async function openModelSetupIfRequired(snapshot: ObservableSidecarSnapshot): Promise<void> {
+  if (modelSetupPrompted) return;
+  try {
+    const settings = await client.get<ModelSetupState>("/api/config/models");
+    const selectedManagedLocalRoute = (["live", "code"] as const).some((routeName) => {
+      const route = settings.routes?.[routeName];
+      return route?.source === "local" && /127\.0\.0\.1:11435/.test(route.local.base_url);
+    });
+    const managedRuntimeMissing =
+      snapshot.ollama === "not-installed" && selectedManagedLocalRoute;
+    const localRouteValidation = settings.setup_required
+      ? { missingRoutes: [], complete: true }
+      : await findMissingConfiguredLocalRoutes(settings);
+    if (localRouteValidation.complete) modelSetupRuntimeValidated = true;
+    const missingConfiguredLocalRoutes = localRouteValidation.missingRoutes;
+    const selectedLocalModelNotInstalled = missingConfiguredLocalRoutes.length > 0;
+    if (
+      !settings.setup_required
+      && !managedRuntimeMissing
+      && !selectedLocalModelNotInstalled
+    ) return;
+
+    const firstRunPanel = document.querySelector<HTMLElement>(".first-run-panel");
+    if (firstRunPanel && !firstRunPanel.hidden) {
+      modelSetupPendingAfterFirstRun = true;
+      return;
+    }
+
+    modelSetupPrompted = true;
+    await setDesktopMode("settings");
+    settingsSurface?.open("live", "storage");
+    if (
+      managedRuntimeMissing
+      || selectedLocalModelNotInstalled
+      || settings.setup_recommended_action === "install_local_model"
+    ) {
+      const installer = document.querySelector<HTMLElement>(".model-installer-panel");
+      if (installer?.hidden) {
+        document.querySelector<HTMLButtonElement>(".model-open-installer")?.click();
+      }
+    }
+    AppLogger.write(
+      "warn",
+      "model-setup",
+      selectedLocalModelNotInstalled
+        ? `selected_local_model_not_installed: ${missingConfiguredLocalRoutes.join(",")}`
+        : `Action required for ${(settings.setup_required_routes || ["live", "code"]).join(",")}`,
+    );
+  } catch (error) {
+    AppLogger.write(
+      "warn",
+      "model-setup",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 async function bootRuntime(): Promise<void> {
   const snapshot = isTauriRuntime()
     ? await sidecar.status()
@@ -463,13 +650,23 @@ async function bootRuntime(): Promise<void> {
   }
   client.connect();
   await client.checkBackendHealth();
+  await openModelSetupIfRequired(snapshot);
 }
 
 if (!previewOrbState && !isTauriRuntime()) {
   void bootRuntime();
 }
 window.setInterval(async () => {
-  if (isTauriRuntime()) await sidecar.status();
+  if (isTauriRuntime()) {
+    const snapshot = await sidecar.status() as ObservableSidecarSnapshot;
+    if (
+      snapshot.ollama_startup === "ready"
+      && !modelSetupPrompted
+      && !modelSetupRuntimeValidated
+    ) {
+      await openModelSetupIfRequired(snapshot);
+    }
+  }
   await client.checkBackendHealth();
 }, 15000);
 
@@ -526,6 +723,13 @@ document.addEventListener("javis:surface-command", (event) => {
 });
 document.addEventListener("javis:open-first-run", () => firstRun.open());
 document.addEventListener("javis:open-settings", showSettingsSurface);
+document.addEventListener("javis:open-model-settings", (event) => {
+  const detail = (event as CustomEvent<{ route?: unknown }>).detail;
+  const routeName: "live" | "code" = detail?.route === "code" ? "code" : "live";
+  void setDesktopMode("settings").then(() => {
+    settingsSurface?.open(routeName, "storage");
+  });
+});
 document.addEventListener("javis:voice-profile-changed", (event) => {
   const profile = (event as CustomEvent<unknown>).detail;
   if (profile === "off" || profile === "standard" || profile === "strong") {

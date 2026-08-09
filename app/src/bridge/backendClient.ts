@@ -420,7 +420,7 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
       && Boolean(requestId)
       && requestId !== activeRequestId;
     if (!staleFailure && (type.startsWith("activity.") || type === "approval.required" || type === "request.failed" || type === "response.delta")) {
-      const detail = payload.detail || payload.text || payload.tool || msg.text || msg.detail || type;
+      const detail = payload.error || payload.detail || payload.text || payload.tool || msg.text || msg.detail || type;
       runtimeStateCoordinator.signal({
         source: "websocket",
         state,

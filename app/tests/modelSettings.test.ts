@@ -7,6 +7,10 @@ const settingsSource = readFileSync(
   "utf8",
 );
 const mainSource = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const backendClientSource = readFileSync(
+  new URL("../src/bridge/backendClient.ts", import.meta.url),
+  "utf8",
+);
 const backendSource = readFileSync(
   new URL("../../main.py", import.meta.url),
   "utf8",
@@ -64,4 +68,30 @@ test("model settings are backed by safe Python configuration endpoints", () => {
 test("diagnostics label local and remote model channels separately", () => {
   assert.match(diagnosticsSource, /local_model_connection/);
   assert.match(diagnosticsSource, /remote_model_connection/);
+});
+
+test("startup opens model setup when a configured local model is absent from Ollama", () => {
+  assert.match(mainSource, /findMissingConfiguredLocalRoutes/);
+  assert.match(mainSource, /\/api\/config\/models\/local/);
+  assert.match(mainSource, /catalog\.models/);
+  assert.match(mainSource, /selected_local_model_not_installed/);
+  assert.match(mainSource, /missingConfiguredLocalRoutes/);
+  assert.match(mainSource, /ollama_startup === "ready"/);
+  assert.match(mainSource, /ollama_startup === "starting"/);
+});
+
+test("actionable model failures open the same unified model settings surface", () => {
+  assert.match(mainSource, /payload\?\.recovery_action/);
+  assert.match(mainSource, /javis:open-model-settings/);
+  assert.match(mainSource, /payload\?\.route/);
+  assert.match(mainSource, /settingsSurface\?\.open\(routeName, "storage"\)/);
+  assert.match(mainSource, /liveCaption\.setText\([\s\S]*event\.payload\?\.error/);
+  assert.match(mainSource, /sidecar\.restart\(\)/);
+  assert.match(mainSource, /restart_local_runtime/);
+  assert.match(mainSource, /snapshot\.ollama_startup === "ready"/);
+  assert.match(mainSource, /for \(let attempt = 0; attempt < 60; attempt \+= 1\)/);
+  assert.match(mainSource, /restart failed[\s\S]*openModelSettingsForRoute/);
+  assert.match(mainSource, /acceptedServerFailure = event\.type === "request\.failed"[\s\S]*eventAccepted[\s\S]*previous\.activeRequestId === event\.request_id/);
+  assert.match(mainSource, /if \(acceptedServerFailure\)[\s\S]*restartLocalRuntime/);
+  assert.match(backendClientSource, /payload\.error \|\| payload\.detail/);
 });

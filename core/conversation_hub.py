@@ -348,11 +348,18 @@ class ConversationHub:
                             {"text": text},
                         )
                 elif message_type == "error":
+                    failure_payload = {
+                        "error": str(message.get("message") or "request failed")[:500]
+                    }
+                    for field in ("code", "recovery_action", "route", "reason"):
+                        value = message.get(field)
+                        if isinstance(value, str) and value.strip():
+                            failure_payload[field] = value.strip()[:160]
                     terminal = await self._publish(
                         request.session_id,
                         request.request_id,
                         "request.failed",
-                        {"error": str(message.get("message") or "request failed")[:500]},
+                        failure_payload,
                     )
                     break
                 elif message_type == "done":

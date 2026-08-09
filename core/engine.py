@@ -14,15 +14,12 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-from utils.config_api import get_path_settings
+from core.llm_client import ModelSetupRequiredError
+from utils.config_api import get_path_settings, resolve_model_route
 
 logger = logging.getLogger("engine")
 
 # ── 配置 ──
-PRIMARY_PROVIDER = "deepseek"        # 主算力: 云端 API
-FALLBACK_PROVIDER = "local"          # 备用算力: 本地 Ollama
-OLLAMA_BASE_URL = "http://localhost:11434/v1"
-LOCAL_MODEL = "deepseek-r1:8b"       # 本地模型
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOCAL_MODEL_PATH = str(PROJECT_ROOT / "ollama_models")
 
@@ -72,6 +69,27 @@ class InferenceEngine:
         """带自动降级的 LLM 调用"""
         route = ModelRoute()
 
+        # A route that is already local has no second provider to fall back to.
+        # Calling it again here used to multiply one bounded Ollama probe into
+        # two probes before the Agent retry loop even saw the failure.
+        if self.llm.provider == "local":
+            try:
+                t0 = time.time()
+                resp = await self.llm.chat_with_tools(messages, tools, system)
+                route.latency_ms = (time.time() - t0) * 1000
+                route.provider = "local"
+                route.model = self.llm.model
+                route.is_fallback = self._fallback_active
+                self._route_history.append(route)
+                return resp, route
+            except Exception as error:
+                route.error = str(error)[:100]
+                route.provider = "local"
+                route.model = self.llm.model
+                route.is_fallback = self._fallback_active
+                logger.error("本地模型失败（本次请求不重复探测）: %s", error)
+                raise
+
         # 主路径: 尝试云 API
         if not self._fallback_active:
             try:
@@ -98,6 +116,11 @@ class InferenceEngine:
                     self._saved_model = self.llm.model
                     # 切到本地
                     self._switch_to_local()
+                else:
+                    # Let the bounded Agent retry policy perform the next cloud
+                    # attempt. Do not call the same cloud route again while
+                    # labelling it as a local fallback.
+                    raise
 
         # 备用路径: 本地 Ollama
         try:
@@ -105,7 +128,7 @@ class InferenceEngine:
             resp = await self.llm.chat_with_tools(messages, tools, system)
             route.latency_ms = (time.time() - t0) * 1000
             route.provider = "local"
-            route.model = LOCAL_MODEL
+            route.model = self.llm.model
             route.is_fallback = True
             self._route_history.append(route)
             return resp, route
@@ -118,7 +141,11 @@ class InferenceEngine:
     async def chat_brief_with_fallback(self, messages, system, max_tokens=256) -> tuple:
         """Fast conversational route that immediately uses local compute when cloud is unconfigured."""
         route = ModelRoute()
-        if not self.llm.is_ready:
+        if (
+            not self.llm.is_ready
+            and self.llm.provider != "local"
+            and self._has_local_fallback()
+        ):
             self._saved_provider = self.llm.provider
             self._saved_model = self.llm.model
             self._switch_to_local()
@@ -134,7 +161,7 @@ class InferenceEngine:
             self._route_history.append(route)
             return response, route
         except Exception as primary_error:
-            if self.llm.provider == "local":
+            if self.llm.provider == "local" or not self._has_local_fallback():
                 raise
             route.error = str(primary_error)[:100]
             self._saved_provider = self.llm.provider
@@ -145,7 +172,7 @@ class InferenceEngine:
             response = await self.llm.chat_brief(messages, system, max_tokens=max_tokens)
             route.latency_ms = (time.time() - t0) * 1000
             route.provider = "local"
-            route.model = LOCAL_MODEL
+            route.model = self.llm.model
             route.is_fallback = True
             self._route_history.append(route)
             return response, route
@@ -160,18 +187,45 @@ class InferenceEngine:
 
     def get_power_status(self) -> dict:
         """获取算力状态"""
+        fallback_model, fallback_url = self._local_fallback_profile()
         return {
             "primary": f"{self.llm.provider}/{self.llm.model}",
-            "fallback": f"local/{LOCAL_MODEL}" if not self._fallback_active else "当前在用",
+            "fallback": (
+                f"local/{fallback_model}"
+                if fallback_model and not self._fallback_active
+                else ("当前在用" if self._fallback_active else "unconfigured")
+            ),
             "active": "fallback" if self._fallback_active else "primary",
             "consecutive_failures": self._consecutive_failures,
             "local_model_path": get_path_settings()["model_dir"],
+            "local_base_url": fallback_url,
         }
+
+    def _local_fallback_profile(self) -> tuple[str, str]:
+        route = resolve_model_route(
+            getattr(self.llm, "config", {}),
+            getattr(self.llm, "route_name", "live"),
+        )
+        local = route.get("local", {})
+        return (
+            str(local.get("model") or "").strip(),
+            str(local.get("base_url") or "").strip(),
+        )
+
+    def _has_local_fallback(self) -> bool:
+        model, _ = self._local_fallback_profile()
+        return bool(model)
 
     def _switch_to_local(self):
         """切换到本地 Ollama"""
-        self.llm.switch_provider("local", LOCAL_MODEL, OLLAMA_BASE_URL)
-        logger.info(f"切换到本地模型: {LOCAL_MODEL}")
+        model, base_url = self._local_fallback_profile()
+        if not model:
+            raise ModelSetupRequiredError(
+                getattr(self.llm, "route_name", "live"),
+                "local_fallback_missing",
+            )
+        self.llm.switch_provider("local", model, base_url)
+        logger.info("切换到路由本地模型: %s @ %s", model, base_url)
 
     def _switch_to_cloud(self):
         """恢复云API"""

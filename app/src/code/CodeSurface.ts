@@ -1,16 +1,65 @@
 import { resolveBackendEndpoints } from "../bridge/backendEndpoints.ts";
 
 const LIVE_SURFACE_MARKER = 'data-surface="live"';
+const OPEN_MODEL_SETTINGS_MESSAGE = "javis.open-model-settings";
+const MODEL_SETTINGS_SECTION = "storage";
+
+export type EmbeddedCodeMessageLike = {
+  origin: string;
+  source: unknown;
+  data: unknown;
+};
 
 let legacyFrame: HTMLIFrameElement | null = null;
 let activeSessionId = "";
+let embeddedCodeMessageTarget: Window | null = null;
 
-export function buildCodeSurfaceUrl(sessionId: string, force = false): string {
+export function buildCodeSurfaceUrl(
+  sessionId: string,
+  force = false,
+  parentOrigin = typeof window === "undefined" ? "" : window.location.origin,
+): string {
   const url = new URL("/", resolveBackendEndpoints().http);
   url.searchParams.set("app_embed", "1");
   url.searchParams.set("session_id", sessionId);
+  if (parentOrigin) url.searchParams.set("parent_origin", parentOrigin);
   if (force) url.searchParams.set("reload", String(Date.now()));
   return url.toString();
+}
+
+export function isTrustedEmbeddedCodeSettingsMessage(
+  event: EmbeddedCodeMessageLike,
+  expectedSource: unknown,
+  expectedOrigin: string,
+): boolean {
+  if (event.source !== expectedSource || event.origin !== expectedOrigin) return false;
+  if (!event.data || typeof event.data !== "object") return false;
+  const data = event.data as { type?: unknown; section?: unknown };
+  return data.type === OPEN_MODEL_SETTINGS_MESSAGE
+    && data.section === MODEL_SETTINGS_SECTION;
+}
+
+function handleEmbeddedCodeMessage(event: MessageEvent): void {
+  if (!legacyFrame?.contentWindow) return;
+  const backendOrigin = new URL(resolveBackendEndpoints().http).origin;
+  if (!isTrustedEmbeddedCodeSettingsMessage(
+    event,
+    legacyFrame.contentWindow,
+    backendOrigin,
+  )) return;
+  document.dispatchEvent(new CustomEvent("javis:open-model-settings"));
+}
+
+export function bindEmbeddedCodeMessageListener(target: Window): void {
+  if (embeddedCodeMessageTarget === target) return;
+  embeddedCodeMessageTarget?.removeEventListener("message", handleEmbeddedCodeMessage);
+  target.addEventListener("message", handleEmbeddedCodeMessage);
+  embeddedCodeMessageTarget = target;
+}
+
+export function unbindEmbeddedCodeMessageListener(): void {
+  embeddedCodeMessageTarget?.removeEventListener("message", handleEmbeddedCodeMessage);
+  embeddedCodeMessageTarget = null;
 }
 
 function loadLegacyWeb(force = false): void {
@@ -40,6 +89,7 @@ export function mountCodeSurface(root: HTMLElement): void {
     </section>`;
 
   legacyFrame = root.querySelector<HTMLIFrameElement>(".legacy-web-frame")!;
+  bindEmbeddedCodeMessageListener(window);
   root.querySelector<HTMLButtonElement>(".code-close")!.addEventListener("click", () => {
     document.dispatchEvent(new CustomEvent("javis:return-live"));
   });

@@ -13,6 +13,27 @@ let pushToTalkKey = 'F2';
 let pttActive = false;
 let pttEpoch = 0;
 
+function requestUnifiedModelSettingsIfEmbedded() {
+  let bridge = globalThis.JavisAppEmbedBridge;
+  return Boolean(
+    bridge
+    && typeof bridge.requestModelSettings === 'function'
+    && bridge.requestModelSettings(window.location, window.parent)
+  );
+}
+
+async function legacyModelConfigRequest(path, payload) {
+  if (requestUnifiedModelSettingsIfEmbedded()) {
+    return { applied: false, delegated: true };
+  }
+  let response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return response.json();
+}
+
 function applyThemeStyle(theme) {
   let next = theme || localStorage.getItem('javis_theme_style') || 'soft';
   if (next !== 'dark') next = 'soft';
@@ -425,8 +446,7 @@ function renderModelOptions(provider, models) {
       container.querySelectorAll('.model-btn').forEach(function(b){ b.classList.remove('active'); });
       btn.classList.add('active');
       try {
-        let r = await fetch('/api/config/model', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: provider, model: m[0] }) });
-        let d = await r.json();
+        let d = await legacyModelConfigRequest('/api/config/model', { provider: provider, model: m[0] });
         if (d.applied) { document.getElementById('settings-msg').textContent = '已切换'; fetchStatus(); }
       } catch(e) {}
     };
@@ -434,11 +454,11 @@ function renderModelOptions(provider, models) {
   });
 }
 async function saveLocalModel() {
+  if (requestUnifiedModelSettingsIfEmbedded()) return;
   let inp = document.getElementById('local-model-input');
   if (!inp || !inp.value.trim()) return;
   try {
-    let r = await fetch('/api/config/model', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'local', model: inp.value.trim() }) });
-    let d = await r.json();
+    let d = await legacyModelConfigRequest('/api/config/model', { provider: 'local', model: inp.value.trim() });
     document.getElementById('settings-msg').textContent = d.applied ? '已切换' : '失败';
     if (d.applied) fetchStatus();
   } catch(e) {}
@@ -504,11 +524,11 @@ async function switchEffort(level) {
 }
 
 async function switchModel(modelName) {
+  if (requestUnifiedModelSettingsIfEmbedded()) return;
   try {
     powerSurge('balanced');
     let st = await fetch('/api/status').then(function(r){ return r.json(); });
-    let r = await fetch('/api/config/model', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: st.provider, model: modelName }) });
-    let d = await r.json();
+    let d = await legacyModelConfigRequest('/api/config/model', { provider: st.provider, model: modelName });
     if (d.applied) fetchStatus();
   } catch(e) {}
 }
@@ -1359,6 +1379,7 @@ function playAudio(b64) {
 
 // ── Settings ──
 async function showSettings() {
+  if (requestUnifiedModelSettingsIfEmbedded()) return;
   try {
     let r = await fetch('/api/status'); let s = await r.json();
     document.getElementById('cfg-provider').value = s.provider;
@@ -1370,20 +1391,21 @@ async function showSettings() {
 function hideSettings() { document.getElementById('settings-modal').style.display = 'none'; }
 function onProviderChange() { document.getElementById('apikey-group').style.display = document.getElementById('cfg-provider').value === 'local' ? 'none' : 'flex'; fetchStatus(); }
 async function saveApiKey() {
+  if (requestUnifiedModelSettingsIfEmbedded()) return;
   let p = document.getElementById('cfg-provider').value; let k = document.getElementById('cfg-apikey').value.trim();
   if (!k) { document.getElementById('settings-msg').textContent = '❌ 输入密钥'; return; }
   try {
-    let r = await fetch('/api/config/apikey', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: p, api_key: k }) });
-    let d = await r.json();
+    let d = await legacyModelConfigRequest('/api/config/apikey', { provider: p, api_key: k });
     if (d.applied) { document.getElementById('settings-msg').textContent = '已生效'; document.getElementById('cfg-apikey').value = ''; fetchStatus(); }
   } catch(e) { document.getElementById('settings-msg').textContent = '❌ ' + e.message; }
 }
 function onTempChange() { document.getElementById('temp-val').textContent = document.getElementById('cfg-temperature').value; }
 function initProviderListener() {
+  if (globalThis.JavisAppEmbedBridge && globalThis.JavisAppEmbedBridge.isEmbedded(window.location)) return;
   document.getElementById('cfg-provider').addEventListener('change', async function(){
     let p = document.getElementById('cfg-provider').value;
-    let r = await fetch('/api/config/provider', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: p }) });
-    let d = await r.json(); document.getElementById('settings-msg').textContent = d.applied ? '已切换' : '失败';
+    let d = await legacyModelConfigRequest('/api/config/provider', { provider: p });
+    document.getElementById('settings-msg').textContent = d.applied ? '已切换' : '失败';
     onProviderChange(); fetchStatus();
   });
 }
