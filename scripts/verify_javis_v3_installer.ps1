@@ -1,13 +1,11 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Installer,
-    [Parameter(Mandatory = $true)]
-    [string]$Report,
-    [Parameter(Mandatory = $true)]
-    [string]$Manifest,
+    [string]$Installer = "",
+    [string]$Report = "",
+    [string]$Manifest = "",
     [string]$SourceRoot = "",
     [string]$InstallRoot = "D:\Javis-v3-install-test",
-    [string]$DataRoot = "D:\Javis-v3-data-test"
+    [string]$DataRoot = "D:\Javis-v3-data-test",
+    [switch]$SourceRegressionOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,7 +13,7 @@ $RuntimeRoot = Join-Path $DataRoot "runtime"
 $Canary = Join-Path $RuntimeRoot "app\workspace\v3-preservation-canary.txt"
 $Checks = [System.Collections.Generic.List[object]]::new()
 $PreviousDataRoot = $env:JAVIS_APP_DATA_ROOT
-$ExpectedRuntimeHash = (Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json).archive.sha256
+$ExpectedRuntimeHash = ""
 $VisibleHelperDetected = $false
 $VerifierProcessIds = [Collections.Generic.HashSet[int]]::new()
 $ProcessCursor = $PID
@@ -31,6 +29,107 @@ function Add-Check([string]$Name, [bool]$Passed, [string]$Detail) {
         Status = if ($Passed) { "PASS" } else { "FAIL" }
         Detail = $Detail.Replace("|", "/").Replace("`r", " ").Replace("`n", " ")
     })
+}
+
+function Resolve-SourceTool([string]$Override, [string[]]$Candidates) {
+    if ($Override -and (Test-Path -LiteralPath $Override -PathType Leaf)) {
+        return [IO.Path]::GetFullPath($Override)
+    }
+    foreach ($Candidate in $Candidates) {
+        if ($Candidate -and (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+            return [IO.Path]::GetFullPath($Candidate)
+        }
+    }
+    return $null
+}
+
+function Resolve-PythonTestTool([string]$Override, [string[]]$Candidates) {
+    $AllCandidates = @()
+    if ($Override) {
+        $AllCandidates += $Override
+    }
+    $AllCandidates += $Candidates
+    foreach ($Candidate in $AllCandidates | Select-Object -Unique) {
+        if (-not $Candidate -or -not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+            continue
+        }
+        try {
+            $null = @(& $Candidate -B -m pytest --version 2>&1)
+            if ($LASTEXITCODE -eq 0) {
+                return [IO.Path]::GetFullPath($Candidate)
+            }
+        }
+        catch {
+            continue
+        }
+    }
+    return $null
+}
+
+function Invoke-SourceRegressionGate {
+    if (-not $SourceRoot) {
+        throw "SourceRoot is required for the source regression gate."
+    }
+    $ResolvedSource = [IO.Path]::GetFullPath($SourceRoot)
+    if (-not (Test-Path -LiteralPath $ResolvedSource -PathType Container)) {
+        throw "SourceRoot does not exist: $ResolvedSource"
+    }
+
+    $Python = Resolve-PythonTestTool $env:JAVIS_TEST_PYTHON @(
+        (Join-Path $ResolvedSource "venv\Scripts\python.exe"),
+        (Join-Path $ResolvedSource "tools\python-runtime-3.11\python.exe"),
+        "G:\Javis\venv\Scripts\python.exe",
+        "G:\Javis\tools\python-runtime-3.11\python.exe"
+    )
+    $Node = Resolve-SourceTool $env:JAVIS_TEST_NODE @(
+        (Join-Path $ResolvedSource "tools\nodejs\node.exe"),
+        "G:\Javis\tools\nodejs\node.exe"
+    )
+
+    if (-not $Python) {
+        Add-Check "Source voice reconnect regression" $false "Python runtime not found"
+        Write-Host "Source voice reconnect regression: FAIL"
+    }
+    else {
+        $PreviousBytecodeSetting = $env:PYTHONDONTWRITEBYTECODE
+        $env:PYTHONDONTWRITEBYTECODE = "1"
+        Push-Location $ResolvedSource
+        try {
+            $VoiceOutput = @(& $Python -B -m pytest `
+                "tests/test_voice_reconnect_integration.py" `
+                -q -p no:cacheprovider 2>&1)
+            $VoiceExit = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+            $env:PYTHONDONTWRITEBYTECODE = $PreviousBytecodeSetting
+        }
+        $VoicePassed = $VoiceExit -eq 0
+        Add-Check "Source voice reconnect regression" $VoicePassed ($VoiceOutput -join " ")
+        Write-Host "Source voice reconnect regression: $(if ($VoicePassed) { 'PASS' } else { 'FAIL' })"
+    }
+
+    if (-not $Node) {
+        Add-Check "Source frontend voice lifecycle" $false "Node.js runtime not found"
+        Write-Host "Source frontend voice lifecycle: FAIL"
+    }
+    else {
+        Push-Location $ResolvedSource
+        try {
+            $FrontendOutput = @(& $Node --experimental-strip-types --test `
+                "app/tests/backendConversationClient.test.ts" `
+                "app/tests/continuousVoiceCapture.test.ts" 2>&1)
+            $FrontendExit = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+        $FrontendPassed = $FrontendExit -eq 0
+        Add-Check "Source frontend voice lifecycle" $FrontendPassed ($FrontendOutput -join " ")
+        Write-Host "Source frontend voice lifecycle: $(if ($FrontendPassed) { 'PASS' } else { 'FAIL' })"
+    }
+
+    return -not ($Checks | Where-Object { $_.Status -eq "FAIL" })
 }
 
 function Get-JavisTestProcesses {
@@ -237,6 +336,19 @@ function Remove-TestData {
             Start-Sleep -Milliseconds (250 * $Attempt)
         }
     }
+}
+
+if ($SourceRegressionOnly) {
+    $SourcePassed = Invoke-SourceRegressionGate
+    exit $(if ($SourcePassed) { 0 } else { 1 })
+}
+
+if (-not $Installer -or -not $Report -or -not $Manifest) {
+    throw "Installer, Report and Manifest are required for installation verification."
+}
+$ExpectedRuntimeHash = (Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json).archive.sha256
+if ($SourceRoot) {
+    Invoke-SourceRegressionGate | Out-Null
 }
 
 Stop-JavisPortOwner

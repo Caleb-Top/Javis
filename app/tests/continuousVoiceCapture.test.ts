@@ -156,6 +156,23 @@ test("the App sends only final transcripts and resumes listening after request t
   assert.match(main, /request\.(completed|cancelled|failed)[\s\S]*?resumeListeningState/);
 });
 
+test("the production Live surface renders empty transcripts without submitting a request", () => {
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  const compositionStart = main.indexOf("voiceCapture = createVoiceCapture");
+  const compositionEnd = main.indexOf("diagnostics =", compositionStart);
+  const composition = main.slice(compositionStart, compositionEnd);
+
+  assert.ok(compositionStart >= 0);
+  assert.ok(compositionEnd > compositionStart);
+  assert.match(
+    composition,
+    /onEmptyTranscript:\s*\(message\)\s*=>\s*\{[\s\S]*?liveCaption\.setText\(message\)/,
+  );
+  const callbackStart = composition.indexOf("onEmptyTranscript:");
+  const callbackEnd = composition.indexOf("onLevel:", callbackStart);
+  assert.doesNotMatch(composition.slice(callbackStart, callbackEnd), /client\.send\(/);
+});
+
 test("local request failures bypass the strict reducer and recover Live listening", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const localFailureBranch = main.indexOf(

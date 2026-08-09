@@ -326,6 +326,9 @@ voiceCapture = createVoiceCapture(client, {
   onPartial: (text) => {
     liveCaption.setText(text);
   },
+  onEmptyTranscript: (message) => {
+    liveCaption.setText(message);
+  },
   onLevel: (level) => {
     liveOrb.setAudioLevel(level);
   },
