@@ -325,6 +325,42 @@ class ConversationHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal["payload"]["error"], "fallback exhausted")
         self.assertEqual(runs[0]["status"], "failed")
 
+    async def test_actionable_model_failure_fields_survive_the_hub_terminal_event(self):
+        async def runner(request, token):
+            yield {
+                "type": "error",
+                "code": "model_setup_required",
+                "message": "select a model",
+                "recovery_action": "open_model_settings",
+                "route": "live",
+                "reason": "selected_local_model_not_installed",
+                "base_url": "http://secret@example.invalid/v1",
+            }
+
+        await self.hub.submit(
+            ConversationRequest(
+                "session-1",
+                "request-model-setup",
+                "hello",
+                "live",
+                "key-model-setup",
+            ),
+            runner,
+        )
+        terminal = await self.hub.wait_for_terminal("request-model-setup")
+
+        self.assertEqual(terminal["type"], "request.failed")
+        self.assertEqual(
+            terminal["payload"],
+            {
+                "error": "select a model",
+                "code": "model_setup_required",
+                "recovery_action": "open_model_settings",
+                "route": "live",
+                "reason": "selected_local_model_not_installed",
+            },
+        )
+
     def test_recorder_cancel_is_terminal_and_cannot_be_overwritten_by_done(self):
         recorder = AgentRunRecorder(
             self.run_store,

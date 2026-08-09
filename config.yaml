@@ -1,6 +1,6 @@
 model:
   provider: local
-  name: deepseek-r1:8b
+  name: ''
   effort: max
   temperature: 0.3
   max_tokens: 32768
@@ -8,8 +8,8 @@ model:
   max_retries: 8
   local:
     api_key: ollama
-    base_url: http://localhost:11434/v1
-    name: deepseek-r1:8b
+    base_url: http://127.0.0.1:11435/v1
+    name: ''
   anthropic:
     api_key: ''
     name: claude-haiku-3-5

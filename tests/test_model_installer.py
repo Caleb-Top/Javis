@@ -1,5 +1,8 @@
 import hashlib
+import io
 import json
+import socket
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -30,6 +33,88 @@ class ModelInstallerTests(unittest.TestCase):
         }), encoding="utf-8")
         return manifest
 
+    def _gguf(
+        self,
+        path: Path,
+        *,
+        architecture: str = "qwen2",
+        file_type: int = 15,
+        magic: bytes = b"GGUF",
+    ) -> Path:
+        entries = [
+            ("general.architecture", 8, architecture),
+            ("general.file_type", 4, file_type),
+        ]
+        payload = bytearray(magic)
+        payload.extend(struct.pack("<IQQ", 3, 1, len(entries)))
+        for key, value_type, value in entries:
+            encoded_key = key.encode("utf-8")
+            payload.extend(struct.pack("<Q", len(encoded_key)))
+            payload.extend(encoded_key)
+            payload.extend(struct.pack("<I", value_type))
+            if value_type == 8:
+                encoded_value = str(value).encode("utf-8")
+                payload.extend(struct.pack("<Q", len(encoded_value)))
+                payload.extend(encoded_value)
+            else:
+                payload.extend(struct.pack("<I", int(value)))
+        tensor_name = b"weight"
+        payload.extend(struct.pack("<Q", len(tensor_name)))
+        payload.extend(tensor_name)
+        payload.extend(struct.pack("<I", 1))
+        payload.extend(struct.pack("<Q", 1))
+        payload.extend(struct.pack("<I", 0))  # GGML_TYPE_F32
+        payload.extend(struct.pack("<Q", 0))
+        payload.extend(b"\x00" * (-len(payload) % 32))
+        payload.extend(struct.pack("<f", 1.0))
+        path.write_bytes(payload)
+        return path
+
+    @staticmethod
+    def _response(
+        *,
+        status: int = 200,
+        body: bytes = b"",
+        headers: dict[str, str] | None = None,
+    ):
+        class Response:
+            status_code = status
+
+            def __init__(self) -> None:
+                self.headers = dict(headers or {})
+                self.raw = io.BytesIO(body)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+            def close(self) -> None:
+                self.raw.close()
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def iter_content(self, chunk_size: int):
+                while True:
+                    chunk = self.raw.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return Response()
+
+    @staticmethod
+    def _approved(plan: dict, values: dict) -> dict:
+        return {
+            **values,
+            "plan_token": plan["plan_token"],
+            "approved": True,
+            "confirmation": model_installer.APPROVAL_MARKER,
+        }
+
     def test_plan_is_read_only_and_install_requires_explicit_consent(self):
         with tempfile.TemporaryDirectory() as root_value:
             root = Path(root_value)
@@ -59,19 +144,24 @@ class ModelInstallerTests(unittest.TestCase):
                 patch.object(model_installer, "_data_root", return_value=data_root),
                 patch.object(model_installer, "_persist_installed_model_configuration") as persist_config,
             ):
-                result = model_installer.install_model({
+                values = {
                     "source": "offline",
                     "addon_path": str(manifest),
                     "install_dir": str(target),
-                    "approved": True,
-                    "confirmation": model_installer.APPROVAL_MARKER,
-                })
+                    "targets": ["live"],
+                }
+                plan = model_installer.plan_model_install(values)
+                result = model_installer.install_model(self._approved(plan, values))
             self.assertTrue(result["ok"])
             self.assertTrue((target / "local-ai" / "ollama" / "ollama.exe").is_file())
             self.assertEqual((data_root / "local-ai-root.txt").read_text(encoding="utf-8"), str(target))
             self.assertEqual(result["base_url"], "http://127.0.0.1:11435/v1")
             self.assertTrue(result["configuration_applied"])
-            persist_config.assert_called_once_with("test:1b", "http://127.0.0.1:11435/v1")
+            persist_config.assert_called_once_with(
+                "test:1b",
+                "http://127.0.0.1:11435/v1",
+                ["live"],
+            )
             progress = model_installer.get_model_install_progress()
             self.assertEqual(progress["state"], "completed")
             self.assertEqual(progress["percent"], 100)
@@ -119,50 +209,630 @@ class ModelInstallerTests(unittest.TestCase):
     def test_existing_gguf_plan_guides_user_to_install_runtime_first(self):
         with tempfile.TemporaryDirectory() as root_value:
             root = Path(root_value)
-            gguf = root / "existing-q4.gguf"
-            gguf.write_bytes(b"gguf-test")
+            gguf = self._gguf(root / "existing-q4.gguf")
             result = model_installer.plan_model_install({
                 "source": "local_gguf",
                 "gguf_path": str(gguf),
                 "install_dir": str(root / "models"),
+                "targets": [],
             })
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["source"], "local_gguf")
             self.assertEqual(result["download_bytes"], 0)
             self.assertFalse(result["runtime_ready"])
+            self.assertEqual(result["architecture"], "qwen2")
+            self.assertEqual(result["quantization"], "Q4_K_M")
+            self.assertRegex(result["sha256"], r"^[0-9a-f]{64}$")
 
-    def test_completed_install_profile_is_persisted_for_both_routes(self):
+    def test_completed_install_only_updates_explicit_route_targets(self):
+        cases = (
+            ([], "live-old", "code-old"),
+            (["live"], "new-local", "code-old"),
+            (["code"], "live-old", "new-local"),
+            (["live", "code"], "new-local", "new-local"),
+        )
+        for targets, expected_live, expected_code in cases:
+            with self.subTest(targets=targets), tempfile.TemporaryDirectory() as root_value:
+                config_path = Path(root_value) / "config.yaml"
+                with patch.object(config_api, "CONFIG_PATH", config_path):
+                    configured = config_api.set_model_connection_settings({
+                        "source": "local",
+                        "local": {"model": "live-old", "base_url": "http://127.0.0.1:11434/v1"},
+                        "remote": {
+                            "provider": "deepseek",
+                            "model": "deepseek-chat",
+                            "base_url": "https://api.deepseek.com/v1",
+                        },
+                        "share_live_code": False,
+                        "routes": {
+                            "live": {
+                                "source": "local",
+                                "local": {"model": "live-old", "base_url": "http://127.0.0.1:11434/v1"},
+                                "remote": {"provider": "deepseek", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
+                            },
+                            "code": {
+                                "source": "remote",
+                                "local": {"model": "code-old", "base_url": "http://127.0.0.1:11434/v1"},
+                                "remote": {"provider": "deepseek", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
+                            },
+                        },
+                    })
+                    self.assertTrue(configured["applied"])
+                    model_installer._persist_installed_model_configuration(
+                        "new-local",
+                        "http://127.0.0.1:11435/v1",
+                        targets,
+                    )
+                    saved = config_api.get_model_connection_settings()
+
+                self.assertFalse(saved["share_live_code"])
+                self.assertEqual(saved["routes"]["live"]["source"], "local")
+                self.assertEqual(saved["routes"]["code"]["source"], "remote")
+                self.assertEqual(saved["routes"]["live"]["local"]["model"], expected_live)
+                self.assertEqual(saved["routes"]["code"]["local"]["model"], expected_code)
+
+    def test_install_requires_signed_plan_and_rejects_changed_directory_or_targets(self):
         with tempfile.TemporaryDirectory() as root_value:
-            config_path = Path(root_value) / "config.yaml"
-            with patch.object(config_api, "CONFIG_PATH", config_path):
-                configured = config_api.set_model_connection_settings({
-                    "share_live_code": False,
-                    "routes": {
-                        "live": {
-                            "source": "local",
-                            "local": {"model": "old-local", "base_url": "http://127.0.0.1:11434/v1"},
-                            "remote": {"provider": "deepseek", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
-                        },
-                        "code": {
-                            "source": "remote",
-                            "local": {"model": "old-local", "base_url": "http://127.0.0.1:11434/v1"},
-                            "remote": {"provider": "deepseek", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
-                        },
-                    },
-                })
-                self.assertTrue(configured["applied"])
-                model_installer._persist_installed_model_configuration(
-                    "deepseek-r1:8b",
-                    "http://127.0.0.1:11435/v1",
-                )
-                saved = config_api.get_model_connection_settings()
+            root = Path(root_value)
+            manifest = self._addon(root)
+            target = root / "selected"
+            values = {
+                "source": "offline",
+                "addon_path": str(manifest),
+                "install_dir": str(target),
+                "targets": ["live"],
+            }
+            plan = model_installer.plan_model_install(values)
+            self.assertRegex(plan["plan_token"], r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 
-            self.assertFalse(saved["share_live_code"])
-            self.assertEqual(saved["routes"]["live"]["source"], "local")
-            self.assertEqual(saved["routes"]["code"]["source"], "remote")
-            self.assertEqual(saved["routes"]["live"]["local"]["model"], "deepseek-r1:8b")
-            self.assertEqual(saved["routes"]["code"]["local"]["base_url"], "http://127.0.0.1:11435/v1")
+            with self.assertRaises(PermissionError):
+                model_installer.install_model({
+                    **values,
+                    "approved": True,
+                    "confirmation": model_installer.APPROVAL_MARKER,
+                })
+            with self.assertRaisesRegex(PermissionError, "计划"):
+                model_installer.install_model(self._approved(plan, {
+                    **values,
+                    "install_dir": str(root / "changed"),
+                }))
+            with self.assertRaisesRegex(PermissionError, "计划"):
+                model_installer.install_model(self._approved(plan, {
+                    **values,
+                    "targets": ["code"],
+                }))
+            self.assertFalse(target.exists())
+
+    def test_signed_plan_is_invalidated_when_addon_hash_size_or_license_changes(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            manifest = self._addon(root)
+            target = root / "selected"
+            values = {
+                "source": "offline",
+                "addon_path": str(manifest),
+                "install_dir": str(target),
+                "targets": [],
+            }
+            plan = model_installer.plan_model_install(values)
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            payload = root / data["payloads"][0]["path"]
+            with zipfile.ZipFile(payload, "a") as archive:
+                archive.writestr("changed.bin", b"changed")
+            data["license"] = "changed-license"
+            data["payloads"][0]["size"] = payload.stat().st_size
+            data["payloads"][0]["sha256"] = hashlib.sha256(payload.read_bytes()).hexdigest()
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(PermissionError, "计划"):
+                model_installer.install_model(self._approved(plan, values))
+            self.assertFalse(target.exists())
+
+    def test_offline_commit_rolls_back_files_and_pointer_when_configuration_fails(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            manifest = self._addon(root)
+            target = root / "selected"
+            existing = target / "local-ai" / "keep.txt"
+            existing.parent.mkdir(parents=True)
+            existing.write_text("keep", encoding="utf-8")
+            data_root = root / "data"
+            data_root.mkdir()
+            pointer = data_root / "local-ai-root.txt"
+            pointer.write_text("previous-root", encoding="utf-8")
+            values = {
+                "source": "offline",
+                "addon_path": str(manifest),
+                "install_dir": str(target),
+                "targets": ["live", "code"],
+            }
+            plan = model_installer.plan_model_install(values)
+
+            with (
+                patch.object(model_installer, "_data_root", return_value=data_root),
+                patch.object(
+                    model_installer,
+                    "_persist_installed_model_configuration",
+                    side_effect=RuntimeError("config failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "config failed"):
+                    model_installer.install_model(self._approved(plan, values))
+
+            self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((target / "local-ai" / "ollama" / "ollama.exe").exists())
+            self.assertEqual(pointer.read_text(encoding="utf-8"), "previous-root")
+            self.assertEqual(model_installer.get_model_install_progress()["state"], "failed")
+
+    def test_offline_plan_budgets_validated_uncompressed_bytes(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            payload = root / "compressed.zip"
+            model_bytes = b"A" * (256 * 1024)
+            with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("local-ai/ollama/ollama.exe", b"runtime")
+                archive.writestr("local-ai/models/model.bin", model_bytes)
+            manifest = root / model_installer.ADDON_MANIFEST
+            manifest.write_text(json.dumps({
+                "schema": 1,
+                "kind": "javis-local-model-addon",
+                "payloads": [{
+                    "role": "runtime-and-model",
+                    "path": payload.name,
+                    "size": payload.stat().st_size,
+                    "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+                }],
+            }), encoding="utf-8")
+
+            with patch.object(model_installer, "MAX_ZIP_COMPRESSION_RATIO", 2000):
+                plan = model_installer.plan_model_install({
+                    "source": "offline",
+                    "addon_path": str(manifest),
+                    "install_dir": str(root / "selected"),
+                    "targets": [],
+                })
+
+            self.assertEqual(plan["required_bytes"], len(model_bytes) + len(b"runtime"))
+            self.assertGreater(plan["required_bytes"], payload.stat().st_size)
+
+    def test_safe_extract_rejects_member_total_and_ratio_before_destination_exists(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            cases = []
+
+            member_archive = root / "member.zip"
+            with zipfile.ZipFile(member_archive, "w") as archive:
+                archive.writestr("large.bin", b"x" * 65)
+            cases.append((member_archive, {"MAX_ZIP_MEMBER_BYTES": 64}, "单文件"))
+
+            total_archive = root / "total.zip"
+            with zipfile.ZipFile(total_archive, "w") as archive:
+                archive.writestr("one.bin", b"x" * 40)
+                archive.writestr("two.bin", b"y" * 40)
+            cases.append((total_archive, {"MAX_ZIP_TOTAL_BYTES": 64}, "总"))
+
+            ratio_archive = root / "ratio.zip"
+            with zipfile.ZipFile(ratio_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("bomb.bin", b"0" * 4096)
+            cases.append((ratio_archive, {"MAX_ZIP_COMPRESSION_RATIO": 2}, "压缩比"))
+
+            for index, (archive_path, limits, message) in enumerate(cases):
+                destination = root / f"destination-{index}"
+                patches = [
+                    patch.object(model_installer, name, value, create=True)
+                    for name, value in limits.items()
+                ]
+                for active_patch in patches:
+                    active_patch.start()
+                try:
+                    with self.subTest(limit=message), self.assertRaisesRegex(ValueError, message):
+                        model_installer._safe_extract(archive_path, destination)
+                finally:
+                    for active_patch in reversed(patches):
+                        active_patch.stop()
+                self.assertFalse(destination.exists())
+
+    def test_record_failure_restores_config_files_and_pointer_without_temp_record(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            manifest = self._addon(root)
+            target = root / "selected"
+            existing = target / "local-ai" / "keep.txt"
+            existing.parent.mkdir(parents=True)
+            existing.write_text("keep", encoding="utf-8")
+            data_root = root / "data"
+            data_root.mkdir()
+            pointer = data_root / "local-ai-root.txt"
+            pointer.write_text("previous-root", encoding="utf-8")
+            config_path = root / "config.yaml"
+            config_path.write_bytes(b"original-config")
+            values = {
+                "source": "offline",
+                "addon_path": str(manifest),
+                "install_dir": str(target),
+                "targets": ["live", "code"],
+            }
+            plan = model_installer.plan_model_install(values)
+            real_replace = model_installer.os.replace
+
+            def fail_record_replace(source, destination):
+                if Path(destination).parent.name == "install-records":
+                    raise OSError("record replace failed")
+                return real_replace(source, destination)
+
+            def change_config(*_args):
+                config_path.write_bytes(b"changed-config")
+
+            with (
+                patch.object(model_installer, "_data_root", return_value=data_root),
+                patch.object(config_api, "CONFIG_PATH", config_path),
+                patch.object(model_installer, "_persist_installed_model_configuration", side_effect=change_config),
+                patch.object(model_installer.os, "replace", side_effect=fail_record_replace),
+            ):
+                with self.assertRaisesRegex(OSError, "record replace failed"):
+                    model_installer.install_model(self._approved(plan, values))
+
+            self.assertEqual(config_path.read_bytes(), b"original-config")
+            self.assertEqual(existing.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((target / "local-ai" / "ollama" / "ollama.exe").exists())
+            self.assertFalse((target / "local-ai" / "install-records").exists())
+            self.assertEqual(pointer.read_text(encoding="utf-8"), "previous-root")
+
+    def test_gguf_security_gate_rejects_bad_magic_architecture_and_quantization(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            cases = (
+                (self._gguf(root / "bad-magic.gguf", magic=b"NOPE"), "GGUF"),
+                (self._gguf(root / "bad-arch.gguf", architecture="unknown_arch"), "架构"),
+                (self._gguf(root / "bad-quant.gguf", file_type=999), "量化"),
+            )
+            for gguf, message in cases:
+                with self.subTest(gguf=gguf.name), self.assertRaisesRegex(ValueError, message):
+                    model_installer.plan_model_install({
+                        "source": "local_gguf",
+                        "gguf_path": str(gguf),
+                        "install_dir": str(root / "models"),
+                        "targets": [],
+                    })
+
+    def test_gguf_security_gate_rejects_missing_tensor_table_and_truncated_tensor_data(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            short = root / "forged-header.gguf"
+            short.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 1, 0))
+            truncated = self._gguf(root / "truncated.gguf")
+            truncated.write_bytes(truncated.read_bytes()[:-1])
+
+            for gguf in (short, truncated):
+                with self.subTest(gguf=gguf.name), self.assertRaisesRegex(ValueError, "不完整|张量"):
+                    model_installer.plan_model_install({
+                        "source": "local_gguf",
+                        "gguf_path": str(gguf),
+                        "install_dir": str(root / "models"),
+                        "targets": [],
+                    })
+
+    def test_local_gguf_revalidates_token_before_ollama_and_cleans_staged_files(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            gguf = self._gguf(root / "model.gguf")
+            target = root / "selected"
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"runtime")
+            data_root = root / "data"
+            values = {
+                "source": "local_gguf",
+                "gguf_path": str(gguf),
+                "install_dir": str(target),
+                "targets": [],
+            }
+            plan = model_installer.plan_model_install(values)
+            authorized = model_installer._read_plan_token(plan["plan_token"])
+
+            with (
+                patch.object(model_installer, "_data_root", return_value=data_root),
+                patch.object(
+                    model_installer,
+                    "_read_plan_token",
+                    side_effect=[authorized, PermissionError("token expired before create")],
+                ),
+                patch.object(model_installer, "_adapt_gguf_with_ollama") as adapt,
+            ):
+                with self.assertRaisesRegex(PermissionError, "expired"):
+                    model_installer.install_model(self._approved(plan, values))
+
+            adapt.assert_not_called()
+            self.assertFalse((target / "local-ai" / "imported" / gguf.name).exists())
+            self.assertFalse((data_root / "local-ai-root.txt").exists())
+            self.assertEqual(list(target.parent.glob(".javis-model-staging-*")), [])
+
+    def test_local_gguf_revalidates_token_again_before_final_pointer_commit(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            gguf = self._gguf(root / "model.gguf")
+            target = root / "selected"
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"runtime")
+            data_root = root / "data"
+            values = {
+                "source": "local_gguf",
+                "gguf_path": str(gguf),
+                "install_dir": str(target),
+                "targets": [],
+            }
+            plan = model_installer.plan_model_install(values)
+            authorized = model_installer._read_plan_token(plan["plan_token"])
+
+            with (
+                patch.object(model_installer, "_data_root", return_value=data_root),
+                patch.object(
+                    model_installer,
+                    "_read_plan_token",
+                    side_effect=[
+                        authorized,
+                        authorized,
+                        PermissionError("token expired before pointer"),
+                    ],
+                ),
+                patch.object(model_installer, "_adapt_gguf_with_ollama") as adapt,
+            ):
+                with self.assertRaisesRegex(PermissionError, "pointer"):
+                    model_installer.install_model(self._approved(plan, values))
+
+            adapt.assert_called_once()
+            self.assertFalse((target / "local-ai" / "imported" / gguf.name).exists())
+            self.assertFalse((data_root / "local-ai-root.txt").exists())
+            self.assertEqual(list(target.parent.glob(".javis-model-staging-*")), [])
+
+    def test_local_gguf_configuration_failure_rolls_back_staged_model_store_and_pointer(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            gguf = self._gguf(root / "model.gguf")
+            target = root / "selected"
+            keep = target / "local-ai" / "keep.txt"
+            keep.parent.mkdir(parents=True)
+            keep.write_text("keep", encoding="utf-8")
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True, exist_ok=True)
+            runtime.write_bytes(b"runtime")
+            data_root = root / "data"
+            data_root.mkdir()
+            pointer = data_root / "local-ai-root.txt"
+            pointer.write_text("old-root", encoding="utf-8")
+            values = {
+                "source": "local_gguf",
+                "gguf_path": str(gguf),
+                "install_dir": str(target),
+                "targets": ["live", "code"],
+            }
+            plan = model_installer.plan_model_install(values)
+
+            def fake_adapt(_runtime, models, _modelfile, _model_name):
+                models.mkdir(parents=True, exist_ok=True)
+                (models / "created-by-ollama").write_bytes(b"blob")
+
+            with (
+                patch.object(model_installer, "_data_root", return_value=data_root),
+                patch.object(model_installer, "_adapt_gguf_with_ollama", side_effect=fake_adapt),
+                patch.object(
+                    model_installer,
+                    "_persist_installed_model_configuration",
+                    side_effect=RuntimeError("config failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "config failed"):
+                    model_installer.install_model(self._approved(plan, values))
+
+            self.assertEqual(keep.read_text(encoding="utf-8"), "keep")
+            self.assertTrue(runtime.is_file())
+            self.assertFalse((target / "local-ai" / "imported" / gguf.name).exists())
+            self.assertFalse((target / "local-ai" / "imported" / "Javis-Modelfile").exists())
+            self.assertFalse((target / "local-ai" / "models" / "created-by-ollama").exists())
+            self.assertEqual(pointer.read_text(encoding="utf-8"), "old-root")
+
+    def test_huggingface_requires_trusted_lfs_sha_and_never_enables_remote_code(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            base_info = {
+                "siblings": [{"rfilename": "model-q4_k_m.gguf", "size": 123, "lfs": {"size": 123}}],
+                "cardData": {"license": "apache-2.0"},
+                "sha": "repo-commit",
+            }
+            values = {
+                "source": "huggingface",
+                "repo_id": "owner/model",
+                "filename": "model-q4_k_m.gguf",
+                "install_dir": str(root / "models"),
+                "targets": ["code"],
+            }
+            with patch.object(model_installer, "_huggingface_model_info", return_value=base_info):
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    model_installer.plan_model_install(values)
+
+            trusted = json.loads(json.dumps(base_info))
+            trusted["siblings"][0]["lfs"]["sha256"] = "a" * 64
+            with patch.object(model_installer, "_huggingface_model_info", return_value=trusted):
+                plan = model_installer.plan_model_install(values)
+                self.assertFalse(plan["trust_remote_code"])
+                self.assertEqual(plan["license"], "apache-2.0")
+                self.assertEqual(plan["sha256"], "a" * 64)
+                with self.assertRaisesRegex(ValueError, "remote code"):
+                    model_installer.plan_model_install({**values, "trust_remote_code": True})
+
+    def test_huggingface_rejects_private_redirect_and_oversize_metadata(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            target = root / "selected"
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"runtime")
+            gguf_bytes = self._gguf(root / "download.gguf").read_bytes()
+            info = {
+                "siblings": [{
+                    "rfilename": "model.gguf",
+                    "size": len(gguf_bytes),
+                    "lfs": {
+                        "size": len(gguf_bytes),
+                        "sha256": hashlib.sha256(gguf_bytes).hexdigest(),
+                    },
+                }],
+                "cardData": {"license": "apache-2.0"},
+                "sha": "fixed-revision",
+            }
+            values = {
+                "source": "huggingface",
+                "repo_id": "owner/model",
+                "filename": "model.gguf",
+                "install_dir": str(target),
+                "targets": [],
+            }
+
+            with (
+                patch.object(model_installer, "MAX_HF_DOWNLOAD_BYTES", len(gguf_bytes) - 1, create=True),
+                patch.object(model_installer, "_huggingface_model_info", return_value=info),
+            ):
+                with self.assertRaisesRegex(ValueError, "大小|上限"):
+                    model_installer.plan_model_install(values)
+
+            with patch.object(model_installer, "_huggingface_model_info", return_value=info):
+                plan = model_installer.plan_model_install(values)
+                redirect = self._response(
+                    status=302,
+                    headers={"Location": "http://127.0.0.1/private-model.gguf"},
+                )
+                with (
+                    patch.object(model_installer.requests, "get", return_value=redirect),
+                    patch.object(
+                        model_installer.socket,
+                        "getaddrinfo",
+                        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+                    ),
+                    patch.object(model_installer, "_adapt_gguf_with_ollama") as adapt,
+                ):
+                    with self.assertRaisesRegex(ValueError, "HTTPS|私有|公网|不安全"):
+                        model_installer.install_model(self._approved(plan, values))
+
+            adapt.assert_not_called()
+            self.assertFalse((target / "local-ai" / "huggingface" / "owner--model" / "model.gguf").exists())
+
+    def test_huggingface_stream_overrun_never_commits_partial_model(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            target = root / "selected"
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"runtime")
+            gguf_bytes = self._gguf(root / "download.gguf").read_bytes()
+            info = {
+                "siblings": [{
+                    "rfilename": "model.gguf",
+                    "size": len(gguf_bytes),
+                    "lfs": {
+                        "size": len(gguf_bytes),
+                        "sha256": hashlib.sha256(gguf_bytes).hexdigest(),
+                    },
+                }],
+                "sha": "fixed-revision",
+            }
+            values = {
+                "source": "huggingface",
+                "repo_id": "owner/model",
+                "filename": "model.gguf",
+                "install_dir": str(target),
+                "targets": [],
+            }
+            with patch.object(model_installer, "_huggingface_model_info", return_value=info):
+                plan = model_installer.plan_model_install(values)
+                response = self._response(status=200, body=gguf_bytes + b"overflow")
+                with (
+                    patch.object(model_installer.requests, "get", return_value=response),
+                    patch.object(
+                        model_installer.socket,
+                        "getaddrinfo",
+                        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+                    ),
+                    patch.object(model_installer, "_adapt_gguf_with_ollama") as adapt,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "大小|上限"):
+                        model_installer.install_model(self._approved(plan, values))
+
+            adapt.assert_not_called()
+            self.assertFalse((target / "local-ai" / "huggingface" / "owner--model" / "model.gguf").exists())
+            self.assertEqual(list(target.parent.glob(".javis-model-staging-*")), [])
+
+    def test_huggingface_configuration_failure_rolls_back_download_model_store_and_pointer(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            target = root / "selected"
+            keep = target / "local-ai" / "keep.txt"
+            keep.parent.mkdir(parents=True)
+            keep.write_text("keep", encoding="utf-8")
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True, exist_ok=True)
+            runtime.write_bytes(b"runtime")
+            data_root = root / "data"
+            data_root.mkdir()
+            pointer = data_root / "local-ai-root.txt"
+            pointer.write_text("old-root", encoding="utf-8")
+            gguf_bytes = self._gguf(root / "download.gguf").read_bytes()
+            info = {
+                "siblings": [{
+                    "rfilename": "model.gguf",
+                    "size": len(gguf_bytes),
+                    "lfs": {
+                        "size": len(gguf_bytes),
+                        "sha256": hashlib.sha256(gguf_bytes).hexdigest(),
+                    },
+                }],
+                "cardData": {"license": "apache-2.0"},
+                "sha": "fixed-revision",
+            }
+            values = {
+                "source": "huggingface",
+                "repo_id": "owner/model",
+                "filename": "model.gguf",
+                "install_dir": str(target),
+                "targets": ["live", "code"],
+            }
+
+            def fake_adapt(_runtime, models, _modelfile, _model_name):
+                models.mkdir(parents=True, exist_ok=True)
+                (models / "created-by-ollama").write_bytes(b"blob")
+
+            with patch.object(model_installer, "_huggingface_model_info", return_value=info):
+                plan = model_installer.plan_model_install(values)
+                with (
+                    patch.object(model_installer, "_data_root", return_value=data_root),
+                    patch.object(
+                        model_installer.requests,
+                        "get",
+                        return_value=self._response(status=200, body=gguf_bytes),
+                    ),
+                    patch.object(
+                        model_installer.socket,
+                        "getaddrinfo",
+                        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+                    ),
+                    patch.object(model_installer, "_adapt_gguf_with_ollama", side_effect=fake_adapt),
+                    patch.object(
+                        model_installer,
+                        "_persist_installed_model_configuration",
+                        side_effect=RuntimeError("config failed"),
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "config failed"):
+                        model_installer.install_model(self._approved(plan, values))
+
+            self.assertEqual(keep.read_text(encoding="utf-8"), "keep")
+            self.assertTrue(runtime.is_file())
+            self.assertFalse((target / "local-ai" / "huggingface" / "owner--model" / "model.gguf").exists())
+            self.assertFalse((target / "local-ai" / "huggingface" / "owner--model" / "Javis-Modelfile").exists())
+            self.assertFalse((target / "local-ai" / "models" / "created-by-ollama").exists())
+            self.assertEqual(pointer.read_text(encoding="utf-8"), "old-root")
+            self.assertEqual(list(target.parent.glob(".javis-model-staging-*")), [])
 
     def test_zip_traversal_is_rejected(self):
         with tempfile.TemporaryDirectory() as root_value:

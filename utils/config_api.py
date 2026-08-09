@@ -46,14 +46,16 @@ _SECURITY_WARNED = False
 DEFAULT_CONFIG = {
     "model": {
         "provider": "local",
-        "name": "deepseek-r1:8b",
+        # The base installer intentionally ships without a local model.  An empty
+        # name is an explicit setup state, not an implicit request to pull R1.
+        "name": "",
         "effort": "balanced",
         "temperature": 0.7,
         "max_tokens": 8192,
         "max_steps": 20,
         "max_retries": 3,
         "local": {
-            "name": "deepseek-r1:8b",
+            "name": "",
             "base_url": "http://127.0.0.1:11435/v1",
             "api_key": "ollama",
         },
@@ -95,7 +97,13 @@ def _merge_defaults(config: dict) -> dict:
             merged[key] = value
     model = merged.setdefault("model", {})
     local = model.setdefault("local", {})
-    local.setdefault("name", model.get("name", "deepseek-r1:8b"))
+    local.setdefault("name", model.get("name", ""))
+    if (
+        not str(local.get("name") or "").strip()
+        and str(model.get("provider") or "") == "local"
+        and str(model.get("name") or "").strip()
+    ):
+        local["name"] = str(model["name"]).strip()
     local.setdefault("base_url", "http://127.0.0.1:11435/v1")
     local["api_key"] = local.get("api_key") or "ollama"
     merged.setdefault("agent", {}).setdefault("permission_level", "full_access")
@@ -245,7 +253,7 @@ AVAILABLE_MODELS = {
 def set_provider(provider):
     cfg=load_config(); mdl=cfg.setdefault("model",{}); mdl["provider"]=provider
     if provider=="local":
-        lc=mdl.setdefault("local",{}); lc["name"]=lc.get("name") or mdl.get("name","deepseek-r1:8b"); lc["api_key"]="ollama"; mdl["name"]=lc["name"]
+        lc=mdl.setdefault("local",{}); lc["name"]=lc.get("name") or ""; lc["api_key"]="ollama"; mdl["name"]=lc["name"]
     else:
         models=AVAILABLE_MODELS.get(provider,[])
         if models:
@@ -286,6 +294,13 @@ def _validate_model_name(value: str, label: str) -> str:
     model_name = str(value or "").strip()
     if not model_name:
         raise ValueError(f"{label}不能为空")
+    if len(model_name) > 240:
+        raise ValueError(f"{label}过长")
+    return model_name
+
+
+def _validate_optional_model_name(value: str, label: str) -> str:
+    model_name = str(value or "").strip()
     if len(model_name) > 240:
         raise ValueError(f"{label}过长")
     return model_name
@@ -406,7 +421,7 @@ def _route_from_model(model: dict, route_name: str) -> dict:
     return {
         "source": source,
         "local": {
-            "model": str(saved_local.get("model") or saved_local.get("name") or global_local.get("name") or "qwen2.5:7b"),
+            "model": str(saved_local.get("model") or saved_local.get("name") or global_local.get("name") or ""),
             "base_url": local_base_url,
         },
         "remote": {
@@ -444,6 +459,21 @@ def _effective_local_base_url(value: object) -> str:
     if bundled and configured in legacy_defaults:
         return bundled
     return configured or bundled or "http://127.0.0.1:11435/v1"
+
+
+def _route_setup_reason(config: dict, route_name: str) -> str:
+    """Return a stable setup code without contacting a model provider."""
+    route = resolve_model_route(config, route_name)
+    if route["source"] == "local":
+        return "" if str(route["local"].get("model") or "").strip() else "local_model_missing"
+
+    remote = route.get("remote", {})
+    provider = str(remote.get("provider") or "").strip().lower()
+    if provider not in CLOUD_PROVIDERS:
+        return "remote_provider_missing"
+    if not str(remote.get("model") or "").strip():
+        return "remote_model_missing"
+    return "" if _get_api_key(provider) else "remote_api_key_missing"
 
 
 def get_model_connection_settings() -> dict:
@@ -501,19 +531,36 @@ def get_model_connection_settings() -> dict:
     }
     if share_live_code:
         routes["code"] = copy.deepcopy(routes["live"])
+    setup_reasons = {
+        route_name: _route_setup_reason(cfg, route_name)
+        for route_name in ("live", "code")
+    }
+    setup_required_routes = [
+        route_name for route_name in ("live", "code")
+        if setup_reasons[route_name]
+    ]
+    setup_recommended_action = (
+        "install_local_model"
+        if any(reason == "local_model_missing" for reason in setup_reasons.values())
+        else ("configure_remote_api" if setup_required_routes else "none")
+    )
     return {
         "applied": True,
+        "setup_required": bool(setup_required_routes),
+        "setup_required_routes": setup_required_routes,
+        "setup_reasons": setup_reasons,
+        "setup_recommended_action": setup_recommended_action,
         "share_live_code": share_live_code,
         "routes": routes,
         "source": "local" if active_provider == "local" else "remote",
         "active_provider": active_provider,
         "active_model": (
-            str(local.get("name") or model.get("name") or "qwen2.5:7b")
+            str(local.get("name") or model.get("name") or "")
             if active_provider == "local"
             else remote_model
         ),
         "local": {
-            "model": str(local.get("name") or "qwen2.5:7b"),
+            "model": str(local.get("name") or ""),
             "base_url": _effective_local_base_url(local.get("base_url")),
         },
         "remote": {
@@ -564,8 +611,8 @@ def set_model_connection_settings(values: dict) -> dict:
             raise ValueError("本地模型配置必须是对象")
         local = model.setdefault("local", {})
         if local_values:
-            local["name"] = _validate_model_name(
-                local_values.get("model", local.get("name", "qwen2.5:7b")),
+            local["name"] = _validate_optional_model_name(
+                local_values.get("model", local.get("name", "")),
                 "本地模型名称",
             )
             local["base_url"] = _validate_model_endpoint(
@@ -618,21 +665,27 @@ def set_model_connection_settings(values: dict) -> dict:
                     raise ValueError("API Key 过长")
                 remote["api_key"] = api_key
 
-        if source == "local":
-            local_name = _validate_model_name(
-                local.get("name") or model.get("name") or "qwen2.5:7b",
-                "本地模型名称",
-            )
-            model["provider"] = "local"
-            model["name"] = local_name
-        else:
-            remote_name = _validate_model_name(
-                remote.get("name")
-                or (AVAILABLE_MODELS.get(remote_provider) or [["", "", ""]])[0][0],
-                "远端模型名称",
-            )
-            model["provider"] = remote_provider
-            model["name"] = remote_name
+        applies_legacy_profile = route_values is None or any(
+            key in values for key in ("source", "local", "remote")
+        )
+        if applies_legacy_profile:
+            if source == "local":
+                local_name = _validate_model_name(
+                    local.get("name")
+                    or (model.get("name") if current_provider == "local" else "")
+                    or "",
+                    "本地模型名称",
+                )
+                model["provider"] = "local"
+                model["name"] = local_name
+            else:
+                remote_name = _validate_model_name(
+                    remote.get("name")
+                    or (AVAILABLE_MODELS.get(remote_provider) or [["", "", ""]])[0][0],
+                    "远端模型名称",
+                )
+                model["provider"] = remote_provider
+                model["name"] = remote_name
 
         if route_values is not None:
             routes = model.setdefault("routes", {})
@@ -655,8 +708,12 @@ def set_model_connection_settings(values: dict) -> dict:
                 route_profile = {
                     "source": route_source,
                     "local": {
-                        "model": _validate_model_name(
-                            submitted_local.get("model") or local.get("name") or "qwen2.5:7b",
+                        "model": (
+                            _validate_model_name
+                            if route_source == "local"
+                            else _validate_optional_model_name
+                        )(
+                            submitted_local.get("model") or local.get("name") or "",
                             f"{route_name} 本地模型名称",
                         ),
                         "base_url": _validate_model_endpoint(
@@ -900,7 +957,10 @@ def set_effort(level: str) -> dict:
 def get_status():
     cfg=load_config(); m=cfg.get("model",{}); provider=m.get("provider","local")
     effort = m.get("effort", "balanced")
-    if provider=="local": has_key=True; hint=None; model_name=m.get("name","qwen2.5:7b")
+    if provider=="local":
+        model_name=str((m.get("local", {}) or {}).get("name") or m.get("name") or "")
+        has_key=bool(model_name)
+        hint=None if has_key else "请先在模型与存储中安装或选择本地模型"
     else:
         raw=_get_api_key(provider); has_key=bool(raw)
         labels={"deepseek":"DeepSeek","glm":"智谱GLM","kimi":"Kimi","qwen":"通义千问","openai":"OpenAI","anthropic":"Claude"}

@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -9,6 +10,26 @@ from utils.system_diagnostics import probe_remote_provider
 
 
 class ModelConnectionSettingsTests(unittest.TestCase):
+    @staticmethod
+    def _route(
+        source: str,
+        *,
+        local_model: str,
+        local_url: str,
+        remote_provider: str,
+        remote_model: str,
+        remote_url: str,
+    ) -> dict:
+        return {
+            "source": source,
+            "local": {"model": local_model, "base_url": local_url},
+            "remote": {
+                "provider": remote_provider,
+                "model": remote_model,
+                "base_url": remote_url,
+            },
+        }
+
     def test_all_remote_providers_expose_full_compatible_model_catalogs(self):
         settings = config_api.get_model_connection_settings()
         catalogs = {provider["id"]: provider["models"] for provider in settings["providers"]}
@@ -81,6 +102,95 @@ class ModelConnectionSettingsTests(unittest.TestCase):
                     "routes": result["routes"],
                 })
                 self.assertEqual(config_api.get_model_route("code"), config_api.get_model_route("live"))
+
+    def test_all_live_code_source_combinations_round_trip_without_cross_overwrite(self):
+        matrices = (
+            ("local", "remote"),
+            ("remote", "local"),
+            ("remote", "remote"),
+            ("local", "local"),
+        )
+        for live_source, code_source in matrices:
+            with self.subTest(live=live_source, code=code_source):
+                with tempfile.TemporaryDirectory() as root:
+                    config_path = Path(root) / "config.yaml"
+                    live_route = self._route(
+                        live_source,
+                        local_model="live-local:1",
+                        local_url="http://127.0.0.1:11435/v1",
+                        remote_provider="deepseek",
+                        remote_model="live-cloud",
+                        remote_url="https://api.deepseek.com/v1",
+                    )
+                    code_route = self._route(
+                        code_source,
+                        local_model="code-local:2",
+                        local_url="http://127.0.0.1:22435/v1",
+                        remote_provider="openai",
+                        remote_model="code-cloud",
+                        remote_url="https://api.openai.com/v1",
+                    )
+                    with patch.object(config_api, "CONFIG_PATH", config_path):
+                        result = config_api.set_model_connection_settings({
+                            "share_live_code": False,
+                            "routes": {"live": live_route, "code": code_route},
+                        })
+                        reloaded_live = config_api.get_model_route("live")
+                        reloaded_code = config_api.get_model_route("code")
+
+                        self.assertTrue(result["applied"])
+                        self.assertEqual(reloaded_live, live_route)
+                        self.assertEqual(reloaded_code, code_route)
+
+                        changed_code = copy.deepcopy(code_route)
+                        changed_code["source"] = "remote" if code_source == "local" else "local"
+                        changed_code["local"]["model"] = "code-only-change:3"
+                        changed_code["remote"]["model"] = "code-only-cloud-change"
+                        updated = config_api.set_model_connection_settings({
+                            "share_live_code": False,
+                            "routes": {"code": changed_code},
+                        })
+
+                        self.assertTrue(updated["applied"])
+                        self.assertEqual(config_api.get_model_route("live"), live_route)
+                        self.assertEqual(config_api.get_model_route("code"), changed_code)
+
+    def test_shared_route_uses_live_as_single_profile_then_can_split_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "remote",
+                local_model="shared-local",
+                local_url="http://127.0.0.1:11435/v1",
+                remote_provider="deepseek",
+                remote_model="shared-cloud",
+                remote_url="https://api.deepseek.com/v1",
+            )
+            ignored_code = self._route(
+                "local",
+                local_model="must-not-win",
+                local_url="http://127.0.0.1:22435/v1",
+                remote_provider="openai",
+                remote_model="must-not-win",
+                remote_url="https://api.openai.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                shared = config_api.set_model_connection_settings({
+                    "share_live_code": True,
+                    "routes": {"live": live_route, "code": ignored_code},
+                })
+                self.assertTrue(shared["applied"])
+                self.assertEqual(config_api.get_model_route("live"), live_route)
+                self.assertEqual(config_api.get_model_route("code"), live_route)
+
+                split_code = copy.deepcopy(ignored_code)
+                split = config_api.set_model_connection_settings({
+                    "share_live_code": False,
+                    "routes": {"code": split_code},
+                })
+                self.assertTrue(split["applied"])
+                self.assertEqual(config_api.get_model_route("live"), live_route)
+                self.assertEqual(config_api.get_model_route("code"), split_code)
 
     def test_settings_round_trip_keeps_local_and_remote_profiles(self):
         with tempfile.TemporaryDirectory() as root:

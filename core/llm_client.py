@@ -12,6 +12,30 @@ class LLMResponse:
     reasoning_content: str = ""
 
 
+class ModelSetupRequiredError(RuntimeError):
+    """The selected Live/Code route has no usable model configuration."""
+
+    def __init__(self, route_name: str, reason: str):
+        self.route_name = route_name
+        self.reason = reason
+        super().__init__(
+            f"model_setup_required: route={route_name}; reason={reason}; "
+            "open Model & Storage to install a local model or configure a cloud API"
+        )
+
+
+class ModelRuntimeUnavailableError(RuntimeError):
+    """A configured local runtime is offline and can be recovered by the user."""
+
+    def __init__(self, base_url: str, reason: str):
+        self.base_url = base_url
+        self.reason = reason
+        super().__init__(
+            f"model_runtime_unavailable: Ollama at {base_url} is unavailable ({reason}); "
+            "open diagnostics to restart the runtime or Model & Storage to change it"
+        )
+
+
 class LLMClient:
     def __init__(self, config_path: str = "config.yaml"):
         self._config_path = config_path
@@ -27,6 +51,10 @@ class LLMClient:
 
     def _init_client(self, route_name: str = "live"):
         """读取配置并初始化 API 客户端（__init__ 和 reload 共用）"""
+        self._client = None
+        self._api_ready = False
+        self.setup_required = False
+        self.setup_reason = ""
         self.config = lcfg()
         cfg = self.config.get("model", {})
         self.route_name = "code" if str(route_name).strip().lower() == "code" else "live"
@@ -40,8 +68,8 @@ class LLMClient:
 
         if self.provider == "local":
             lc = cfg.get("local", {})
-            self.model = local_route.get("model") or lc.get("name") or cfg.get("name", "deepseek-r1:8b")
-            self.base_url = local_route.get("base_url") or lc.get("base_url", "http://localhost:11434/v1")
+            self.model = str(local_route.get("model") or lc.get("name") or "").strip()
+            self.base_url = local_route.get("base_url") or lc.get("base_url", "http://127.0.0.1:11435/v1")
             api_key = lc.get("api_key", "ollama")
         elif self.provider == "anthropic":
             ac = cfg.get("anthropic", {})
@@ -55,10 +83,16 @@ class LLMClient:
             # 优先级: 环境变量 > config.yaml (环境变量更安全)
             api_key = os.getenv(f"{self.provider.upper()}_API_KEY") or pc.get("api_key", "")
 
+        if not str(self.model or "").strip():
+            self.setup_required = True
+            self.setup_reason = "local_model_missing" if self.provider == "local" else "remote_model_missing"
+            logger.warning("%s route requires model setup: %s", self.route_name, self.setup_reason)
+            return
+
         if self.provider == "anthropic":
             if not self._has_usable_key(api_key):
-                self._client = None
-                self._api_ready = False
+                self.setup_required = True
+                self.setup_reason = "remote_api_key_missing"
                 logger.warning("Anthropic API key missing; LLM client started in not-ready state")
                 return
             import anthropic
@@ -66,8 +100,8 @@ class LLMClient:
             self._api_ready = True
         else:
             if self.provider != "local" and not self._has_usable_key(api_key):
-                self._client = None
-                self._api_ready = False
+                self.setup_required = True
+                self.setup_reason = "remote_api_key_missing"
                 logger.warning(f"{self.provider} API key missing; LLM client started in not-ready state")
                 return
             try:
@@ -86,6 +120,13 @@ class LLMClient:
     @property
     def is_ready(self): return self._api_ready
 
+    def _not_ready_error(self) -> RuntimeError:
+        if self.setup_required:
+            return ModelSetupRequiredError(self.route_name, self.setup_reason or "model_not_configured")
+        return RuntimeError(
+            f"provider_runtime_unavailable: {self.provider} client dependency is unavailable"
+        )
+
     def reload(self, route_name: str | None = None):
         self._init_client(route_name or self.route_name)
         logger.info(f"配置已重载: {self.route_name} -> {self.provider}/{self.model}")
@@ -98,7 +139,7 @@ class LLMClient:
 
     async def chat_with_tools(self, messages, tools, system=DEFAULT_SYSTEM):
         if not self.is_ready:
-            raise RuntimeError(f"{self.provider} provider is not configured. Set an API key or switch to local mode.")
+            raise self._not_ready_error()
         await self._ensure_connected()
         if self.provider == "anthropic":
             return await self._chat_anthropic(messages, tools, system)
@@ -112,7 +153,7 @@ class LLMClient:
     async def chat_brief(self, messages, system=DEFAULT_SYSTEM, max_tokens=256):
         """Low-latency conversation path without tool schemas or long reasoning."""
         if not self.is_ready:
-            raise RuntimeError(f"{self.provider} provider is not configured.")
+            raise self._not_ready_error()
         await self._ensure_connected()
         if self.provider != "local":
             return await self._chat_openai(messages, [], system, max_tokens=max_tokens)
@@ -236,6 +277,8 @@ class LLMClient:
                 return
             self._client = AsyncOpenAI(api_key="ollama", base_url=self.base_url)
             self._api_ready = True
+            self.setup_required = False
+            self.setup_reason = ""
             logger.info(f"切换到本地: {model}")
         else:
             self.reload()
@@ -248,18 +291,36 @@ class LLMClient:
                 "temperature": self.temperature, "top_p": self.top_p,
                 "max_tokens": self.max_tokens}
 
-    async def _ensure_connected(self, retries=10, delay=3):
+    async def _ensure_connected(self):
         if self.provider != "local": return
         import httpx
-        native_base = str(self.base_url or "http://localhost:11434/v1").rstrip("/")
+        native_base = str(self.base_url or "http://127.0.0.1:11435/v1").rstrip("/")
         if native_base.endswith("/v1"):
             native_base = native_base[:-3]
-        for i in range(retries):
-            try:
-                async with httpx.AsyncClient() as c:
-                    r = await c.get(f"{native_base}/api/tags", timeout=3)
-                    if r.status_code == 200: return
-            except Exception:
-                pass  # Ollama 尚未启动，继续等待
-            await asyncio.sleep(delay)
-        raise ConnectionError("Ollama 无法连接")
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{native_base}/api/tags", timeout=1.5)
+        except Exception as error:
+            raise ModelRuntimeUnavailableError(native_base, str(error)[:160]) from error
+
+        if response.status_code != 200:
+            raise ModelRuntimeUnavailableError(native_base, f"HTTP {response.status_code}")
+        try:
+            payload = response.json()
+            installed = {
+                str(item.get("name") or item.get("model") or "").strip().lower()
+                for item in payload.get("models", [])
+                if isinstance(item, dict)
+            }
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ModelRuntimeUnavailableError(native_base, "invalid /api/tags response") from error
+
+        selected = str(self.model or "").strip().lower()
+        selected_aliases = {selected}
+        if selected and ":" not in selected:
+            selected_aliases.add(f"{selected}:latest")
+        if not selected or installed.isdisjoint(selected_aliases):
+            raise ModelSetupRequiredError(
+                getattr(self, "route_name", "live"),
+                "selected_local_model_not_installed",
+            )

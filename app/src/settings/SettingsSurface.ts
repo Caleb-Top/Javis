@@ -18,6 +18,13 @@ import {
   getSettingsReturnMode,
   type SettingsSourceMode,
 } from "./settingsNavigation.ts";
+import {
+  applyInstalledLocalProfile,
+  getModelInstallTargets,
+  isActiveModelInstallState,
+  type ModelInstallProgressState,
+  type ModelRouteName,
+} from "./modelRouteDrafts.ts";
 
 const JAVIS_ACTIONS = [
   ["live", "打开 Live"],
@@ -136,6 +143,8 @@ export type ModelDiagnosticReport = {
 
 export type ModelInstallPlan = {
   ok: boolean;
+  plan_token?: string;
+  targets?: ModelRouteName[];
   source?: "offline" | "local_gguf" | "huggingface";
   title?: string;
   model?: string;
@@ -158,7 +167,7 @@ export type ModelInstallPlan = {
 };
 
 export type ModelInstallProgress = {
-  state: "idle" | "running" | "completed" | "failed";
+  state: ModelInstallProgressState;
   phase: string;
   percent: number;
   completed_bytes: number;
@@ -749,8 +758,10 @@ export function createSettingsSurface(
 
   function modelInstallValues(): Record<string, unknown> {
     const source = options.root.querySelector<HTMLSelectElement>(".model-installer-source")!.value;
+    const shareLiveCode = options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked;
     return {
       source,
+      targets: getModelInstallTargets(shareLiveCode, activeModelRoute),
       install_dir: options.root.querySelector<HTMLInputElement>(".model-installer-directory")!.value,
       addon_path: options.root.querySelector<HTMLInputElement>(".model-addon-path")!.value,
       gguf_path: options.root.querySelector<HTMLInputElement>(".local-gguf-path")!.value,
@@ -823,6 +834,10 @@ export function createSettingsSurface(
       setInstallerStatus("请先生成并核对安装计划", "error");
       return;
     }
+    if (!modelInstallPlan.plan_token) {
+      setInstallerStatus("安装计划已失效，请重新生成并确认", "error");
+      return;
+    }
     const approved = options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.checked;
     if (!approved) {
       setInstallerStatus("需要勾选用户确认后才能安装", "error");
@@ -849,7 +864,9 @@ export function createSettingsSurface(
         const progress = await options.onGetModelInstallProgress();
         progressBar.value = progress.percent;
         progressLabel.textContent = `${Math.round(progress.percent)}% · ${progress.phase}`;
-        if (progress.state === "running") setInstallerStatus(progress.phase, "saving");
+        if (isActiveModelInstallState(progress.state)) {
+          setInstallerStatus(progress.phase, "saving");
+        }
       } catch {
         // The install request remains authoritative if one progress poll is missed.
       } finally {
@@ -866,16 +883,24 @@ export function createSettingsSurface(
     try {
       const response = await options.onInstallModel({
         ...modelInstallValues(),
+        plan_token: modelInstallPlan.plan_token,
         approved: true,
         confirmation: "install-local-model",
       });
       if (!response.ok) throw new Error(response.error || "模型安装失败");
-      if (response.model) options.root.querySelector<HTMLInputElement>(".local-model-name")!.value = response.model;
-      if (response.base_url) options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value = response.base_url;
-      if (modelRouteDrafts && response.model && response.base_url) {
-        for (const route of Object.values(modelRouteDrafts)) {
-          route.local = { model: response.model, base_url: response.base_url };
-        }
+      const targets = Array.isArray(modelInstallPlan.targets)
+        ? modelInstallPlan.targets
+        : getModelInstallTargets(
+          options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked,
+          activeModelRoute,
+        );
+      if (modelRouteDrafts && response.model && response.base_url && targets.length) {
+        modelRouteDrafts = applyInstalledLocalProfile(
+          modelRouteDrafts,
+          targets,
+          { model: response.model, base_url: response.base_url },
+        );
+        renderModelRoute(activeModelRoute);
         await saveModelSettings();
       }
       modelInstallPlan = null;
