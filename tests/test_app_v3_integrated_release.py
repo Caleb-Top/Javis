@@ -234,6 +234,8 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
         self.assertNotIn('Join-Path $JavisRoot "tmp\\release-gate-report.json"', build)
         self.assertNotIn("$SkipAddonBuild -or $SkipInstallVerification", build)
         self.assertIn('$FinalizeArguments += "--without-addon"', build)
+        self.assertIn('$JavisNsisCacheTarget = Join-Path $JavisCargoTarget ".tauri\\NSIS"', build)
+        self.assertIn("Copy-Item -Destination $JavisNsisCacheTarget -Recurse -Force", build)
 
 
 if __name__ == "__main__":

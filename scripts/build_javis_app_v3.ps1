@@ -48,6 +48,8 @@ $BuildTemp = $Layout.build_temp
 $JavisCargoTarget = $Layout.cargo_target
 $JavisTargetRoot = Join-Path $JavisCargoTarget "release"
 $InnerInstaller = Join-Path $JavisTargetRoot "bundle\nsis\Javis_3.0.0_x64-setup.exe"
+$JavisNsisCacheSource = Join-Path $JavisApp "src-tauri\target\.tauri\NSIS"
+$JavisNsisCacheTarget = Join-Path $JavisCargoTarget ".tauri\NSIS"
 $ArtifactDir = $Layout.artifact_dir
 $MainInstaller = $Layout.package_output
 $MainInstallerName = "Javis-v3.0.0-Setup.exe"
@@ -87,6 +89,9 @@ foreach ($path in @($BuildTemp, $JavisCargoTarget, $ArtifactDir, $MainInstaller,
 }
 
 New-Item -ItemType Directory -Path $BuildTemp -Force | Out-Null
+New-Item -ItemType Directory -Path $JavisNsisCacheTarget -Force | Out-Null
+Get-ChildItem -LiteralPath $JavisNsisCacheSource -Force |
+    Copy-Item -Destination $JavisNsisCacheTarget -Recurse -Force
 $env:TEMP = Join-Path $BuildTemp "temp"
 $env:TMP = $env:TEMP
 $env:PIP_CACHE_DIR = Join-Path $BuildTemp "pip-cache"
