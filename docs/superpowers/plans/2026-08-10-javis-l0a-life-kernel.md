@@ -67,6 +67,7 @@
 - `tests/test_session_event_store_async.py`
 - `tests/test_life_service.py`
 - `tests/test_life_api.py`
+- `tests/test_conversation_life_event_bridge.py`
 - `app/tests/lifeStateBridge.test.ts`
 - `tests/test_life_release_contract.py`
 
@@ -634,6 +635,7 @@ git commit -m "feat(life): persist life events off the hot path"
 **Files:**
 - Create: `core/life/service.py`
 - Modify: `core/runtime.py`
+- Modify: `core/conversation_hub.py`
 - Test: `tests/test_life_service.py`
 
 **Interfaces:**
@@ -663,7 +665,7 @@ def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path
 
 - [ ] **Step 3: Implement service start/stop and runtime field**
 
-Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with `root / "data" / "life"`, register it after the existing stores exist and before `runtime.created` is published. `start()` subscribes one EventBus wildcard handler; `stop()` unsubscribes or disables the handler, writes a clean checkpoint and joins the journal worker.
+Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with `root / "data" / "life"`, register it after the existing stores exist and before `runtime.created` is published. Pass the existing runtime `EventBus` into `ConversationHub`; do not create a second bus. `start()` subscribes one EventBus wildcard handler; `stop()` unsubscribes or disables the handler, writes a clean checkpoint and joins the journal worker.
 
 - [ ] **Step 4: Prove no synchronous SQLite in the handler**
 
@@ -678,7 +680,7 @@ Patch `journal._write_batch` to block and publish `tool.completed`; assert `Even
 - [ ] **Step 6: Commit runtime assembly**
 
 ```powershell
-git add core/life/service.py core/runtime.py tests/test_life_service.py
+git add core/life/service.py core/runtime.py core/conversation_hub.py tests/test_life_service.py
 git commit -m "feat(life): assemble life service in runtime"
 ```
 
@@ -691,10 +693,11 @@ git commit -m "feat(life): assemble life service in runtime"
 - Modify: `core/conversation_hub.py`
 - Modify: `main.py`
 - Test: `tests/test_life_api.py`
+- Test: `tests/test_conversation_life_event_bridge.py`
 
 **Interfaces:**
-- Consumes: `LifeService` and active ConversationHub subscriptions.
-- Produces: `GET /api/life/identity`, `/api/life/snapshot`, `/api/life/lineage`, `/api/life/events`; `ConversationHub.publish_system_event()`, `subscribed_sessions()`; `life.snapshot` and `life.expression` session events.
+- Consumes: `LifeService`, active ConversationHub subscriptions and the runtime EventBus injected in Task 7.
+- Produces: `GET /api/life/identity`, `/api/life/snapshot`, `/api/life/lineage`, `/api/life/events`; `ConversationHub.publish_system_event()`, `subscribed_sessions()`, allowlisted conversation observations; `life.snapshot` and `life.expression` session events.
 
 - [ ] **Step 1: Write failing API authorization and redaction tests**
 
@@ -718,6 +721,34 @@ async def test_public_system_publish_reaches_attached_session(runtime):
     event = await subscription.get()
     assert event["type"] == "life.snapshot"
     assert event["payload"]["revision"] == 2
+
+
+async def immediate_success_runner(request, token):
+    await token.checkpoint()
+    yield {"type": "done", "success": True, "detail": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_conversation_lifecycle_reaches_runtime_bus_without_private_text(runtime):
+    seen = []
+    runtime.event_bus.subscribe("*", seen.append)
+    await runtime.conversation_hub.submit(
+        ConversationRequest(
+            session_id="session-1",
+            request_id="request-1",
+            text="private user sentence",
+            interaction_mode="live",
+        ),
+        immediate_success_runner,
+    )
+    await runtime.conversation_hub.wait_for_terminal("request-1")
+    lifecycle = [event for event in seen if event.source == "conversation"]
+    assert [event.type for event in lifecycle] == [
+        "request.accepted", "request.completed",
+    ]
+    assert "private user sentence" not in json.dumps(
+        [event.payload for event in lifecycle]
+    )
 ```
 
 - [ ] **Step 2: Run and verify red**
@@ -732,6 +763,8 @@ async def test_public_system_publish_reaches_attached_session(runtime):
 
 `subscribed_sessions()` returns an immutable tuple of normalized session IDs. It does not expose subscriber queues.
 
+Add a private `_publish_runtime_observation()` called by `_publish()` only after the ConversationStore append succeeds. It publishes the same event type on the injected runtime EventBus for this closed allowlist: `request.accepted`, `request.cancellation_pending`, `request.completed`, `request.cancelled`, `request.failed`, `activity.understanding`, validated `activity.*` states and `approval.required`. The projection contains only normalized `session_id`, `request_id`, `interaction_mode`, activity code, tool name, success boolean and bounded diagnostic code. It must drop user text, `response.delta`, model output, tool params/data, approval params and free-form private detail. `life.snapshot` and `life.expression` are outbound system events and must not loop back into the runtime observation bridge.
+
 - [ ] **Step 4: Wire main without adding write routes**
 
 Create the router from `runtime.life`, include it once, and register a LifeService listener that schedules snapshot/expression publication only for `subscribed_sessions()`. Capture the FastAPI event loop during startup and use `loop.call_soon_threadsafe()` before `asyncio.create_task()` so EventBus publications from worker threads never call asyncio APIs directly. Coalesce multiple state changes per event-loop tick.
@@ -739,13 +772,13 @@ Create the router from `runtime.life`, include it once, and register a LifeServi
 - [ ] **Step 5: Run API and conversation integration tests**
 
 ```powershell
-& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_api.py tests/test_unified_conversation_integration.py tests/test_conversation_watchdog_harness.py -q
+& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_api.py tests/test_conversation_life_event_bridge.py tests/test_unified_conversation_integration.py tests/test_conversation_watchdog_harness.py -q
 ```
 
 - [ ] **Step 6: Commit API and session push**
 
 ```powershell
-git add core/life/api.py core/conversation_hub.py main.py tests/test_life_api.py
+git add core/life/api.py core/conversation_hub.py main.py tests/test_life_api.py tests/test_conversation_life_event_bridge.py
 git commit -m "feat(life): expose read-only life snapshots"
 ```
 
@@ -928,7 +961,7 @@ git commit -m "test(life): lock recovery and release contracts"
 | User/Javis identity separation and model independence | 1, 2, 10 | forbidden-field and release-source assertions |
 | Birth, restart, copy/move fork and abnormal-shutdown lineage | 3, 7, 10 | lineage unit tests plus D-drive recovery matrix |
 | Complete 21-field event envelope, privacy and retention dimensions | 1, 5, 6 | contract, adapter, journal persistence tests |
-| Existing publisher mapping and high-frequency-event exclusion | 5, 10 | parameterized event map and publisher-source review |
+| Existing publisher mapping, real conversation bridge and high-frequency-event exclusion | 5, 7, 8, 10 | parameterized event map, production ConversationHub bridge and publisher-source review |
 | Bounded asynchronous journaling, priority, idempotency and cursors | 6 | slow-I/O, overload, duplicate and shutdown tests |
 | Minimal lifecycle, snapshot, stale terminal protection | 4, 7 | transition and runtime service tests |
 | Read-only backend exits and unified-session push | 8 | API method, redaction and ConversationHub tests |
