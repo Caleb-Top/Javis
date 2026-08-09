@@ -1,5 +1,5 @@
 """配置管理 API"""
-import copy, os, base64, json, logging
+import copy, os, base64, json, logging, shutil, threading
 from pathlib import Path
 from urllib import request
 from urllib.error import HTTPError, URLError
@@ -11,7 +11,9 @@ except ModuleNotFoundError:  # Optional for import-only tools and UI tests.
     yaml = None
 logger = logging.getLogger("config_api")
 CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+CONFIG_SCHEMA_VERSION = 2
 ENCODED_PREFIX = "b64:"
+_CONFIG_LOCK = threading.RLock()
 
 # 环境变量优先（比 config.yaml 更安全）
 ENV_KEY_MAP = {
@@ -44,6 +46,7 @@ DEFAULT_REMOTE_BASE_URLS = {
 _SECURITY_WARNED = False
 
 DEFAULT_CONFIG = {
+    "schema_version": CONFIG_SCHEMA_VERSION,
     "model": {
         "provider": "local",
         # The base installer intentionally ships without a local model.  An empty
@@ -109,6 +112,67 @@ def _merge_defaults(config: dict) -> dict:
     merged.setdefault("agent", {}).setdefault("permission_level", "full_access")
     return merged
 
+
+def _migrate_config(config: dict) -> dict:
+    migrated = copy.deepcopy(config if isinstance(config, dict) else {})
+    raw_version = migrated.get("schema_version", 1)
+    try:
+        version = int(raw_version)
+    except (TypeError, ValueError) as error:
+        raise ValueError("config.yaml schema_version 无效") from error
+    if version > CONFIG_SCHEMA_VERSION:
+        raise ValueError(f"config.yaml schema_version {version} 高于当前支持版本 {CONFIG_SCHEMA_VERSION}")
+    migrated["schema_version"] = CONFIG_SCHEMA_VERSION
+    return migrated
+
+
+def _config_transaction_paths() -> tuple[Path, Path, Path]:
+    base = str(CONFIG_PATH)
+    return Path(base + ".tmp"), Path(base + ".bak"), Path(base + ".journal")
+
+
+def _read_yaml_file(path: Path) -> dict:
+    with path.open(encoding="utf-8") as stream:
+        loaded = yaml.safe_load(stream)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path.name} 不是有效配置对象")
+    return loaded
+
+
+def _is_valid_yaml_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        _read_yaml_file(path)
+        return True
+    except Exception:
+        return False
+
+
+def _recover_config_transaction() -> None:
+    temporary, backup, journal = _config_transaction_paths()
+    if not journal.is_file():
+        return
+    if _is_valid_yaml_file(CONFIG_PATH):
+        temporary.unlink(missing_ok=True)
+        backup.unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
+        return
+    if _is_valid_yaml_file(backup):
+        os.replace(backup, CONFIG_PATH)
+    elif _is_valid_yaml_file(temporary):
+        os.replace(temporary, CONFIG_PATH)
+    temporary.unlink(missing_ok=True)
+    backup.unlink(missing_ok=True)
+    journal.unlink(missing_ok=True)
+
+
+def _write_fsynced(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+
 def _warn_security(config: dict):
     global _SECURITY_WARNED
     if _SECURITY_WARNED: return
@@ -128,36 +192,65 @@ def _decode(s):
     return s
 
 def load_config():
-    if not CONFIG_PATH.exists():
-        return _default_config()
     if yaml is None:
         logger.warning("PyYAML is unavailable; using default configuration")
         return _default_config()
-    try:
-        with CONFIG_PATH.open(encoding="utf-8") as f:
-            cfg=yaml.safe_load(f)
-        cfg = _merge_defaults(cfg or {})
-        if cfg and "model" in cfg:
-            _warn_security(cfg)
-            for k in CLOUD_PROVIDERS:
-                pc=cfg["model"].get(k)
-                if pc and isinstance(pc,dict) and pc.get("api_key"): pc["api_key"]=_decode(pc["api_key"])
-        return cfg
-    except Exception as e:
-        logger.warning(f"config.yaml 读取异常: {e}"); return _default_config()
+    with _CONFIG_LOCK:
+        try:
+            _recover_config_transaction()
+            if not CONFIG_PATH.exists():
+                return _default_config()
+            cfg = _merge_defaults(_migrate_config(_read_yaml_file(CONFIG_PATH)))
+            if cfg and "model" in cfg:
+                _warn_security(cfg)
+                for k in CLOUD_PROVIDERS:
+                    pc=cfg["model"].get(k)
+                    if pc and isinstance(pc,dict) and pc.get("api_key"): pc["api_key"]=_decode(pc["api_key"])
+            return cfg
+        except Exception as e:
+            logger.warning(f"config.yaml 读取异常: {e}"); return _default_config()
 
 def save_config(config):
     if yaml is None:
         raise RuntimeError("PyYAML is required to save config.yaml")
-    if "model" in config:
-        local=config["model"].get("local",{})
+    persisted = _migrate_config(config)
+    if "model" in persisted:
+        local=persisted["model"].get("local",{})
         if isinstance(local,dict): local["api_key"]="ollama"
         for k in CLOUD_PROVIDERS:
-            pc=config["model"].get(k)
+            pc=persisted["model"].get(k)
             if pc and isinstance(pc,dict) and pc.get("api_key") and not pc["api_key"].startswith(ENCODED_PREFIX) and pc["api_key"]!="ollama":
                 pc["api_key"]=_encode(pc["api_key"])
-    with CONFIG_PATH.open("w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    serialized = yaml.safe_dump(
+        persisted,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    with _CONFIG_LOCK:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _recover_config_transaction()
+        temporary, backup, journal = _config_transaction_paths()
+        try:
+            temporary.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+            if CONFIG_PATH.is_file():
+                shutil.copy2(CONFIG_PATH, backup)
+            _write_fsynced(temporary, serialized)
+            _write_fsynced(journal, json.dumps({
+                "schema_version": 1,
+                "target": str(CONFIG_PATH),
+                "temporary": str(temporary),
+                "backup": str(backup),
+            }, ensure_ascii=False, sort_keys=True))
+            os.replace(temporary, CONFIG_PATH)
+            journal.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            journal.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+            raise
 
 def _get_env_api_key(provider: str) -> str:
     env_var = ENV_KEY_MAP.get(provider)

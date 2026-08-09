@@ -1,6 +1,7 @@
 import copy
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +70,100 @@ class ModelConnectionSettingsTests(unittest.TestCase):
         self.assertNotIn("private-key", json.dumps(result, ensure_ascii=False))
         sent_request = urlopen.call_args.args[0]
         self.assertEqual(sent_request.headers["Authorization"], "Bearer private-key")
+
+    def test_legacy_config_migrates_once_and_survives_three_restart_cycles(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            config_path.write_text(
+                "model:\n  provider: local\n  name: legacy-local\n  local:\n    name: legacy-local\n    base_url: http://127.0.0.1:11435/v1\n",
+                encoding="utf-8",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                for _ in range(3):
+                    loaded = config_api.load_config()
+                    self.assertEqual(loaded["schema_version"], config_api.CONFIG_SCHEMA_VERSION)
+                    self.assertEqual(loaded["model"]["local"]["name"], "legacy-local")
+                    config_api.save_config(loaded)
+
+                persisted = config_api.yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(persisted["schema_version"], config_api.CONFIG_SCHEMA_VERSION)
+            self.assertEqual(persisted["model"]["local"]["name"], "legacy-local")
+
+    def test_atomic_save_failure_preserves_the_previous_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                original = config_api._default_config()
+                original["model"]["local"]["name"] = "before"
+                config_api.save_config(original)
+                original_bytes = config_path.read_bytes()
+                changed = config_api.load_config()
+                changed["model"]["local"]["name"] = "after"
+                real_replace = config_api.os.replace
+
+                def fail_target_replace(source, destination):
+                    if Path(destination) == config_path:
+                        raise OSError("simulated atomic replace failure")
+                    return real_replace(source, destination)
+
+                with patch.object(config_api.os, "replace", side_effect=fail_target_replace):
+                    with self.assertRaisesRegex(OSError, "atomic replace"):
+                        config_api.save_config(changed)
+
+            self.assertEqual(config_path.read_bytes(), original_bytes)
+            self.assertEqual(config_api.yaml.safe_load(original_bytes)["model"]["local"]["name"], "before")
+            self.assertEqual(list(Path(root).glob("config.yaml.*")), [])
+
+    def test_concurrent_saves_leave_one_complete_version(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            errors: list[BaseException] = []
+            barrier = threading.Barrier(3)
+
+            def save(name: str) -> None:
+                try:
+                    config = config_api._default_config()
+                    config["model"]["local"]["name"] = name
+                    barrier.wait(timeout=1)
+                    config_api.save_config(config)
+                except BaseException as error:
+                    errors.append(error)
+
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                workers = [threading.Thread(target=save, args=(name,)) for name in ("alpha", "beta")]
+                for worker in workers:
+                    worker.start()
+                barrier.wait(timeout=1)
+                for worker in workers:
+                    worker.join(timeout=2)
+                loaded = config_api.load_config()
+
+            self.assertEqual(errors, [])
+            self.assertIn(loaded["model"]["local"]["name"], {"alpha", "beta"})
+            self.assertEqual(loaded["schema_version"], config_api.CONFIG_SCHEMA_VERSION)
+            self.assertEqual(list(Path(root).glob("config.yaml.*")), [])
+
+    def test_load_recovers_an_interrupted_config_transaction(self):
+        for recovery_source, target_state in (("bak", "corrupt"), ("tmp", "missing")):
+            with self.subTest(source=recovery_source), tempfile.TemporaryDirectory() as root:
+                config_path = Path(root) / "config.yaml"
+                recovered = config_api._default_config()
+                recovered["model"]["local"]["name"] = f"recovered-{recovery_source}"
+                sidecar = Path(str(config_path) + f".{recovery_source}")
+                sidecar.write_text(
+                    config_api.yaml.safe_dump(recovered, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+                Path(str(config_path) + ".journal").write_text("{}", encoding="utf-8")
+                if target_state == "corrupt":
+                    config_path.write_text("model: [", encoding="utf-8")
+
+                with patch.object(config_api, "CONFIG_PATH", config_path):
+                    loaded = config_api.load_config()
+
+                self.assertEqual(loaded["model"]["local"]["name"], f"recovered-{recovery_source}")
+                self.assertEqual(list(Path(root).glob("config.yaml.*")), [])
 
     def test_live_and_code_routes_can_be_independent_or_shared(self):
         with tempfile.TemporaryDirectory() as root:
