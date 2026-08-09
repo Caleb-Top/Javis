@@ -162,6 +162,7 @@ json.dumps(
 
 ```python
 import dataclasses
+
 import pytest
 
 from core.life.contracts import (
@@ -880,7 +881,7 @@ def make_life_event(
         schema_version=1,
         event_id=event_id,
         event_type="life.test",
-        timestamp_utc="1970-01-01T00:00:01Z",
+        timestamp_utc="1970-01-01T00:00:01.000Z",
         monotonic_offset_ms=1,
         source="test",
         source_event_id=event_id,
@@ -896,7 +897,7 @@ def make_life_event(
         retention_class=RetentionClass(retention),
         confidence=1.0,
         provenance={"fixture": "tests/test_life_journal.py"},
-        redaction_summary="safe test event",
+        redaction_summary=("safe test event",),
     )
 
 
@@ -1008,7 +1009,7 @@ def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path
     )
     try:
         assert runtime.life is runtime.subsystems["life"]
-        assert runtime.life.snapshot().identity_id
+        assert runtime.life.snapshot().identity.identity_id
         assert runtime.life.snapshot().lifecycle_state.value in {"awake", "quiet"}
         assert runtime.life.status()["journal_state"] == "running"
     finally:
@@ -1240,18 +1241,28 @@ function lifeSnapshotEvent(revision: number, activity: LifeSurfaceState) {
     payload: {
       schema_version: 1,
       revision,
-      identity: { identity_id: "identity-1", name: "Javis" },
-      instance: { instance_id: "instance-1", lineage_id: "lineage-1" },
+      identity: {
+        identity_id: "identity-1", name: "Javis", kind: "local_digital_life",
+        relationship_role: "partner", version: 1, content_hash: "a".repeat(64),
+      },
+      instance: {
+        instance_id: "instance-1", lineage_id: "lineage-1",
+        parent_instance_id: null, generation: 0, fork_pending_review: false,
+      },
       lifecycle_state: activity === "offline" ? "degraded" : "awake",
       active_session_id: "session-1",
       active_request_id: null,
       activity,
-      health: activity === "error" ? "degraded" : "healthy",
+      health: {
+        status: activity === "error" ? "degraded" : "healthy",
+        degraded_components: activity === "error" ? ["test"] : [],
+        reason_codes: activity === "error" ? ["test_error"] : [],
+      },
       degradation_level: activity === "offline" ? 1 : 0,
       recovery_required: activity === "offline",
       last_event_id: `life-${revision}`,
       last_sequence: revision,
-      updated_at: revision * 1000,
+      updated_at: `1970-01-01T00:00:0${revision}.000Z`,
       explanation: "test-fixture",
     },
   } as const;
@@ -1388,9 +1399,10 @@ git commit -m "test(life): lock recovery and release contracts"
 | Approved L0-A design area | Implementation tasks | Executable evidence |
 |---|---:|---|
 | Incremental life facade and no subsystem rewrite | 1, 7, 8, 9 | contract, runtime assembly, API and App regressions |
+| Code root / user data root separation | 1B, 7, 7B, 10 | precedence, no-source-write, Tauri data-root and release tests |
 | Identity constitution fields, version chain, approval and rollback | 1, 2 | `test_life_contracts.py`, `test_life_identity.py` |
 | User/Javis identity separation and model independence | 1, 2, 10 | forbidden-field and release-source assertions |
-| Birth, restart, copy/move fork and abnormal-shutdown lineage | 3, 7, 10 | lineage unit tests plus D-drive recovery matrix |
+| Birth, restart, copy/move fork and abnormal-shutdown lineage | 3, 7, 7B, 10 | lineage, graceful/forced shutdown tests plus D-drive recovery matrix |
 | Complete 21-field event envelope, privacy and retention dimensions | 1, 5, 6 | contract, adapter, journal persistence tests |
 | Existing publisher mapping, real conversation bridge and high-frequency-event exclusion | 5, 7, 8, 10 | parameterized event map, production ConversationHub bridge and publisher-source review |
 | Bounded asynchronous journaling, priority, idempotency and cursors | 6 | slow-I/O, overload, duplicate and shutdown tests |
