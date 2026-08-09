@@ -45,6 +45,8 @@ tools/anthropic-plugins/
 # 插件缓存
 .codex/
 .claude/
+.hermes/
+.superpowers/
 .pnpm-store/
 
 # 临时脚本
@@ -53,6 +55,7 @@ start.bat
 start.ps1
 
 # 构建产物
+artifacts/
 *.spec
 skill_*.exe
 _build_temp/
@@ -72,6 +75,10 @@ memory/conversations/
 # 嵌入运行时 (大文件)
 Lib/
 python-embed/
+models/
+tools/cvu_data/
+tools/python-runtime-3.11/
+tools/yolo/
 tools/rust/
 *.dll
 *.exe
