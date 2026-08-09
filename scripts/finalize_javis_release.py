@@ -25,7 +25,7 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--runtime-manifest", type=Path, required=True)
@@ -33,7 +33,8 @@ def main() -> int:
     parser.add_argument("--runtime-archive", type=Path, required=True)
     parser.add_argument("--gate-report", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--without-addon", action="store_true")
+    args = parser.parse_args(argv)
 
     artifact = args.artifact_dir.resolve()
     setup = artifact / "Javis-v3.0.0-Setup.exe"
@@ -42,7 +43,9 @@ def main() -> int:
     addon_report = artifact / "Javis-R1-8B-Addon.report.json"
     runtime_report = artifact / "RUNTIME-TEST-REPORT.md"
     install_report = artifact / "INSTALL-TEST-REPORT.md"
-    required = [setup, addon_manifest_path, addon_report, runtime_report, install_report]
+    required = [setup, runtime_report, install_report]
+    if not args.without_addon:
+        required.extend((addon_manifest_path, addon_report))
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError("missing release artifacts: " + ", ".join(missing))
@@ -56,29 +59,32 @@ def main() -> int:
     shutil.copy2(args.runtime_manifest, runtime_copy)
     shutil.copy2(args.release_manifest, release_copy)
 
-    addon = json.loads(addon_manifest_path.read_text(encoding="utf-8"))
+    addon: dict[str, object] = {}
     payload_files: list[Path] = []
     payload_hashes: dict[str, str] = {}
-    for item in addon.get("payloads", []):
-        path = (addon_dir / str(item.get("path") or "")).resolve()
-        if path.parent != addon_dir or not path.is_file():
-            raise ValueError(f"invalid add-on payload path: {path}")
-        if path.stat().st_size != int(item.get("size") or -1):
-            raise ValueError(f"add-on payload size mismatch: {path.name}")
-        actual = sha256(path)
-        if actual != str(item.get("sha256") or "").lower():
-            raise ValueError(f"add-on payload checksum mismatch: {path.name}")
-        payload_files.append(path)
-        payload_hashes[path.name] = actual
+    addon_files: list[Path] = []
+    if not args.without_addon:
+        addon = json.loads(addon_manifest_path.read_text(encoding="utf-8"))
+        addon_files.extend((addon_manifest_path, addon_report))
+        for item in addon.get("payloads", []):
+            path = (addon_dir / str(item.get("path") or "")).resolve()
+            if path.parent != addon_dir or not path.is_file():
+                raise ValueError(f"invalid add-on payload path: {path}")
+            if path.stat().st_size != int(item.get("size") or -1):
+                raise ValueError(f"add-on payload size mismatch: {path.name}")
+            actual = sha256(path)
+            if actual != str(item.get("sha256") or "").lower():
+                raise ValueError(f"add-on payload checksum mismatch: {path.name}")
+            payload_files.append(path)
+            payload_hashes[path.name] = actual
 
     files = [
         setup,
-        addon_manifest_path,
-        addon_report,
         runtime_copy,
         release_copy,
         runtime_report,
         install_report,
+        *addon_files,
         *payload_files,
     ]
     hashes = {str(path.relative_to(artifact)).replace("\\", "/"): payload_hashes.get(path.name) or sha256(path) for path in files}
@@ -86,14 +92,15 @@ def main() -> int:
         "schema": 1,
         "product": "Javis",
         "version": "3.0.0",
-        "delivery": "main-setup-plus-optional-r1-addon",
+        "delivery": "main-setup-only" if args.without_addon else "main-setup-plus-optional-r1-addon",
         "main_installer": {
             "path": setup.name,
             "size": setup.stat().st_size,
             "sha256": hashes[setup.name],
             "contains_local_model": False,
         },
-        "optional_addon": {
+        "optional_addon": {"included": False} if args.without_addon else {
+            "included": True,
             "path": addon_dir.name,
             "model": addon.get("model"),
             "payloads": addon.get("payloads", []),

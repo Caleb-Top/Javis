@@ -300,6 +300,57 @@ class WorktreePreflightContractTests(unittest.TestCase):
 
 
 class CandidateManifestContractTests(unittest.TestCase):
+    def test_finalizer_can_emit_main_only_release_when_addon_is_already_delivered(self):
+        from scripts import finalize_javis_release as finalizer
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            artifact = root / "artifact"
+            artifact.mkdir()
+            setup = artifact / "Javis-v3.0.0-Setup.exe"
+            setup.write_bytes(b"MZ-main-installer")
+            (artifact / "RUNTIME-TEST-REPORT.md").write_text("Overall: PASS", encoding="utf-8")
+            (artifact / "INSTALL-TEST-REPORT.md").write_text("Overall: PASS", encoding="utf-8")
+            runtime_archive = root / "javis-runtime.zip"
+            runtime_archive.write_bytes(b"runtime")
+            runtime_manifest = root / "javis-runtime-manifest.json"
+            runtime_manifest.write_text(
+                json.dumps({"archive": {"sha256": finalizer.sha256(runtime_archive)}}),
+                encoding="utf-8",
+            )
+            release_manifest = root / "release.manifest.json"
+            release_manifest.write_text("{}", encoding="utf-8")
+            gate_report = root / "gate.json"
+            gate_report.write_text("{}", encoding="utf-8")
+            candidate = {
+                "package_sha256": finalizer.sha256(setup),
+                "runtime_sha256": finalizer.sha256(runtime_archive),
+            }
+
+            with (
+                patch.object(finalizer, "load_version_contract", return_value={"version": "3.0.0"}),
+                patch.object(finalizer, "source_tree_head", return_value="a" * 40),
+                patch.object(finalizer, "validate_release_gate_report", return_value=[]),
+                patch.object(finalizer, "build_candidate_manifest", return_value=candidate),
+                patch.object(finalizer, "validate_candidate_manifest", return_value=[]),
+            ):
+                result = finalizer.main([
+                    "--artifact-dir", str(artifact),
+                    "--runtime-manifest", str(runtime_manifest),
+                    "--release-manifest", str(release_manifest),
+                    "--runtime-archive", str(runtime_archive),
+                    "--gate-report", str(gate_report),
+                    "--root", str(root),
+                    "--without-addon",
+                ])
+
+            summary = json.loads((artifact / "Javis-v3.0.0-Release.manifest.json").read_text(encoding="utf-8"))
+            checksums = (artifact / "SHA256SUMS.txt").read_text(encoding="ascii")
+            self.assertEqual(result, 0)
+            self.assertEqual(summary["delivery"], "main-setup-only")
+            self.assertEqual(summary["optional_addon"], {"included": False})
+            self.assertNotIn("Javis-R1-8B-Addon", checksums)
+
     def test_candidate_manifest_binds_source_payloads_tests_and_pending_acceptance(self):
         from scripts.javis_candidate_manifest import build_candidate_manifest, validate_candidate_manifest
 
@@ -522,10 +573,14 @@ class ReleaseGateContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "gate tool"):
                 validate_gate_tool_path(escaped, source, shared)
 
-    def test_release_script_forbids_all_skip_switches_before_gate(self):
+    def test_release_script_allows_only_addon_reuse_before_gate(self):
         build = (ROOT / "scripts/build_javis_app_v3.ps1").read_text(encoding="utf-8")
-        self.assertIn("Release mode does not permit skip switches", build)
-        self.assertLess(build.index("Release mode does not permit skip switches"), build.index("javis_release_gate.py"))
+        message = "Release mode permits only -SkipAddonBuild"
+        self.assertIn(message, build)
+        self.assertLess(build.index(message), build.index("javis_release_gate.py"))
+        guard = "if ($SkipBundle -or $SkipRuntime -or $SkipDesktopBuild -or $SkipInstallVerification)"
+        self.assertIn(guard, build)
+        self.assertNotIn("$SkipAddonBuild -or $SkipInstallVerification", build)
 
 
 if __name__ == "__main__":
