@@ -80,8 +80,8 @@
 
 1. L0-A Task 1 first freezes the Python `ExpressionIntent v1` wire contract and its exact 12 fields.
 2. L0-B Tasks 1-5 may proceed in a separate worktree because they do not consume `app/src/life/lifeTypes.ts` or modify `app/src/main.ts`.
-3. L0-A Task 9 must be integrated before L0-B Task 6; L0-B then imports the committed TypeScript guard instead of recreating the protocol.
-4. L0-A Task 9 owns the first `app/src/main.ts` edit. Before L0-B Tasks 7 or 9 edit that file, rebase the L0-B worktree onto the integrated L0-A commit and rerun the complete App suite.
+3. L0-A Task 11 must be integrated before L0-B Task 6; L0-B then imports the committed TypeScript guard instead of recreating the protocol.
+4. L0-A Task 11 owns the first `app/src/main.ts` edit. Before L0-B Tasks 7 or 9 edit that file, rebase the L0-B worktree onto the integrated L0-A commit and rerun the complete App suite.
 5. Integration order is L0-A followed by the rebased L0-B. Neither branch may resolve a conflict by dropping the existing single `onEvent` chain or creating a second WebSocket.
 
 ---
@@ -358,7 +358,7 @@ Expected: collection fails because `core.life.contracts` does not exist.
 
 Use frozen dataclasses, string enums and recursive freeze/thaw helpers. `IdentityConstitution.create_default()` must calculate `content_hash` from canonical JSON excluding the hash field itself. Every `from_dict()` enforces the frozen wire rules above. `LifeEvent` must enforce `secret → never_persist` unless payload contains only a dedicated secure-store reference.
 
-Task 1 is contract-only: it must not create directories, write files, inspect hardware, register EventBus handlers, implement lifecycle transitions or map snapshots to expressions. `quiet → idle`, expiration and expression revision belong only to Task 4 `ExpressionProjector`.
+Task 1 is contract-only: it must not create directories, write files, inspect hardware, register EventBus handlers, implement lifecycle transitions or map snapshots to expressions. `quiet → idle`, expiration and expression revision belong only to Task 5 `ExpressionProjector`.
 
 ```python
 class LifeCycleState(str, Enum):
@@ -401,7 +401,7 @@ git commit -m "feat(life): define identity and event contracts"
 
 ---
 
-### Task 1B: Separate Code Root from User Data Root
+### Task 2: Separate Code Root from User Data Root
 
 **Files:**
 - Create: `core/life/paths.py`
@@ -480,14 +480,14 @@ git commit -m "refactor(runtime): separate code and user data roots"
 
 ---
 
-### Task 2: Implement the Versioned Identity Constitution
+### Task 3: Implement the Versioned Identity Constitution
 
 **Files:**
 - Create: `core/life/identity.py`
 - Test: `tests/test_life_identity.py`
 
 **Interfaces:**
-- Consumes: `IdentityConstitution` from Task 1 and the base user `data_root` from Task 1B.
+- Consumes: `IdentityConstitution` from Task 1 and the base user `data_root` from Task 2.
 - Produces: `IdentityConstitutionStore.load_or_create()`, `load()`, `load_last_verified()`, `write_version(current, *, changes, approved_by)`, `rollback_to_previous(*, approved_by)` and `summary()`.
 
 - [ ] **Step 1: Write failing first-birth, restart, mutation and corruption tests**
@@ -567,7 +567,7 @@ def test_identity_rejects_runtime_and_secret_fields(tmp_path):
         store.write_version(identity, changes={"persona_invariants": ["quiet"]}, approved_by="")
 ```
 
-- [ ] **Step 5: Run Task 1 and Task 2 tests together**
+- [ ] **Step 5: Run Task 1 and Task 3 tests together**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_contracts.py tests/test_life_identity.py -q
@@ -582,7 +582,7 @@ git commit -m "feat(life): persist versioned identity constitution"
 
 ---
 
-### Task 3: Add Instance Lineage and Continuity Checkpoints
+### Task 4: Add Instance Lineage and Continuity Checkpoints
 
 **Files:**
 - Create: `core/life/lineage.py`
@@ -694,7 +694,7 @@ git commit -m "feat(life): track instance lineage and checkpoints"
 
 ---
 
-### Task 4: Build the Minimal Lifecycle State Machine and Snapshot Projector
+### Task 5: Build the Minimal Lifecycle State Machine and Snapshot Projector
 
 **Files:**
 - Create: `core/life/state.py`
@@ -764,7 +764,7 @@ BASE_STATE_BY_ACTIVITY = {
 
 Clamp intensity to `[0.0, 1.0]`; restrict gaze to `none/user/content/task`; restrict voice activity to `silent/listening/speaking`.
 
-- [ ] **Step 5: Run Tasks 1-4 tests**
+- [ ] **Step 5: Run Tasks 1 and 3-5 tests**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_contracts.py tests/test_life_identity.py tests/test_life_lineage.py tests/test_life_state.py -q
@@ -779,7 +779,7 @@ git commit -m "feat(life): add minimal lifecycle and expression projection"
 
 ---
 
-### Task 5: Add Privacy Classification and Deterministic Event Mapping
+### Task 6: Add Privacy Classification and Deterministic Event Mapping
 
 **Files:**
 - Create: `core/life/privacy.py`
@@ -849,7 +849,7 @@ git commit -m "feat(life): classify and map runtime events safely"
 
 ---
 
-### Task 6: Implement the Asynchronous Life Event Journal
+### Task 7: Implement the Asynchronous Life Event Journal
 
 **Files:**
 - Create: `core/life/journal.py`
@@ -986,7 +986,7 @@ git commit -m "feat(life): persist life events off the hot path"
 
 ---
 
-### Task 7: Assemble `LifeService` in `JarvisRuntime`
+### Task 8: Assemble `LifeService` in `JarvisRuntime`
 
 **Files:**
 - Create: `core/life/service.py`
@@ -1025,7 +1025,7 @@ def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path
 
 - [ ] **Step 3: Implement service start/stop and runtime field**
 
-Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with the base `runtime.data_root` from Task 1B; never pass `data_root / "life"`. Register it after the existing stores exist and before `runtime.created` is published. Pass the existing runtime `EventBus` into `ConversationHub`; do not create a second bus.
+Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with the base `runtime.data_root` from Task 2; never pass `data_root / "life"`. Register it after the existing stores exist and before `runtime.created` is published. Pass the existing runtime `EventBus` into `ConversationHub`; do not create a second bus.
 
 Startup performs `assess_previous_run()` before `mark_started(current_boot_id)`. `start()` installs exactly one wildcard handler. Because the existing EventBus has no unsubscribe, `stop()` atomically disables that handler before flushing; repeated `start()` is rejected and stopped callbacks become no-ops. It then writes the clean checkpoint and joins the journal worker. EventBus API expansion is not required for L0-A.
 
@@ -1048,7 +1048,7 @@ git commit -m "feat(life): assemble life service in runtime"
 
 ---
 
-### Task 7B: Add an Owned Graceful Desktop Shutdown
+### Task 9: Add an Owned Graceful Desktop Shutdown
 
 **Files:**
 - Modify: `main.py`
@@ -1104,7 +1104,7 @@ git commit -m "fix(runtime): checkpoint before owned sidecar exit"
 
 ---
 
-### Task 8: Add Read-Only Life APIs and Session Push
+### Task 10: Add Read-Only Life APIs and Session Push
 
 **Files:**
 - Create: `core/life/api.py`
@@ -1114,7 +1114,7 @@ git commit -m "fix(runtime): checkpoint before owned sidecar exit"
 - Test: `tests/test_conversation_life_event_bridge.py`
 
 **Interfaces:**
-- Consumes: `LifeService`, active ConversationHub subscriptions and the runtime EventBus injected in Task 7.
+- Consumes: `LifeService`, active ConversationHub subscriptions and the runtime EventBus injected in Task 8.
 - Produces: `GET /api/life/identity`, `/api/life/snapshot`, `/api/life/lineage`, `/api/life/events`; `ConversationHub.publish_system_event()`, `subscribed_sessions()`, allowlisted conversation observations; `life.snapshot` and `life.expression` session events.
 
 - [ ] **Step 1: Write failing API authorization and redaction tests**
@@ -1216,7 +1216,7 @@ git commit -m "feat(life): expose read-only life snapshots"
 
 ---
 
-### Task 9: Add the Frontend Compatibility Bridge
+### Task 11: Add the Frontend Compatibility Bridge
 
 **Files:**
 - Create: `app/src/life/lifeTypes.ts`
@@ -1323,7 +1323,7 @@ git commit -m "feat(app): bridge life snapshots to existing surfaces"
 
 ---
 
-### Task 10: Lock Recovery, Privacy, Release and Regression Contracts
+### Task 12: Lock Recovery, Privacy, Release and Regression Contracts
 
 **Files:**
 - Create: `tests/test_life_release_contract.py`
@@ -1398,26 +1398,26 @@ git commit -m "test(life): lock recovery and release contracts"
 
 | Approved L0-A design area | Implementation tasks | Executable evidence |
 |---|---:|---|
-| Incremental life facade and no subsystem rewrite | 1, 7, 8, 9 | contract, runtime assembly, API and App regressions |
-| Code root / user data root separation | 1B, 7, 7B, 10 | precedence, no-source-write, Tauri data-root and release tests |
-| Identity constitution fields, version chain, approval and rollback | 1, 2 | `test_life_contracts.py`, `test_life_identity.py` |
-| User/Javis identity separation and model independence | 1, 2, 10 | forbidden-field and release-source assertions |
-| Birth, restart, copy/move fork and abnormal-shutdown lineage | 3, 7, 7B, 10 | lineage, graceful/forced shutdown tests plus D-drive recovery matrix |
-| Complete 21-field event envelope, privacy and retention dimensions | 1, 5, 6 | contract, adapter, journal persistence tests |
-| Existing publisher mapping, real conversation bridge and high-frequency-event exclusion | 5, 7, 8, 10 | parameterized event map, production ConversationHub bridge and publisher-source review |
-| Bounded asynchronous journaling, priority, idempotency and cursors | 6 | slow-I/O, overload, duplicate and shutdown tests |
-| Minimal lifecycle, snapshot, stale terminal protection | 4, 7 | transition and runtime service tests |
-| Read-only backend exits and unified-session push | 8 | API method, redaction and ConversationHub tests |
-| Exact 12-field L0-B interface and frontend compatibility fallback | 1, 4, 9 | Python wire-key and TypeScript guard/revision tests |
-| Corruption, unwritable journal, overload and protocol recovery | 2, 3, 6, 9, 10 | recovery tests, status diagnostics and acceptance checklist |
-| Security, privacy, automated gates and D-drive truthfulness | 5, 6, 10 | redacted fixtures, release contract and explicit PASS/FAIL evidence |
+| Incremental life facade and no subsystem rewrite | 1, 8, 10, 11 | contract, runtime assembly, API and App regressions |
+| Code root / user data root separation | 2, 8, 9, 12 | precedence, no-source-write, Tauri data-root and release tests |
+| Identity constitution fields, version chain, approval and rollback | 1, 3 | `test_life_contracts.py`, `test_life_identity.py` |
+| User/Javis identity separation and model independence | 1, 3, 12 | forbidden-field and release-source assertions |
+| Birth, restart, copy/move fork and abnormal-shutdown lineage | 4, 8, 9, 12 | lineage, graceful/forced shutdown tests plus D-drive recovery matrix |
+| Complete 21-field event envelope, privacy and retention dimensions | 1, 6, 7 | contract, adapter, journal persistence tests |
+| Existing publisher mapping, real conversation bridge and high-frequency-event exclusion | 6, 8, 10, 12 | parameterized event map, production ConversationHub bridge and publisher-source review |
+| Bounded asynchronous journaling, priority, idempotency and cursors | 7 | slow-I/O, overload, duplicate and shutdown tests |
+| Minimal lifecycle, snapshot, stale terminal protection | 5, 8 | transition and runtime service tests |
+| Read-only backend exits and unified-session push | 10 | API method, redaction and ConversationHub tests |
+| Exact 12-field L0-B interface and frontend compatibility fallback | 1, 5, 11 | Python wire-key and TypeScript guard/revision tests |
+| Corruption, unwritable journal, overload and protocol recovery | 3, 4, 7, 11, 12 | recovery tests, status diagnostics and acceptance checklist |
+| Security, privacy, automated gates and D-drive truthfulness | 6, 7, 12 | redacted fixtures, release contract and explicit PASS/FAIL evidence |
 
 ---
 
 ## Final Verification
 
 - [ ] Run `git diff --check` and confirm no whitespace errors.
-- [ ] Run every Python test named in Task 10 Step 5 from the isolated worktree.
+- [ ] Run every Python test named in Task 12 Step 5 from the isolated worktree.
 - [ ] Run the complete App test suite and production build.
 - [ ] Search `core/life`, `app/src/life` and `tests/test_life_*.py` for unfinished placeholder markers and remove them.
 - [ ] Confirm `git status --short` contains only intended L0-A files before integration.
