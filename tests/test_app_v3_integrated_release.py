@@ -3,9 +3,13 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from scripts.javis_release_version import load_version_contract, release_artifact_names
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
+CURRENT_VERSION = load_version_contract(ROOT)["version"]
+CURRENT_ARTIFACTS = release_artifact_names(CURRENT_VERSION)
 
 
 class AppV3IntegratedReleaseTests(unittest.TestCase):
@@ -27,7 +31,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             cargo["package"]["version"],
             manifest["version"],
         ):
-            self.assertEqual(version, "3.0.0")
+            self.assertEqual(version, CURRENT_VERSION)
 
     def test_release_manifest_declares_complete_backend_and_five_systems(self):
         manifest = json.loads((APP / "release.manifest.json").read_text(encoding="utf-8"))
@@ -55,7 +59,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             VERSION,
         )
 
-        self.assertEqual(VERSION, "3.0.0")
+        self.assertEqual(VERSION, CURRENT_VERSION)
         self.assertEqual(set(SYSTEMS), {"core", "memory", "perception", "control", "evolution"})
         self.assertIn("ollama_models", EXTERNAL_COMPONENTS)
         self.assertIn("cuda_training_stack", EXTERNAL_COMPONENTS)
@@ -172,7 +176,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "--python-root",
             "--stt-model-root",
             "deepseek-r1:8b",
-            "Javis-v3.0.0-Setup.exe",
+            CURRENT_ARTIFACTS["package"],
             "--build-addon",
             "Javis-R1-8B-Addon",
             "GetBinaryType",
@@ -221,7 +225,13 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
         self.assertNotIn("$env:RUSTUP_TOOLCHAIN", build)
         self.assertNotIn("$env:CARGO_BUILD_TARGET", build)
         self.assertNotIn("build --target", build)
-        self.assertIn('"src-tauri\\target\\release"', build)
+        self.assertIn("$JavisCargoTarget = $Layout.cargo_target", build)
+        self.assertIn('$JavisTargetRoot = Join-Path $JavisCargoTarget "release"', build)
+        self.assertNotIn('Join-Path $JavisApp "src-tauri\\target"', build)
+        self.assertIn('$ReleaseGateReport = Join-Path $BuildTemp "release-gate-report.json"', build)
+        self.assertIn('$env:PIP_CACHE_DIR = Join-Path $BuildTemp "pip-cache"', build)
+        self.assertIn('$env:PNPM_HOME = Join-Path $BuildTemp "pnpm-store"', build)
+        self.assertNotIn('Join-Path $JavisRoot "tmp\\release-gate-report.json"', build)
 
 
 if __name__ == "__main__":

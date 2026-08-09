@@ -16,6 +16,8 @@ const STARTUP_POLLS: usize = 60;
 #[derive(Default)]
 struct OllamaRuntime {
     child: Option<Child>,
+    child_generation: Option<u64>,
+    generation: u64,
     attached_existing: bool,
     last_error: String,
 }
@@ -65,7 +67,10 @@ impl BundledOllama {
 
     pub fn status(&self) -> String {
         if probe_ollama() {
-            let runtime = self.runtime.lock().unwrap_or_else(|error| error.into_inner());
+            let runtime = self
+                .runtime
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if runtime.attached_existing {
                 "attached".to_string()
             } else {
@@ -79,9 +84,18 @@ impl BundledOllama {
     }
 
     pub fn start(&self, app: &AppHandle) -> Result<String, String> {
+        let start_generation = {
+            let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+            runtime.generation = runtime.generation.saturating_add(1);
+            runtime.generation
+        };
         if probe_ollama() {
             let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+            if runtime.generation != start_generation {
+                return Err("bundled Ollama startup superseded".to_string());
+            }
             runtime.attached_existing = true;
+            runtime.child_generation = None;
             runtime.last_error.clear();
             return Ok("attached".to_string());
         }
@@ -99,36 +113,72 @@ impl BundledOllama {
             .env("OLLAMA_KEEP_ALIVE", "10m")
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start bundled Ollama: {error}"))?;
         {
             let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+            if runtime.generation != start_generation {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("bundled Ollama startup superseded".to_string());
+            }
             runtime.child = Some(child);
+            runtime.child_generation = Some(start_generation);
             runtime.attached_existing = false;
             runtime.last_error.clear();
         }
         for _ in 0..STARTUP_POLLS {
             thread::sleep(Duration::from_millis(500));
+            let current = self
+                .runtime
+                .lock()
+                .map(|runtime| runtime.generation == start_generation)
+                .unwrap_or(false);
+            if !current {
+                return Err("bundled Ollama startup superseded".to_string());
+            }
             if probe_ollama() {
                 return Ok("healthy".to_string());
             }
         }
         let message = "bundled Ollama startup timed out".to_string();
         if let Ok(mut runtime) = self.runtime.lock() {
-            runtime.last_error = message.clone();
+            if runtime.generation == start_generation {
+                runtime.last_error = message.clone();
+            }
         }
-        let _ = self.stop_owned();
+        let _ = self.stop_generation(start_generation);
         Err(message)
     }
 
-    pub fn stop_owned(&self) -> Result<(), String> {
+    fn stop_generation(&self, start_generation: u64) -> Result<(), String> {
         let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.generation != start_generation
+            || runtime.child_generation != Some(start_generation)
+        {
+            return Ok(());
+        }
         if let Some(child) = runtime.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
         }
         runtime.child = None;
+        runtime.child_generation = None;
+        runtime.attached_existing = false;
+        runtime.generation = runtime.generation.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn stop_owned(&self) -> Result<(), String> {
+        let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.generation = runtime.generation.saturating_add(1);
+        if let Some(child) = runtime.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        runtime.child = None;
+        runtime.child_generation = None;
         runtime.attached_existing = false;
         Ok(())
     }
@@ -179,12 +229,54 @@ mod tests {
         let base = std::env::temp_dir().join(format!("javis-ollama-root-{}", std::process::id()));
         let selected = base.join("selected");
         std::fs::create_dir_all(&base).unwrap();
-        std::fs::write(base.join("local-ai-root.txt"), selected.to_string_lossy().as_bytes()).unwrap();
+        std::fs::write(
+            base.join("local-ai-root.txt"),
+            selected.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
         let manager = BundledOllama::new(base.clone());
 
-        assert_eq!(manager.model_root(), selected.join("local-ai").join("models"));
-        assert_eq!(manager.executable_path(), selected.join("local-ai").join("ollama").join("ollama.exe"));
+        assert_eq!(
+            manager.model_root(),
+            selected.join("local-ai").join("models")
+        );
+        assert_eq!(
+            manager.executable_path(),
+            selected.join("local-ai").join("ollama").join("ollama.exe")
+        );
 
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn stopping_invalidates_the_current_start_generation() {
+        let manager = BundledOllama::new(PathBuf::new());
+        {
+            let mut runtime = manager.runtime.lock().unwrap();
+            runtime.generation = 7;
+            runtime.child_generation = Some(7);
+        }
+
+        manager.stop_owned().unwrap();
+
+        let runtime = manager.runtime.lock().unwrap();
+        assert_eq!(runtime.generation, 8);
+        assert_eq!(runtime.child_generation, None);
+    }
+
+    #[test]
+    fn stale_generation_cannot_stop_a_newer_child_owner() {
+        let manager = BundledOllama::new(PathBuf::new());
+        {
+            let mut runtime = manager.runtime.lock().unwrap();
+            runtime.generation = 9;
+            runtime.child_generation = Some(9);
+        }
+
+        manager.stop_generation(8).unwrap();
+
+        let runtime = manager.runtime.lock().unwrap();
+        assert_eq!(runtime.generation, 9);
+        assert_eq!(runtime.child_generation, Some(9));
     }
 }

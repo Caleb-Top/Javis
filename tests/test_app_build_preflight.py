@@ -49,7 +49,11 @@ class AppBuildPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report = collect_build_preflight(root)
+            with unittest.mock.patch(
+                "scripts.app_build_preflight._drive_is_g",
+                return_value=True,
+            ):
+                report = collect_build_preflight(root)
 
             self.assertIn("tauri-local-tools-disabled", report["blockers"])
             self.assertIn("tauri-local-nsis-cache-missing", report["blockers"])

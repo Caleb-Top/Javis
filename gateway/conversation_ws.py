@@ -18,6 +18,7 @@ from core.conversation_protocol import (
     legacy_wire_events,
     normalize_client_message,
 )
+from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
 
 logger = logging.getLogger("jarvis.conversation.gateway")
@@ -31,11 +32,13 @@ class ConversationWebSocketGateway:
         transcribe: Callable[[str], str] | None = None,
         local_action_resolver: Callable[[str, dict[str, Any]], Any] | None = None,
         command_handlers: dict[str, Callable[[ClientCommand, Any], Any]] | None = None,
+        stall_harness: ConversationStallHarness | None = None,
     ):
         self.runtime = runtime
         self.transcribe = transcribe
         self.local_action_resolver = local_action_resolver
         self.command_handlers = dict(command_handlers or {})
+        self.stall_harness = stall_harness
 
     async def serve(self, ws) -> None:
         await ws.accept()
@@ -43,18 +46,24 @@ class ConversationWebSocketGateway:
         sender: asyncio.Task | None = None
         attached_session = ""
         legacy = True
+        unacknowledged_stalls: set[tuple[str, str]] = set()
+        submitted_stalls: set[tuple[str, str]] = set()
 
         async def detach() -> None:
             nonlocal subscription, sender, attached_session
-            if sender is not None:
-                sender.cancel()
-                with suppress(asyncio.CancelledError):
-                    await sender
-            sender = None
-            if subscription is not None:
-                await subscription.close()
-            subscription = None
-            attached_session = ""
+            try:
+                if sender is not None:
+                    sender.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await sender
+            finally:
+                try:
+                    if subscription is not None:
+                        await subscription.close()
+                finally:
+                    sender = None
+                    subscription = None
+                    attached_session = ""
 
         async def attach(command: ClientCommand, *, acknowledge: bool) -> None:
             nonlocal subscription, sender, attached_session, legacy
@@ -79,6 +88,23 @@ class ConversationWebSocketGateway:
                 self._send_events(ws, subscription, legacy=legacy)
             )
 
+        async def cleanup_stalls() -> None:
+            pending = tuple(submitted_stalls)
+            submitted_stalls.clear()
+            unacknowledged_stalls.clear()
+            for session_id, request_id in pending:
+                await self.runtime.conversation_hub.cancel(
+                    session_id,
+                    request_id,
+                    reason="stall harness websocket disconnected",
+                )
+            for _, request_id in pending:
+                with suppress(KeyError, asyncio.TimeoutError):
+                    await self.runtime.conversation_hub.wait_for_terminal(
+                        request_id,
+                        timeout=1,
+                    )
+
         try:
             while True:
                 raw = await ws.receive_text()
@@ -89,10 +115,26 @@ class ConversationWebSocketGateway:
                         await attach(command, acknowledge=True)
                     elif command.type == "conversation.message":
                         await attach(command, acknowledge=False)
-                        if await self._dispatch_local_action(ws, command):
+                        text = str(command.payload.get("text") or "").strip()
+                        stall_mode = (
+                            self.stall_harness.mode_for(ws, text)
+                            if self.stall_harness is not None
+                            else None
+                        )
+                        request_key = (command.session_id, command.request_id)
+                        if stall_mode is StallMode.NO_ACK:
+                            unacknowledged_stalls.add(request_key)
                             continue
-                        await self._submit(command)
+                        if stall_mode is None and await self._dispatch_local_action(ws, command):
+                            continue
+                        await self._submit(command, stall_mode=stall_mode)
+                        if stall_mode is not None:
+                            submitted_stalls.add(request_key)
                     elif command.type == "conversation.cancel":
+                        request_key = (command.session_id, command.request_id)
+                        if request_key in unacknowledged_stalls:
+                            unacknowledged_stalls.discard(request_key)
+                            continue
                         cancelled = await self.runtime.conversation_hub.cancel(
                             command.session_id,
                             command.request_id,
@@ -143,9 +185,18 @@ class ConversationWebSocketGateway:
         except WebSocketDisconnect:
             pass
         finally:
-            await detach()
+            try:
+                await detach()
+            finally:
+                await cleanup_stalls()
 
-    async def _submit(self, command: ClientCommand, *, text: str | None = None) -> None:
+    async def _submit(
+        self,
+        command: ClientCommand,
+        *,
+        text: str | None = None,
+        stall_mode: StallMode | None = None,
+    ) -> None:
         user_text = str(text if text is not None else command.payload.get("text") or "").strip()
         request = ConversationRequest(
             session_id=command.session_id,
@@ -156,6 +207,12 @@ class ConversationWebSocketGateway:
         )
 
         async def runner(active_request, token):
+            if stall_mode is not None:
+                if self.stall_harness is None:
+                    raise RuntimeError("stall mode requires an injected harness")
+                async for event in self.stall_harness.run(stall_mode, token):
+                    yield event
+                return
             engine = getattr(self.runtime, "engine", None)
             use_route = getattr(engine, "use_route", None)
             if callable(use_route):

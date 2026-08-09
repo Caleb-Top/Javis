@@ -1,9 +1,9 @@
 """配置管理 API"""
-import copy, os, base64, json, logging
+import copy, os, base64, json, logging, shutil, threading, time
 from pathlib import Path
 from urllib import request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 try:
     import yaml
@@ -11,7 +11,10 @@ except ModuleNotFoundError:  # Optional for import-only tools and UI tests.
     yaml = None
 logger = logging.getLogger("config_api")
 CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+CONFIG_SCHEMA_VERSION = 2
+CATALOG_CACHE_SCHEMA_VERSION = 1
 ENCODED_PREFIX = "b64:"
+_CONFIG_LOCK = threading.RLock()
 
 # 环境变量优先（比 config.yaml 更安全）
 ENV_KEY_MAP = {
@@ -44,16 +47,19 @@ DEFAULT_REMOTE_BASE_URLS = {
 _SECURITY_WARNED = False
 
 DEFAULT_CONFIG = {
+    "schema_version": CONFIG_SCHEMA_VERSION,
     "model": {
         "provider": "local",
-        "name": "deepseek-r1:8b",
+        # The base installer intentionally ships without a local model.  An empty
+        # name is an explicit setup state, not an implicit request to pull R1.
+        "name": "",
         "effort": "balanced",
         "temperature": 0.7,
         "max_tokens": 8192,
         "max_steps": 20,
         "max_retries": 3,
         "local": {
-            "name": "deepseek-r1:8b",
+            "name": "",
             "base_url": "http://127.0.0.1:11435/v1",
             "api_key": "ollama",
         },
@@ -95,11 +101,78 @@ def _merge_defaults(config: dict) -> dict:
             merged[key] = value
     model = merged.setdefault("model", {})
     local = model.setdefault("local", {})
-    local.setdefault("name", model.get("name", "deepseek-r1:8b"))
+    local.setdefault("name", model.get("name", ""))
+    if (
+        not str(local.get("name") or "").strip()
+        and str(model.get("provider") or "") == "local"
+        and str(model.get("name") or "").strip()
+    ):
+        local["name"] = str(model["name"]).strip()
     local.setdefault("base_url", "http://127.0.0.1:11435/v1")
     local["api_key"] = local.get("api_key") or "ollama"
     merged.setdefault("agent", {}).setdefault("permission_level", "full_access")
     return merged
+
+
+def _migrate_config(config: dict) -> dict:
+    migrated = copy.deepcopy(config if isinstance(config, dict) else {})
+    raw_version = migrated.get("schema_version", 1)
+    try:
+        version = int(raw_version)
+    except (TypeError, ValueError) as error:
+        raise ValueError("config.yaml schema_version 无效") from error
+    if version > CONFIG_SCHEMA_VERSION:
+        raise ValueError(f"config.yaml schema_version {version} 高于当前支持版本 {CONFIG_SCHEMA_VERSION}")
+    migrated["schema_version"] = CONFIG_SCHEMA_VERSION
+    return migrated
+
+
+def _config_transaction_paths() -> tuple[Path, Path, Path]:
+    base = str(CONFIG_PATH)
+    return Path(base + ".tmp"), Path(base + ".bak"), Path(base + ".journal")
+
+
+def _read_yaml_file(path: Path) -> dict:
+    with path.open(encoding="utf-8") as stream:
+        loaded = yaml.safe_load(stream)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path.name} 不是有效配置对象")
+    return loaded
+
+
+def _is_valid_yaml_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        _read_yaml_file(path)
+        return True
+    except Exception:
+        return False
+
+
+def _recover_config_transaction() -> None:
+    temporary, backup, journal = _config_transaction_paths()
+    if not journal.is_file():
+        return
+    if _is_valid_yaml_file(CONFIG_PATH):
+        temporary.unlink(missing_ok=True)
+        backup.unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
+        return
+    if _is_valid_yaml_file(backup):
+        os.replace(backup, CONFIG_PATH)
+    elif _is_valid_yaml_file(temporary):
+        os.replace(temporary, CONFIG_PATH)
+    temporary.unlink(missing_ok=True)
+    backup.unlink(missing_ok=True)
+    journal.unlink(missing_ok=True)
+
+
+def _write_fsynced(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 def _warn_security(config: dict):
     global _SECURITY_WARNED
@@ -120,36 +193,65 @@ def _decode(s):
     return s
 
 def load_config():
-    if not CONFIG_PATH.exists():
-        return _default_config()
     if yaml is None:
         logger.warning("PyYAML is unavailable; using default configuration")
         return _default_config()
-    try:
-        with CONFIG_PATH.open(encoding="utf-8") as f:
-            cfg=yaml.safe_load(f)
-        cfg = _merge_defaults(cfg or {})
-        if cfg and "model" in cfg:
-            _warn_security(cfg)
-            for k in CLOUD_PROVIDERS:
-                pc=cfg["model"].get(k)
-                if pc and isinstance(pc,dict) and pc.get("api_key"): pc["api_key"]=_decode(pc["api_key"])
-        return cfg
-    except Exception as e:
-        logger.warning(f"config.yaml 读取异常: {e}"); return _default_config()
+    with _CONFIG_LOCK:
+        try:
+            _recover_config_transaction()
+            if not CONFIG_PATH.exists():
+                return _default_config()
+            cfg = _merge_defaults(_migrate_config(_read_yaml_file(CONFIG_PATH)))
+            if cfg and "model" in cfg:
+                _warn_security(cfg)
+                for k in CLOUD_PROVIDERS:
+                    pc=cfg["model"].get(k)
+                    if pc and isinstance(pc,dict) and pc.get("api_key"): pc["api_key"]=_decode(pc["api_key"])
+            return cfg
+        except Exception as e:
+            logger.warning(f"config.yaml 读取异常: {e}"); return _default_config()
 
 def save_config(config):
     if yaml is None:
         raise RuntimeError("PyYAML is required to save config.yaml")
-    if "model" in config:
-        local=config["model"].get("local",{})
+    persisted = _migrate_config(config)
+    if "model" in persisted:
+        local=persisted["model"].get("local",{})
         if isinstance(local,dict): local["api_key"]="ollama"
         for k in CLOUD_PROVIDERS:
-            pc=config["model"].get(k)
+            pc=persisted["model"].get(k)
             if pc and isinstance(pc,dict) and pc.get("api_key") and not pc["api_key"].startswith(ENCODED_PREFIX) and pc["api_key"]!="ollama":
                 pc["api_key"]=_encode(pc["api_key"])
-    with CONFIG_PATH.open("w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    serialized = yaml.safe_dump(
+        persisted,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    with _CONFIG_LOCK:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _recover_config_transaction()
+        temporary, backup, journal = _config_transaction_paths()
+        try:
+            temporary.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+            if CONFIG_PATH.is_file():
+                shutil.copy2(CONFIG_PATH, backup)
+            _write_fsynced(temporary, serialized)
+            _write_fsynced(journal, json.dumps({
+                "schema_version": 1,
+                "target": str(CONFIG_PATH),
+                "temporary": str(temporary),
+                "backup": str(backup),
+            }, ensure_ascii=False, sort_keys=True))
+            os.replace(temporary, CONFIG_PATH)
+            journal.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            journal.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+            raise
 
 def _get_env_api_key(provider: str) -> str:
     env_var = ENV_KEY_MAP.get(provider)
@@ -245,7 +347,7 @@ AVAILABLE_MODELS = {
 def set_provider(provider):
     cfg=load_config(); mdl=cfg.setdefault("model",{}); mdl["provider"]=provider
     if provider=="local":
-        lc=mdl.setdefault("local",{}); lc["name"]=lc.get("name") or mdl.get("name","deepseek-r1:8b"); lc["api_key"]="ollama"; mdl["name"]=lc["name"]
+        lc=mdl.setdefault("local",{}); lc["name"]=lc.get("name") or ""; lc["api_key"]="ollama"; mdl["name"]=lc["name"]
     else:
         models=AVAILABLE_MODELS.get(provider,[])
         if models:
@@ -291,11 +393,76 @@ def _validate_model_name(value: str, label: str) -> str:
     return model_name
 
 
+def _validate_optional_model_name(value: str, label: str) -> str:
+    model_name = str(value or "").strip()
+    if len(model_name) > 240:
+        raise ValueError(f"{label}过长")
+    return model_name
+
+
 def _provider_models(provider: str) -> list[dict]:
     return [
         {"id": name, "label": label, "description": description}
         for name, label, description in AVAILABLE_MODELS.get(provider, [])
     ]
+
+
+def _catalog_cache_path() -> Path:
+    return CONFIG_PATH.with_name("model-catalog-cache.json")
+
+
+def _read_catalog_cache() -> dict:
+    path = _catalog_cache_path()
+    if not path.is_file():
+        return {"schema_version": CATALOG_CACHE_SCHEMA_VERSION, "providers": {}}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict) or loaded.get("schema_version") != CATALOG_CACHE_SCHEMA_VERSION:
+            raise ValueError("catalog cache schema mismatch")
+        if not isinstance(loaded.get("providers"), dict):
+            loaded["providers"] = {}
+        return loaded
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"schema_version": CATALOG_CACHE_SCHEMA_VERSION, "providers": {}}
+
+
+def _cached_provider_models(provider: str, base_url: str) -> list[str]:
+    with _CONFIG_LOCK:
+        entry = _read_catalog_cache().get("providers", {}).get(provider, {})
+    if not isinstance(entry, dict) or entry.get("base_url") != base_url:
+        return []
+    return sorted({
+        str(model_id).strip()
+        for model_id in entry.get("models", [])
+        if str(model_id).strip()
+    })
+
+
+def _store_provider_models(provider: str, base_url: str, model_ids: list[str]) -> None:
+    with _CONFIG_LOCK:
+        cache = _read_catalog_cache()
+        cache.setdefault("providers", {})[provider] = {
+            "base_url": base_url,
+            "updated_at": int(time.time()),
+            "models": sorted(set(model_ids)),
+        }
+        path = _catalog_cache_path()
+        temporary = Path(str(path) + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_fsynced(temporary, json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True))
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _merge_catalog_models(built_in: list[dict], model_ids: list[str], description: str) -> list[dict]:
+    merged = list(built_in)
+    known = {item["id"] for item in merged}
+    for model_id in sorted(set(model_ids)):
+        if model_id not in known:
+            merged.append({"id": model_id, "label": model_id, "description": description})
+    return merged
 
 
 def discover_remote_provider_models(
@@ -310,24 +477,27 @@ def discover_remote_provider_models(
 
     built_in = _provider_models(normalized)
     key = str(api_key or "").strip() or _get_api_key(normalized)
-    if not key:
-        return {
-            "connected": False,
-            "models": built_in,
-            "discovered_count": 0,
-            "message": f"已列出 {len(built_in)} 个内置兼容模型；配置 API Key 后可同步账户模型",
-        }
-
     configured_base = str(base_url or "").strip()
     if not configured_base:
         cfg = load_config()
         profile = cfg.get("model", {}).get(normalized, {})
         if isinstance(profile, dict):
             configured_base = str(profile.get("base_url") or "")
-    endpoint = _validate_model_endpoint(
+    validated_base = _validate_model_endpoint(
         configured_base or DEFAULT_REMOTE_BASE_URLS[normalized],
         "API 地址",
-    ) + "/models"
+    )
+    cached_ids = _cached_provider_models(normalized, validated_base)
+    if not key:
+        merged = _merge_catalog_models(built_in, cached_ids, "上次账户同步缓存")
+        return {
+            "connected": False,
+            "models": merged,
+            "discovered_count": 0,
+            "catalog_source": "cache" if cached_ids else "builtin",
+            "message": f"已列出 {len(merged)} 个兼容模型；配置 API Key 后可同步账户模型",
+        }
+    endpoint = validated_base + "/models"
     headers = {"Accept": "application/json"}
     if normalized == "anthropic":
         headers.update({
@@ -338,27 +508,40 @@ def discover_remote_provider_models(
         headers["Authorization"] = f"Bearer {key}"
 
     try:
-        with request.urlopen(request.Request(endpoint, headers=headers), timeout=15) as response:
-            payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
-        rows = payload.get("data", []) if isinstance(payload, dict) else []
-        discovered = sorted({
-            str(row.get("id") or "").strip()
-            for row in rows
-            if isinstance(row, dict) and str(row.get("id") or "").strip()
-        })
-        merged = list(built_in)
-        known = {item["id"] for item in merged}
-        for model_id in discovered:
-            if model_id not in known:
-                merged.append({
-                    "id": model_id,
-                    "label": model_id,
-                    "description": "账户 API 返回",
-                })
+        discovered_set: set[str] = set()
+        cursor = ""
+        for _page in range(20):
+            page_url = endpoint
+            if normalized == "anthropic":
+                query = {"limit": 100}
+                if cursor:
+                    query["after_id"] = cursor
+                page_url += "?" + urlencode(query)
+            with request.urlopen(request.Request(page_url, headers=headers), timeout=15) as response:
+                payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+            rows = payload.get("data", []) if isinstance(payload, dict) else []
+            discovered_set.update({
+                str(row.get("id") or "").strip()
+                for row in rows
+                if isinstance(row, dict) and str(row.get("id") or "").strip()
+            })
+            if normalized != "anthropic" or not bool(payload.get("has_more")):
+                break
+            cursor = str(payload.get("last_id") or "").strip()
+            if not cursor and rows:
+                cursor = str(rows[-1].get("id") or "").strip()
+            if not cursor:
+                raise ValueError("Anthropic 模型目录分页缺少 last_id")
+        else:
+            raise ValueError("Anthropic 模型目录分页超过安全上限")
+        discovered = sorted(discovered_set)
+        _store_provider_models(normalized, validated_base, discovered)
+        merged = _merge_catalog_models(built_in, discovered, "账户 API 返回")
         return {
             "connected": True,
             "models": merged,
             "discovered_count": len(discovered),
+            "catalog_source": "account",
             "message": f"已同步账户模型 {len(discovered)} 个；合并后共 {len(merged)} 个",
         }
     except HTTPError as error:
@@ -366,11 +549,13 @@ def discover_remote_provider_models(
     except (URLError, TimeoutError, ValueError, json.JSONDecodeError) as error:
         reason = getattr(error, "reason", error)
         message = f"无法同步供应商模型：{str(reason)[:120]}"
+    fallback = _merge_catalog_models(built_in, cached_ids, "上次账户同步缓存")
     return {
         "connected": False,
-        "models": built_in,
+        "models": fallback,
         "discovered_count": 0,
-        "message": f"{message}；仍显示 {len(built_in)} 个内置兼容模型",
+        "catalog_source": "cache" if cached_ids else "builtin",
+        "message": f"{message}；仍显示 {len(fallback)} 个兼容模型",
     }
 
 
@@ -406,7 +591,7 @@ def _route_from_model(model: dict, route_name: str) -> dict:
     return {
         "source": source,
         "local": {
-            "model": str(saved_local.get("model") or saved_local.get("name") or global_local.get("name") or "qwen2.5:7b"),
+            "model": str(saved_local.get("model") or saved_local.get("name") or global_local.get("name") or ""),
             "base_url": local_base_url,
         },
         "remote": {
@@ -444,6 +629,21 @@ def _effective_local_base_url(value: object) -> str:
     if bundled and configured in legacy_defaults:
         return bundled
     return configured or bundled or "http://127.0.0.1:11435/v1"
+
+
+def _route_setup_reason(config: dict, route_name: str) -> str:
+    """Return a stable setup code without contacting a model provider."""
+    route = resolve_model_route(config, route_name)
+    if route["source"] == "local":
+        return "" if str(route["local"].get("model") or "").strip() else "local_model_missing"
+
+    remote = route.get("remote", {})
+    provider = str(remote.get("provider") or "").strip().lower()
+    if provider not in CLOUD_PROVIDERS:
+        return "remote_provider_missing"
+    if not str(remote.get("model") or "").strip():
+        return "remote_model_missing"
+    return "" if _get_api_key(provider) else "remote_api_key_missing"
 
 
 def get_model_connection_settings() -> dict:
@@ -501,19 +701,36 @@ def get_model_connection_settings() -> dict:
     }
     if share_live_code:
         routes["code"] = copy.deepcopy(routes["live"])
+    setup_reasons = {
+        route_name: _route_setup_reason(cfg, route_name)
+        for route_name in ("live", "code")
+    }
+    setup_required_routes = [
+        route_name for route_name in ("live", "code")
+        if setup_reasons[route_name]
+    ]
+    setup_recommended_action = (
+        "install_local_model"
+        if any(reason == "local_model_missing" for reason in setup_reasons.values())
+        else ("configure_remote_api" if setup_required_routes else "none")
+    )
     return {
         "applied": True,
+        "setup_required": bool(setup_required_routes),
+        "setup_required_routes": setup_required_routes,
+        "setup_reasons": setup_reasons,
+        "setup_recommended_action": setup_recommended_action,
         "share_live_code": share_live_code,
         "routes": routes,
         "source": "local" if active_provider == "local" else "remote",
         "active_provider": active_provider,
         "active_model": (
-            str(local.get("name") or model.get("name") or "qwen2.5:7b")
+            str(local.get("name") or model.get("name") or "")
             if active_provider == "local"
             else remote_model
         ),
         "local": {
-            "model": str(local.get("name") or "qwen2.5:7b"),
+            "model": str(local.get("name") or ""),
             "base_url": _effective_local_base_url(local.get("base_url")),
         },
         "remote": {
@@ -564,8 +781,8 @@ def set_model_connection_settings(values: dict) -> dict:
             raise ValueError("本地模型配置必须是对象")
         local = model.setdefault("local", {})
         if local_values:
-            local["name"] = _validate_model_name(
-                local_values.get("model", local.get("name", "qwen2.5:7b")),
+            local["name"] = _validate_optional_model_name(
+                local_values.get("model", local.get("name", "")),
                 "本地模型名称",
             )
             local["base_url"] = _validate_model_endpoint(
@@ -618,21 +835,27 @@ def set_model_connection_settings(values: dict) -> dict:
                     raise ValueError("API Key 过长")
                 remote["api_key"] = api_key
 
-        if source == "local":
-            local_name = _validate_model_name(
-                local.get("name") or model.get("name") or "qwen2.5:7b",
-                "本地模型名称",
-            )
-            model["provider"] = "local"
-            model["name"] = local_name
-        else:
-            remote_name = _validate_model_name(
-                remote.get("name")
-                or (AVAILABLE_MODELS.get(remote_provider) or [["", "", ""]])[0][0],
-                "远端模型名称",
-            )
-            model["provider"] = remote_provider
-            model["name"] = remote_name
+        applies_legacy_profile = route_values is None or any(
+            key in values for key in ("source", "local", "remote")
+        )
+        if applies_legacy_profile:
+            if source == "local":
+                local_name = _validate_model_name(
+                    local.get("name")
+                    or (model.get("name") if current_provider == "local" else "")
+                    or "",
+                    "本地模型名称",
+                )
+                model["provider"] = "local"
+                model["name"] = local_name
+            else:
+                remote_name = _validate_model_name(
+                    remote.get("name")
+                    or (AVAILABLE_MODELS.get(remote_provider) or [["", "", ""]])[0][0],
+                    "远端模型名称",
+                )
+                model["provider"] = remote_provider
+                model["name"] = remote_name
 
         if route_values is not None:
             routes = model.setdefault("routes", {})
@@ -655,8 +878,12 @@ def set_model_connection_settings(values: dict) -> dict:
                 route_profile = {
                     "source": route_source,
                     "local": {
-                        "model": _validate_model_name(
-                            submitted_local.get("model") or local.get("name") or "qwen2.5:7b",
+                        "model": (
+                            _validate_model_name
+                            if route_source == "local"
+                            else _validate_optional_model_name
+                        )(
+                            submitted_local.get("model") or local.get("name") or "",
                             f"{route_name} 本地模型名称",
                         ),
                         "base_url": _validate_model_endpoint(
@@ -900,7 +1127,10 @@ def set_effort(level: str) -> dict:
 def get_status():
     cfg=load_config(); m=cfg.get("model",{}); provider=m.get("provider","local")
     effort = m.get("effort", "balanced")
-    if provider=="local": has_key=True; hint=None; model_name=m.get("name","qwen2.5:7b")
+    if provider=="local":
+        model_name=str((m.get("local", {}) or {}).get("name") or m.get("name") or "")
+        has_key=bool(model_name)
+        hint=None if has_key else "请先在模型与存储中安装或选择本地模型"
     else:
         raw=_get_api_key(provider); has_key=bool(raw)
         labels={"deepseek":"DeepSeek","glm":"智谱GLM","kimi":"Kimi","qwen":"通义千问","openai":"OpenAI","anthropic":"Claude"}

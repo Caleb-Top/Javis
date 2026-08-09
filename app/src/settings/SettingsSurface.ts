@@ -18,6 +18,14 @@ import {
   getSettingsReturnMode,
   type SettingsSourceMode,
 } from "./settingsNavigation.ts";
+import {
+  applyInstalledLocalProfile,
+  getModelInstallControlAvailability,
+  getModelInstallTargets,
+  isActiveModelInstallState,
+  type ModelInstallProgressState,
+  type ModelRouteName,
+} from "./modelRouteDrafts.ts";
 
 const JAVIS_ACTIONS = [
   ["live", "打开 Live"],
@@ -136,6 +144,8 @@ export type ModelDiagnosticReport = {
 
 export type ModelInstallPlan = {
   ok: boolean;
+  plan_token?: string;
+  targets?: ModelRouteName[];
   source?: "offline" | "local_gguf" | "huggingface";
   title?: string;
   model?: string;
@@ -153,16 +163,28 @@ export type ModelInstallPlan = {
   runtime_ready?: boolean;
   restart_required?: boolean;
   configuration_applied?: boolean;
+  cancelled?: boolean;
   message?: string;
   error?: string;
 };
 
 export type ModelInstallProgress = {
-  state: "idle" | "running" | "completed" | "failed";
+  state: ModelInstallProgressState;
   phase: string;
   percent: number;
   completed_bytes: number;
   total_bytes: number;
+  job_id?: string;
+  cancellable?: boolean;
+  pausable?: boolean;
+  paused?: boolean;
+  cancelled?: boolean;
+};
+
+export type ModelInstallControlResponse = {
+  ok: boolean;
+  job_id?: string;
+  error?: string;
 };
 
 export type HuggingFaceSearchResponse = {
@@ -187,6 +209,7 @@ export type SettingsSurfaceOptions = {
   onSaveModelSettings: (
     settings: Record<string, unknown>,
   ) => Promise<ModelConnectionSettingsResponse>;
+  onLoadVoiceDevices: () => Promise<{ input_devices: Array<{ index: number; name: string }> }>;
   onRefreshLocalModels: (baseUrl: string) => Promise<LocalModelCatalogResponse>;
   onRefreshRemoteModels: (
     provider: string,
@@ -195,6 +218,10 @@ export type SettingsSurfaceOptions = {
   ) => Promise<RemoteModelCatalogResponse>;
   onDetectModelAddon: (path: string) => Promise<ModelAddonDetectionResponse>;
   onGetModelInstallProgress: () => Promise<ModelInstallProgress>;
+  onControlModelInstall: (
+    action: "pause" | "resume" | "cancel",
+    jobId: string,
+  ) => Promise<ModelInstallControlResponse>;
   onTestModelConnections: () => Promise<ModelDiagnosticReport>;
   onSearchHuggingFace: (query: string) => Promise<HuggingFaceSearchResponse>;
   onPlanModelInstall: (settings: Record<string, unknown>) => Promise<ModelInstallPlan>;
@@ -295,6 +322,7 @@ export function createSettingsSurface(
   const remoteModelCatalogs = new Map<string, RemoteProviderOption["models"]>();
   let modelInstallPlan: ModelInstallPlan | null = null;
   let modelInstallInProgress = false;
+  let activeInstallJobId = "";
   let recordingSlot: HTMLElement | null = null;
 
   options.root.innerHTML = `
@@ -331,6 +359,16 @@ export function createSettingsSurface(
                   <option value="strong">强降噪</option>
                 </select>
                 <small>嘈杂环境可选强降噪，切换后会自动重启连续收听。</small>
+              </label>
+              <label class="settings-field">
+                <span>麦克风设备</span>
+                <div class="settings-input-action">
+                  <select class="voice-input-device">
+                    <option value="">默认麦克风</option>
+                  </select>
+                  <button class="settings-secondary-button voice-device-refresh" type="button">刷新</button>
+                </div>
+                <small>选择用于连续语音识别的输入设备，留空则使用系统默认麦克风。</small>
               </label>
             </div>
           </section>
@@ -447,6 +485,11 @@ export function createSettingsSurface(
                 </div>
                 <div class="model-installer-plan"><output class="model-installer-status" aria-live="polite">先选择来源与目录，再生成安装计划。</output></div>
                 <div class="model-installer-progress" hidden><progress max="100" value="0"></progress><span>0%</span></div>
+                <div class="model-installer-controls" hidden>
+                  <button class="settings-secondary-button model-installer-pause" type="button">暂停</button>
+                  <button class="settings-secondary-button model-installer-resume" type="button">继续</button>
+                  <button class="settings-secondary-button model-installer-cancel" type="button">取消安装</button>
+                </div>
                 <label class="model-installer-consent"><input type="checkbox" class="model-installer-approved"> 我确认安装位置、下载大小与模型许可，并允许 Javis 写入所选目录</label>
                 <div class="settings-model-actions"><span></span><button class="settings-secondary-button model-installer-plan-button" type="button">生成安装计划</button><button class="settings-primary-button model-installer-install" type="button" disabled>确认安装</button></div>
               </div>
@@ -738,8 +781,10 @@ export function createSettingsSurface(
 
   function modelInstallValues(): Record<string, unknown> {
     const source = options.root.querySelector<HTMLSelectElement>(".model-installer-source")!.value;
+    const shareLiveCode = options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked;
     return {
       source,
+      targets: getModelInstallTargets(shareLiveCode, activeModelRoute),
       install_dir: options.root.querySelector<HTMLInputElement>(".model-installer-directory")!.value,
       addon_path: options.root.querySelector<HTMLInputElement>(".model-addon-path")!.value,
       gguf_path: options.root.querySelector<HTMLInputElement>(".local-gguf-path")!.value,
@@ -812,6 +857,10 @@ export function createSettingsSurface(
       setInstallerStatus("请先生成并核对安装计划", "error");
       return;
     }
+    if (!modelInstallPlan.plan_token) {
+      setInstallerStatus("安装计划已失效，请重新生成并确认", "error");
+      return;
+    }
     const approved = options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.checked;
     if (!approved) {
       setInstallerStatus("需要勾选用户确认后才能安装", "error");
@@ -831,6 +880,23 @@ export function createSettingsSurface(
     progressLabel.textContent = "0%";
     const startedAt = Date.now();
     let progressRequestPending = false;
+    const controls = options.root.querySelector<HTMLElement>(".model-installer-controls")!;
+    const pauseButton = controls.querySelector<HTMLButtonElement>(".model-installer-pause")!;
+    const resumeButton = controls.querySelector<HTMLButtonElement>(".model-installer-resume")!;
+    const cancelButton = controls.querySelector<HTMLButtonElement>(".model-installer-cancel")!;
+    const renderControls = (progress: ModelInstallProgress): void => {
+      activeInstallJobId = progress.job_id || activeInstallJobId;
+      const available = getModelInstallControlAvailability({
+        state: progress.state,
+        jobId: progress.job_id || "",
+        cancellable: progress.cancellable === true,
+        pausable: progress.pausable === true,
+      });
+      controls.hidden = !activeInstallJobId || (!available.pause && !available.resume && !available.cancel);
+      pauseButton.disabled = !available.pause;
+      resumeButton.disabled = !available.resume;
+      cancelButton.disabled = !available.cancel;
+    };
     const refreshProgress = async (): Promise<void> => {
       if (progressRequestPending) return;
       progressRequestPending = true;
@@ -838,7 +904,10 @@ export function createSettingsSurface(
         const progress = await options.onGetModelInstallProgress();
         progressBar.value = progress.percent;
         progressLabel.textContent = `${Math.round(progress.percent)}% · ${progress.phase}`;
-        if (progress.state === "running") setInstallerStatus(progress.phase, "saving");
+        renderControls(progress);
+        if (isActiveModelInstallState(progress.state)) {
+          setInstallerStatus(progress.phase, "saving");
+        }
       } catch {
         // The install request remains authoritative if one progress poll is missed.
       } finally {
@@ -855,19 +924,29 @@ export function createSettingsSurface(
     try {
       const response = await options.onInstallModel({
         ...modelInstallValues(),
+        plan_token: modelInstallPlan.plan_token,
         approved: true,
         confirmation: "install-local-model",
       });
       if (!response.ok) throw new Error(response.error || "模型安装失败");
-      if (response.model) options.root.querySelector<HTMLInputElement>(".local-model-name")!.value = response.model;
-      if (response.base_url) options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value = response.base_url;
-      if (modelRouteDrafts && response.model && response.base_url) {
-        for (const route of Object.values(modelRouteDrafts)) {
-          route.local = { model: response.model, base_url: response.base_url };
-        }
+      const targets = Array.isArray(modelInstallPlan.targets)
+        ? modelInstallPlan.targets
+        : getModelInstallTargets(
+          options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked,
+          activeModelRoute,
+        );
+      if (modelRouteDrafts && response.model && response.base_url && targets.length) {
+        modelRouteDrafts = applyInstalledLocalProfile(
+          modelRouteDrafts,
+          targets,
+          { model: response.model, base_url: response.base_url },
+        );
+        renderModelRoute(activeModelRoute);
         await saveModelSettings();
       }
       modelInstallPlan = null;
+      activeInstallJobId = "";
+      controls.hidden = true;
       progressBar.value = 100;
       progressLabel.textContent = "100% · 安装与自动适配已完成";
       setInstallerStatus(response.message || "安装完成；重启 Javis 后启用", "saved");
@@ -877,9 +956,26 @@ export function createSettingsSurface(
       window.clearInterval(progressTimer);
       window.clearInterval(elapsedTimer);
       modelInstallInProgress = false;
+      activeInstallJobId = "";
+      controls.hidden = true;
       planButton.disabled = false;
       installButton.disabled = !modelInstallPlan
         || !options.root.querySelector<HTMLInputElement>(".model-installer-approved")!.checked;
+    }
+  }
+
+  async function controlModelInstall(action: "pause" | "resume" | "cancel"): Promise<void> {
+    if (!activeInstallJobId) return;
+    const labels = { pause: "暂停", resume: "继续", cancel: "取消" } as const;
+    try {
+      const response = await options.onControlModelInstall(action, activeInstallJobId);
+      if (!response.ok) throw new Error(response.error || `${labels[action]}安装失败`);
+      setInstallerStatus(
+        action === "pause" ? "正在安全暂停…" : action === "resume" ? "正在继续安装…" : "正在取消并回滚…",
+        "saving",
+      );
+    } catch (error) {
+      setInstallerStatus(error instanceof Error ? error.message : `${labels[action]}安装失败`, "error");
     }
   }
 
@@ -1116,6 +1212,27 @@ export function createSettingsSurface(
     });
   }
 
+  function loadVoiceDevices(select: HTMLSelectElement): void {
+    select.disabled = true;
+    void options.onLoadVoiceDevices().then(({ input_devices }) => {
+      const stored = readStringPreference("voice.inputDevice", "");
+      select.innerHTML = '<option value="">默认麦克风</option>';
+      for (const device of input_devices || []) {
+        const option = document.createElement("option");
+        option.value = String(device.index);
+        option.textContent = device.name || `设备 ${device.index}`;
+        select.append(option);
+      }
+      if (stored && [...select.options].some((option) => option.value === stored)) {
+        select.value = stored;
+      }
+    }).catch(() => {
+      select.innerHTML = '<option value="">默认麦克风</option>';
+    }).finally(() => {
+      select.disabled = false;
+    });
+  }
+
   function sync(): void {
     const preferences = readPetPreferences();
     const range = options.root.querySelector<HTMLInputElement>(".pet-scale-input")!;
@@ -1127,6 +1244,8 @@ export function createSettingsSurface(
       ["off", "standard", "strong"].includes(storedNoiseProfile)
         ? storedNoiseProfile
         : "standard";
+    const deviceSelect = options.root.querySelector<HTMLSelectElement>(".voice-input-device")!;
+    loadVoiceDevices(deviceSelect);
     options.root.querySelectorAll<HTMLElement>(".settings-shortcut-card").forEach((slot, index) => {
       const shortcut = preferences.shortcuts[index] || { label: "", kind: "", value: "" };
       slot.querySelector<HTMLInputElement>(".shortcut-label")!.value = shortcut.label;
@@ -1175,6 +1294,18 @@ export function createSettingsSurface(
     document.dispatchEvent(new CustomEvent("javis:voice-profile-changed", { detail: profile }));
     saveState.textContent = "已保存";
     saveState.dataset.state = "saved";
+  });
+  options.root.querySelector<HTMLSelectElement>(".voice-input-device")!.addEventListener("change", (event) => {
+    const device = (event.currentTarget as HTMLSelectElement).value;
+    writeStringPreference("voice.inputDevice", device);
+    document.dispatchEvent(new CustomEvent("javis:voice-device-changed", { detail: device }));
+    saveState.textContent = "已保存";
+    saveState.dataset.state = "saved";
+  });
+  options.root.querySelector<HTMLButtonElement>(".voice-device-refresh")!.addEventListener("click", (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const select = button.previousElementSibling as HTMLSelectElement;
+    loadVoiceDevices(select);
   });
   options.root.querySelectorAll<HTMLButtonElement>("[data-model-source]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1271,6 +1402,9 @@ export function createSettingsSurface(
       || (modelInstallPlan.source !== "offline" && modelInstallPlan.runtime_ready === false);
   });
   options.root.querySelector<HTMLButtonElement>(".model-installer-install")!.addEventListener("click", () => void installModel());
+  options.root.querySelector<HTMLButtonElement>(".model-installer-pause")!.addEventListener("click", () => void controlModelInstall("pause"));
+  options.root.querySelector<HTMLButtonElement>(".model-installer-resume")!.addEventListener("click", () => void controlModelInstall("resume"));
+  options.root.querySelector<HTMLButtonElement>(".model-installer-cancel")!.addEventListener("click", () => void controlModelInstall("cancel"));
   options.root.querySelectorAll<HTMLElement>("[data-path-key]").forEach((row) => {
     row.querySelector<HTMLButtonElement>(".settings-path-select")!.addEventListener(
       "click",

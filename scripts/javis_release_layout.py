@@ -16,13 +16,14 @@ def release_layout(source_root: Path, *, test_drive: str = "D:") -> dict[str, st
     if test_root.drive.upper() != "D:":
         raise ValueError(f"Javis independent installation tests must use D:, got {test_drive}")
 
+    build_cache = Path(source_root.anchor) / "Javis-build-cache" / source_root.name
     artifact_dir = source_root / "artifacts" / "Javis-v3.0.0"
     delivery_dir = test_root / "Javis-v3.0.0-User-Test"
     return {
         "source_root": str(source_root),
-        "build_temp": str(source_root / "tmp" / "release-v3"),
+        "build_temp": str(build_cache / "release-v3"),
         "artifact_dir": str(artifact_dir),
-        "cargo_target": str(source_root / "app" / "src-tauri" / "target"),
+        "cargo_target": str(build_cache / "cargo-target"),
         "package_output": str(artifact_dir / "Javis-v3.0.0-Setup.exe"),
         "delivery_dir": str(delivery_dir),
         "delivery_installer": str(delivery_dir / "Javis-v3.0.0-Setup.exe"),

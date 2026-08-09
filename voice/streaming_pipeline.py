@@ -13,6 +13,11 @@ from typing import Callable
 
 Transcriber = Callable[[bytes, int, bool], str]
 TranscriptionSink = Callable[[bytes, int, bool, dict], None]
+MAX_DIAGNOSTIC_COUNTER = (1 << 63) - 1
+
+
+def _bounded_increment(value: int) -> int:
+    return min(MAX_DIAGNOSTIC_COUNTER, max(0, int(value)) + 1)
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,16 @@ def _rms(samples: list[int] | list[float]) -> float:
     return math.sqrt(sum(float(value) * float(value) for value in samples) / len(samples))
 
 
+def _normalized_pcm_levels(pcm: bytes) -> tuple[float, float]:
+    samples = _decode_pcm(pcm)
+    if not samples:
+        return 0.0, 0.0
+    full_scale = 32768.0
+    input_rms = min(1.0, _rms(samples) / full_scale)
+    input_peak = min(1.0, max(abs(value) for value in samples) / full_scale)
+    return round(input_rms, 6), round(input_peak, 6)
+
+
 def _zero_crossing_rate(samples: list[int]) -> float:
     if len(samples) < 2:
         return 0.0
@@ -109,12 +124,15 @@ class StreamingVoicePipeline:
         self._utterance: deque[bytes] = deque(maxlen=self.max_utterance_frames)
         self._noise_power = 200.0**2
         self._noise_rms = 200.0
+        self._signal_power = 200.0**2
+        self._signal_rms = 200.0
         self._onset_count = 0
         self._silence_count = 0
         self._speech_frames = 0
         self._frames_since_partial = 0
         self._last_partial = ""
         self._turn = 0
+        self._frames_total = 0
         self._dropped_frames = 0
         self._overrun_reported = False
 
@@ -194,7 +212,7 @@ class StreamingVoicePipeline:
     def _append_utterance(self, frame: bytes, events: list[dict]) -> None:
         if len(self._utterance) >= self.max_utterance_frames:
             self._utterance.popleft()
-            self._dropped_frames += 1
+            self._dropped_frames = _bounded_increment(self._dropped_frames)
             if not self._overrun_reported:
                 events.append(
                     {
@@ -237,6 +255,7 @@ class StreamingVoicePipeline:
             raise ValueError(
                 f"expected {self.frame_samples * 2} PCM bytes, received {len(frame)}"
             )
+        self._frames_total = _bounded_increment(self._frames_total)
 
         raw_samples = _decode_pcm(frame)
         echo_cleaned = self._cancel_echo(frame)
@@ -248,6 +267,10 @@ class StreamingVoicePipeline:
         )
         level = min(1.0, _rms(raw_samples) / 8_000.0)
         events: list[dict] = [{"type": "audio.level", "level": round(level, 4)}]
+        if speech:
+            power = max(1.0, _rms(echo_cleaned) ** 2)
+            self._signal_power = 0.94 * self._signal_power + 0.06 * power
+            self._signal_rms = math.sqrt(self._signal_power)
         self._pre_roll.append(processed)
 
         if not self._utterance:
@@ -293,11 +316,17 @@ class StreamingVoicePipeline:
         if self._silence_count < self.endpoint_frames:
             return events
 
-        self._turn += 1
+        self._turn = _bounded_increment(self._turn)
         audio_ms = len(self._utterance) * self.config.frame_ms
+        input_rms, input_peak = _normalized_pcm_levels(b"".join(self._utterance))
         final_text = self._submit_transcription(
             final=True,
-            metadata={"turn": self._turn, "audio_ms": audio_ms},
+            metadata={
+                "turn": self._turn,
+                "audio_ms": audio_ms,
+                "input_rms": input_rms,
+                "input_peak": input_peak,
+            },
         )
         if final_text:
             events.append(
@@ -306,6 +335,16 @@ class StreamingVoicePipeline:
                     "text": final_text,
                     "turn": self._turn,
                     "audio_ms": audio_ms,
+                }
+            )
+        elif self.transcription_sink is None:
+            events.append(
+                {
+                    "type": "transcript.empty",
+                    "turn": self._turn,
+                    "audio_ms": audio_ms,
+                    "input_rms": input_rms,
+                    "input_peak": input_peak,
                 }
             )
         self._utterance.clear()
@@ -318,11 +357,16 @@ class StreamingVoicePipeline:
         return events
 
     def metrics(self) -> dict:
+        signal_db = 20.0 * math.log10(max(1.0, self._signal_rms))
+        noise_db = 20.0 * math.log10(max(1.0, self._noise_rms))
         return {
+            "frames": self._frames_total,
             "turns": self._turn,
             "dropped_frames": self._dropped_frames,
             "buffered_frames": len(self._utterance),
             "noise_rms": round(self._noise_rms, 3),
+            "signal_rms": round(self._signal_rms, 3),
+            "snr_db": round(signal_db - noise_db, 3),
         }
 
     def diagnostics(self) -> dict:

@@ -10,6 +10,12 @@ from fastapi import WebSocketDisconnect
 from core.agent_runs import AgentRunStore
 from core.conversation_hub import ConversationHub
 from core.conversation_store import ConversationStore
+from gateway.conversation_stall_harness import (
+    AFTER_ACK_TRIGGER,
+    AFTER_DELTA_TRIGGER,
+    NO_ACK_TRIGGER,
+    ConversationStallHarness,
+)
 from gateway.conversation_ws import ConversationWebSocketGateway
 
 
@@ -61,6 +67,76 @@ class SlowAgent:
         yield {"type": "text_delta", "text": "late answer"}
 
 
+class CountingAgent(FakeAgent):
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, text, **kwargs):
+        self.calls += 1
+        async for event in super().chat(text, **kwargs):
+            yield event
+
+
+class QueuedWebSocket:
+    def __init__(self, *, host="127.0.0.1"):
+        self.client = SimpleNamespace(host=host)
+        self.accepted = False
+        self.sent = []
+        self._incoming = asyncio.Queue()
+        self._sent_changed = asyncio.Condition()
+
+    async def accept(self):
+        self.accepted = True
+
+    def push(self, message):
+        consumed = asyncio.get_running_loop().create_future()
+        self._incoming.put_nowait((message, consumed))
+        return consumed
+
+    def disconnect(self):
+        return self.push(None)
+
+    async def receive_text(self):
+        message, consumed = await self._incoming.get()
+        if not consumed.done():
+            consumed.set_result(None)
+        if message is None:
+            raise WebSocketDisconnect()
+        return json.dumps(message)
+
+    async def send_json(self, message):
+        async with self._sent_changed:
+            self.sent.append(message)
+            self._sent_changed.notify_all()
+
+    async def wait_for_type(self, event_type, *, request_id="", timeout=1):
+        async def wait():
+            async with self._sent_changed:
+                while True:
+                    for message in self.sent:
+                        if message.get("type") != event_type:
+                            continue
+                        if request_id and message.get("request_id") != request_id:
+                            continue
+                        return message
+                    await self._sent_changed.wait()
+
+        return await asyncio.wait_for(wait(), timeout=timeout)
+
+
+class FailingSendWebSocket(QueuedWebSocket):
+    def __init__(self, *, fail_on_type):
+        super().__init__()
+        self.fail_on_type = fail_on_type
+        self.send_failed = asyncio.Event()
+
+    async def send_json(self, message):
+        if message.get("type") == self.fail_on_type and not self.send_failed.is_set():
+            self.send_failed.set()
+            raise RuntimeError("simulated websocket send failure")
+        await super().send_json(message)
+
+
 class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -74,7 +150,7 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.run_store.close()
         self.temp.cleanup()
 
-    def make_gateway(self, agent):
+    def make_gateway(self, agent, *, stall_harness=None):
         self.hub = ConversationHub(self.store, self.run_store)
         runtime = SimpleNamespace(
             agent=agent,
@@ -83,7 +159,42 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
             registry=SimpleNamespace(count=7),
             llm=SimpleNamespace(model="unit-model"),
         )
-        return ConversationWebSocketGateway(runtime)
+        return ConversationWebSocketGateway(runtime, stall_harness=stall_harness)
+
+    @staticmethod
+    def canonical_message(request_id, text, *, session_id="stall-session"):
+        return {
+            "type": "conversation.message",
+            "payload": {
+                "session_id": session_id,
+                "request_id": request_id,
+                "idempotency_key": request_id,
+                "text": text,
+                "interaction_mode": "live",
+                "protocol_version": 2,
+            },
+        }
+
+    @staticmethod
+    def canonical_cancel(request_id, *, session_id="stall-session"):
+        return {
+            "type": "conversation.cancel",
+            "payload": {
+                "session_id": session_id,
+                "request_id": request_id,
+                "reason": "watchdog timeout",
+                "protocol_version": 2,
+            },
+        }
+
+    @staticmethod
+    def request_events(socket, request_id):
+        return [
+            message["type"]
+            for message in socket.sent
+            if message.get("request_id") == request_id
+            and message.get("type", "").startswith(("request.", "response."))
+        ]
 
     async def test_canonical_gateway_attaches_and_persists_authoritative_history(self):
         gateway = self.make_gateway(FakeAgent())
@@ -198,6 +309,119 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("request.cancelled", [message.get("type") for message in ws.sent])
         self.assertNotIn("response.delta", [message.get("type") for message in ws.sent])
+
+    async def test_stall_no_ack_keeps_socket_open_until_cancel_without_calling_agent(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent, stall_harness=ConversationStallHarness(enabled=True))
+        ws = QueuedWebSocket()
+        task = asyncio.create_task(gateway.serve(ws))
+
+        consumed = ws.push(self.canonical_message("stall-no-ack", NO_ACK_TRIGGER))
+        await asyncio.wait_for(consumed, timeout=1)
+        await asyncio.sleep(0)
+
+        self.assertEqual(self.request_events(ws, "stall-no-ack"), [])
+        self.assertEqual(self.hub.stats()["active_requests"], 0)
+        self.assertEqual(agent.calls, 0)
+
+        cancelled = ws.push(self.canonical_cancel("stall-no-ack"))
+        await asyncio.wait_for(cancelled, timeout=1)
+        await asyncio.sleep(0)
+        self.assertFalse(any(message.get("type") == "protocol.error" for message in ws.sent))
+
+        ws.disconnect()
+        await asyncio.wait_for(task, timeout=1)
+
+    async def test_stall_after_ack_waits_for_cancel_without_delta_or_agent_call(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent, stall_harness=ConversationStallHarness(enabled=True))
+        ws = QueuedWebSocket()
+        task = asyncio.create_task(gateway.serve(ws))
+
+        ws.push(self.canonical_message("stall-after-ack", AFTER_ACK_TRIGGER))
+        await ws.wait_for_type("request.accepted", request_id="stall-after-ack")
+
+        self.assertEqual(self.request_events(ws, "stall-after-ack"), ["request.accepted"])
+        self.assertEqual(self.hub.stats()["active_requests"], 1)
+        self.assertEqual(agent.calls, 0)
+
+        ws.push(self.canonical_cancel("stall-after-ack"))
+        await ws.wait_for_type("request.cancelled", request_id="stall-after-ack")
+        ws.disconnect()
+        await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(self.hub.stats()["active_requests"], 0)
+
+    async def test_stall_after_delta_waits_for_cancel_without_terminal_or_agent_call(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent, stall_harness=ConversationStallHarness(enabled=True))
+        ws = QueuedWebSocket()
+        task = asyncio.create_task(gateway.serve(ws))
+
+        ws.push(self.canonical_message("stall-after-delta", AFTER_DELTA_TRIGGER))
+        await ws.wait_for_type("response.delta", request_id="stall-after-delta")
+
+        self.assertEqual(
+            self.request_events(ws, "stall-after-delta"),
+            ["request.accepted", "response.delta"],
+        )
+        self.assertEqual(self.hub.stats()["active_requests"], 1)
+        self.assertEqual(agent.calls, 0)
+
+        ws.push(self.canonical_cancel("stall-after-delta"))
+        await ws.wait_for_type("request.cancelled", request_id="stall-after-delta")
+        ws.disconnect()
+        await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(self.hub.stats()["active_requests"], 0)
+
+    async def test_stalled_request_is_cancelled_and_drained_when_socket_disconnects(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent, stall_harness=ConversationStallHarness(enabled=True))
+        ws = QueuedWebSocket()
+        task = asyncio.create_task(gateway.serve(ws))
+
+        ws.push(self.canonical_message("stall-disconnect", AFTER_DELTA_TRIGGER))
+        await ws.wait_for_type("response.delta", request_id="stall-disconnect")
+        ws.disconnect()
+        await asyncio.wait_for(task, timeout=1)
+
+        terminal = await self.hub.wait_for_terminal("stall-disconnect", timeout=1)
+        self.assertEqual(terminal["type"], "request.cancelled")
+        self.assertEqual(self.hub.stats()["active_requests"], 0)
+        self.assertEqual(self.hub.stats()["subscribers"], 0)
+        self.assertEqual(agent.calls, 0)
+
+    async def test_sender_failure_and_disconnect_still_release_subscription_and_stall(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent, stall_harness=ConversationStallHarness(enabled=True))
+        ws = FailingSendWebSocket(fail_on_type="response.delta")
+        task = asyncio.create_task(gateway.serve(ws))
+
+        ws.push(self.canonical_message("stall-send-failure", AFTER_DELTA_TRIGGER))
+        await asyncio.wait_for(ws.send_failed.wait(), timeout=1)
+        ws.disconnect()
+
+        with self.assertRaisesRegex(RuntimeError, "simulated websocket send failure"):
+            await asyncio.wait_for(task, timeout=1)
+
+        terminal = await self.hub.wait_for_terminal("stall-send-failure", timeout=1)
+        self.assertEqual(terminal["type"], "request.cancelled")
+        self.assertEqual(self.hub.stats()["active_requests"], 0)
+        self.assertEqual(self.hub.stats()["subscribers"], 0)
+        self.assertEqual(agent.calls, 0)
+
+    async def test_remote_client_cannot_activate_stall_trigger(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent, stall_harness=ConversationStallHarness(enabled=True))
+        ws = QueuedWebSocket(host="192.0.2.10")
+        task = asyncio.create_task(gateway.serve(ws))
+
+        ws.push(self.canonical_message("remote-trigger", AFTER_DELTA_TRIGGER))
+        await ws.wait_for_type("request.completed", request_id="remote-trigger")
+        ws.disconnect()
+        await asyncio.wait_for(task, timeout=1)
+
+        self.assertEqual(agent.calls, 1)
+        self.assertIn("response.delta", self.request_events(ws, "remote-trigger"))
 
 
 if __name__ == "__main__":

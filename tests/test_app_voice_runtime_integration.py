@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -12,6 +14,72 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackagedVoiceRuntimeTests(unittest.TestCase):
+    def test_installer_gate_executes_voice_reconnect_and_frontend_lifecycle_suites(self):
+        if os.name != "nt" or shutil.which("powershell.exe") is None:
+            self.skipTest("the installer source gate is Windows PowerShell-only")
+
+        node = next(
+            (
+                candidate
+                for candidate in (
+                    ROOT / "tools/nodejs/node.exe",
+                    Path("G:/Javis/tools/nodejs/node.exe"),
+                    Path(shutil.which("node") or ""),
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if node is None:
+            self.skipTest("Node.js is unavailable for the installer source gate")
+
+        environment = os.environ.copy()
+        environment.pop("JAVIS_TEST_PYTHON", None)
+        default_python = next(
+            (
+                candidate
+                for candidate in (
+                    ROOT / "venv/Scripts/python.exe",
+                    Path("G:/Javis/venv/Scripts/python.exe"),
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if default_python is None:
+            environment["JAVIS_TEST_PYTHON"] = sys.executable
+
+        environment.pop("JAVIS_TEST_NODE", None)
+        if node not in (ROOT / "tools/nodejs/node.exe", Path("G:/Javis/tools/nodejs/node.exe")):
+            environment["JAVIS_TEST_NODE"] = str(node)
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "scripts/verify_javis_v3_installer.ps1"),
+                "-SourceRoot",
+                str(ROOT),
+                "-SourceRegressionOnly",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Source voice reconnect regression: PASS", output)
+        self.assertIn("Source voice observability regression: PASS", output)
+        self.assertIn("Source real watchdog stall harness: PASS", output)
+        self.assertIn("Source frontend voice lifecycle: PASS", output)
+
     def test_runtime_overlays_venv_packages_and_local_models(self):
         from scripts.javis_release_runtime import runtime_entries
 

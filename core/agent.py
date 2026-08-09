@@ -4,7 +4,12 @@ import asyncio, json, logging, time, hashlib, uuid, re
 from typing import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
-from core.llm_client import LLMClient, LLMResponse
+from core.llm_client import (
+    LLMClient,
+    LLMResponse,
+    ModelRuntimeUnavailableError,
+    ModelSetupRequiredError,
+)
 from core.tool_registry import ToolRegistry
 from core.tool_result import ToolResult
 from core.planner import Planner
@@ -98,6 +103,38 @@ def _log(t, d):
     action_log.append({"time": time.strftime("%H:%M:%S"), "type": t, "detail": d})
     if len(action_log) > 500: action_log.pop(0)
     logger.info(f"[LOG] {t}: {d[:100]}")
+
+
+def _model_failure_event(error: RuntimeError, route_name: str = "live") -> dict:
+    """Return a terminal, actionable model failure for every conversation surface."""
+    if isinstance(error, ModelSetupRequiredError):
+        return {
+            "type": "error",
+            "code": "model_setup_required",
+            "message": str(error),
+            "recovery_action": "open_model_settings",
+            "route": error.route_name,
+            "reason": error.reason,
+        }
+    base_url = str(getattr(error, "base_url", ""))
+    managed_runtime = bool(
+        re.match(r"^https?://(?:127\.0\.0\.1|localhost):11435(?:/|$)", base_url, re.I)
+    )
+    logger.warning("Local model runtime unavailable on %s: %s", route_name, str(error)[:500])
+    return {
+        "type": "error",
+        "code": "model_runtime_unavailable",
+        "message": (
+            "Local model runtime is unavailable. Open Model & Storage to check the connection."
+        ),
+        "recovery_action": (
+            "restart_local_runtime" if managed_runtime else "open_model_settings"
+        ),
+        "route": route_name if route_name in {"live", "code"} else "live",
+        "reason": (
+            "managed_runtime_offline" if managed_runtime else "external_runtime_unavailable"
+        ),
+    }
 
 # ── 导入权限级别 ──
 try:
@@ -508,6 +545,10 @@ class Agent:
                 return
             except RequestCancelled:
                 raise
+            except (ModelSetupRequiredError, ModelRuntimeUnavailableError) as exc:
+                yield _model_failure_event(exc, interaction_mode)
+                self._after_learn(user_input)
+                return
             except Exception as exc:
                 logger.warning("Live fast path fallback: %s", str(exc)[:120])
 
@@ -603,6 +644,10 @@ class Agent:
                         break
                     except RequestCancelled:
                         raise
+                    except (ModelSetupRequiredError, ModelRuntimeUnavailableError) as e:
+                        yield _model_failure_event(e, interaction_mode)
+                        self._after_learn(user_input)
+                        return
                     except Exception as e:
                         if r < self.max_retries:
                             logger.warning(f"引擎重试 {r+1}/{self.max_retries}: {str(e)[:80]}")
@@ -624,6 +669,10 @@ class Agent:
                         break
                     except RequestCancelled:
                         raise
+                    except (ModelSetupRequiredError, ModelRuntimeUnavailableError) as e:
+                        yield _model_failure_event(e, interaction_mode)
+                        self._after_learn(user_input)
+                        return
                     except Exception as e:
                         if r < self.max_retries:
                             logger.warning(f"LLM重试 {r+1}: {str(e)[:80]}")

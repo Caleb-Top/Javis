@@ -86,6 +86,9 @@ logs/*
 output/
 train_output/
 tmp/
+release/.version-sync.lock
+release/.version-sync-journal.json
+release/.version-sync-staging-*/
 thoughts/
 
 # 生成图片

@@ -18,7 +18,6 @@ $JavisRustToolchainBin = Join-Path $JavisRoot "tools\rust\rustup\toolchains\stab
 $JavisCargo = Join-Path $JavisRustToolchainBin "cargo.exe"
 $JavisRustc = Join-Path $JavisRustToolchainBin "rustc.exe"
 $JavisGnuLinker = Join-Path $JavisMinGwBin "x86_64-w64-mingw32-gcc.exe"
-$JavisTargetRoot = Join-Path $JavisApp "src-tauri\target\release"
 $JavisResources = Join-Path $JavisApp "src-tauri\resources"
 $JavisRuntimeArchive = Join-Path $JavisResources "javis-runtime.zip"
 $JavisWebView2LoaderResource = Join-Path $JavisResources "WebView2Loader.dll"
@@ -36,7 +35,6 @@ $JavisWebView2LoaderSource = if ($JavisWebView2Crate) {
 $WasapiSource = Join-Path $JavisRoot "voice\native\WASAPILoopbackRecorder.cs"
 $WasapiHelper = Join-Path $JavisRoot "voice\native\javis-wasapi-loopback.exe"
 $CSharpCompiler = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-$InnerInstaller = Join-Path $JavisTargetRoot "bundle\nsis\Javis_3.0.0_x64-setup.exe"
 $OllamaRuntime = Join-Path $JavisRoot "tools\ollama-runtime"
 $PythonRuntimeRoot = Join-Path $JavisRoot "tools\python-runtime-3.11"
 $SitePackagesRoot = Join-Path $JavisRoot "venv\Lib\site-packages"
@@ -47,6 +45,9 @@ $Layout = (& $JavisPython (Join-Path $JavisRoot "scripts\javis_release_layout.py
     --root $JavisRoot `
     --test-drive "D:") | ConvertFrom-Json
 $BuildTemp = $Layout.build_temp
+$JavisCargoTarget = $Layout.cargo_target
+$JavisTargetRoot = Join-Path $JavisCargoTarget "release"
+$InnerInstaller = Join-Path $JavisTargetRoot "bundle\nsis\Javis_3.0.0_x64-setup.exe"
 $ArtifactDir = $Layout.artifact_dir
 $MainInstaller = $Layout.package_output
 $MainInstallerName = "Javis-v3.0.0-Setup.exe"
@@ -62,7 +63,24 @@ $PayloadWork = Join-Path $BuildTemp "payloads"
 if ([IO.Path]::GetFullPath($JavisRoot).Substring(0, 2).ToUpperInvariant() -ne "G:") {
     throw "Javis development and build root must stay on G:."
 }
-foreach ($path in @($BuildTemp, $ArtifactDir, $MainInstaller, $PayloadWork)) {
+
+if ($SkipBundle -or $SkipRuntime -or $SkipDesktopBuild -or $SkipAddonBuild -or $SkipInstallVerification) {
+    throw "Release mode does not permit skip switches; use a separate development command."
+}
+
+$ReleaseGatePython = Join-Path $JavisRoot "venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $ReleaseGatePython -PathType Leaf)) {
+    throw "Release gate Python with pytest is missing: $ReleaseGatePython"
+}
+$ReleaseGateReport = Join-Path $BuildTemp "release-gate-report.json"
+& $ReleaseGatePython -B (Join-Path $JavisRoot "scripts\javis_release_gate.py") `
+    --root $JavisRoot `
+    --report $ReleaseGateReport
+if ($LASTEXITCODE -ne 0) {
+    throw "Required release gate failed; packaging is forbidden. Report: $ReleaseGateReport"
+}
+
+foreach ($path in @($BuildTemp, $JavisCargoTarget, $ArtifactDir, $MainInstaller, $PayloadWork)) {
     if ([IO.Path]::GetFullPath($path).Substring(0, 2).ToUpperInvariant() -ne "G:") {
         throw "Build path escaped G:: $path"
     }
@@ -71,11 +89,11 @@ foreach ($path in @($BuildTemp, $ArtifactDir, $MainInstaller, $PayloadWork)) {
 New-Item -ItemType Directory -Path $BuildTemp -Force | Out-Null
 $env:TEMP = Join-Path $BuildTemp "temp"
 $env:TMP = $env:TEMP
-$env:PIP_CACHE_DIR = Join-Path $JavisRoot ".cache\pip"
-$env:PNPM_HOME = Join-Path $JavisRoot ".pnpm-store"
+$env:PIP_CACHE_DIR = Join-Path $BuildTemp "pip-cache"
+$env:PNPM_HOME = Join-Path $BuildTemp "pnpm-store"
 $env:CARGO_HOME = Join-Path $JavisRoot "tools\rust\cargo"
 $env:RUSTUP_HOME = Join-Path $JavisRoot "tools\rust\rustup"
-$env:CARGO_TARGET_DIR = Join-Path $JavisApp "src-tauri\target"
+$env:CARGO_TARGET_DIR = $JavisCargoTarget
 $env:PYTHONPATH = $SitePackagesRoot
 New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
 
@@ -269,7 +287,10 @@ $HashFile = Join-Path $ArtifactDir "SHA256SUMS.txt"
 & $JavisPython (Join-Path $JavisRoot "scripts\finalize_javis_release.py") `
     --artifact-dir $ArtifactDir `
     --runtime-manifest (Join-Path $JavisResources "javis-runtime-manifest.json") `
-    --release-manifest (Join-Path $JavisRoot "app\release.manifest.json") | Out-Null
+    --release-manifest (Join-Path $JavisRoot "app\release.manifest.json") `
+    --runtime-archive $JavisRuntimeArchive `
+    --gate-report $ReleaseGateReport `
+    --root $JavisRoot | Out-Null
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $HashFile)) {
     throw "Final release hash and manifest validation failed."
 }

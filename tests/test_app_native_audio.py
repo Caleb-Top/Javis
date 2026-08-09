@@ -54,7 +54,9 @@ class NativeAudioContractTests(unittest.TestCase):
         self.assertIn('@app.post("/api/voice/capture/start")', main)
         self.assertIn('@app.post("/api/voice/capture/stop")', main)
         self.assertIn('@app.post("/api/voice/capture/probe")', main)
-        self.assertIn('"capture": get_capture_diagnostics()', main)
+        self.assertIn("VoiceDiagnosticsCollector(", main)
+        self.assertIn("capture_getter=get_capture_diagnostics", main)
+        self.assertIn("return await voice_diagnostics_collector.collect()", main)
         self.assertIn("preload_model", main)
 
     def test_app_continuous_voice_uses_a_native_backend_stream(self):

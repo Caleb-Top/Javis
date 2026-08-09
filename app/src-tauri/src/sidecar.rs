@@ -5,7 +5,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +36,9 @@ struct SidecarRuntime {
     attached_existing: bool,
     restart_attempts: u8,
     last_error: String,
+    ollama_error: String,
+    ollama_startup: String,
+    ollama_start_generation: u64,
 }
 
 impl Default for SidecarRuntime {
@@ -47,22 +50,25 @@ impl Default for SidecarRuntime {
             attached_existing: false,
             restart_attempts: 0,
             last_error: String::new(),
+            ollama_error: String::new(),
+            ollama_startup: "idle".to_string(),
+            ollama_start_generation: 0,
         }
     }
 }
 
 pub struct SidecarManager {
-    runtime: Mutex<SidecarRuntime>,
+    runtime: Arc<Mutex<SidecarRuntime>>,
     packaged_root: Option<PathBuf>,
-    ollama: BundledOllama,
+    ollama: Arc<BundledOllama>,
 }
 
 impl Default for SidecarManager {
     fn default() -> Self {
         Self {
-            runtime: Mutex::new(SidecarRuntime::default()),
+            runtime: Arc::new(Mutex::new(SidecarRuntime::default())),
             packaged_root: None,
-            ollama: BundledOllama::new(PathBuf::new()),
+            ollama: Arc::new(BundledOllama::new(PathBuf::new())),
         }
     }
 }
@@ -74,18 +80,30 @@ impl SidecarManager {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         Self {
-            runtime: Mutex::new(SidecarRuntime::default()),
+            runtime: Arc::new(Mutex::new(SidecarRuntime::default())),
             packaged_root: Some(packaged_root),
-            ollama: BundledOllama::new(data_root),
+            ollama: Arc::new(BundledOllama::new(data_root)),
         }
     }
 
     pub fn status_json(&self) -> String {
         let probe = probe_backend(PORT);
+        let ollama_state = self.ollama.status();
         let runtime = self
             .runtime
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let ollama_startup = match ollama_state.as_str() {
+            "healthy" | "attached" => "ready",
+            "not-installed" => "not-installed",
+            _ => runtime.ollama_startup.as_str(),
+        };
+        let ollama_recovery = match ollama_startup {
+            "ready" => "none",
+            "not-installed" => "open-model-settings",
+            "starting" => "background-starting",
+            _ => "restart-sidecar",
+        };
         let state = match probe {
             ProbeResult::Ready if runtime.attached_existing => "attached",
             ProbeResult::Ready => "healthy",
@@ -94,19 +112,90 @@ impl SidecarManager {
             ProbeResult::Offline => "offline",
         };
         format!(
-            "{{\"state\":\"{}\",\"owned\":{},\"owned_pid\":{},\"restart_attempts\":{},\"last_error\":\"{}\",\"ollama\":\"{}\"}}",
+            "{{\"state\":\"{}\",\"owned\":{},\"owned_pid\":{},\"restart_attempts\":{},\"last_error\":\"{}\",\"ollama\":\"{}\",\"ollama_installed\":{},\"ollama_base_url\":\"{}\",\"ollama_startup\":\"{}\",\"ollama_recovery\":\"{}\",\"ollama_error\":\"{}\"}}",
             state,
             runtime.owned_pid.is_some(),
             runtime.owned_pid.map(|pid| pid.to_string()).unwrap_or_else(|| "null".to_string()),
             runtime.restart_attempts,
             json_escape(&runtime.last_error),
-            self.ollama.status(),
+            ollama_state,
+            self.ollama.is_installed(),
+            self.ollama.openai_base_url(),
+            ollama_startup,
+            ollama_recovery,
+            json_escape(&runtime.ollama_error),
         )
+    }
+
+    fn ensure_ollama_started(&self, app: &AppHandle) -> String {
+        let current = self.ollama.status();
+        if matches!(current.as_str(), "healthy" | "attached") {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.ollama_startup = "ready".to_string();
+                runtime.ollama_error.clear();
+            }
+            return "ready".to_string();
+        }
+        if current == "not-installed" {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.ollama_startup = "not-installed".to_string();
+                runtime.ollama_error.clear();
+            }
+            return current;
+        }
+        let start_generation = {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if runtime.ollama_startup == "starting" {
+                return "starting".to_string();
+            }
+            runtime.ollama_startup = "starting".to_string();
+            runtime.ollama_error.clear();
+            runtime.ollama_start_generation = runtime.ollama_start_generation.saturating_add(1);
+            runtime.ollama_start_generation
+        };
+
+        let ollama = Arc::clone(&self.ollama);
+        let runtime = Arc::clone(&self.runtime);
+        let ollama_app = app.clone();
+        thread::spawn(move || match ollama.start(&ollama_app) {
+            Ok(state) => {
+                if let Ok(mut runtime) = runtime.lock() {
+                    if runtime.ollama_start_generation == start_generation {
+                        runtime.ollama_startup = if state == "not-installed" {
+                            "not-installed".to_string()
+                        } else {
+                            "ready".to_string()
+                        };
+                        runtime.ollama_error.clear();
+                    }
+                }
+                let _ = app_log::append(
+                    &ollama_app,
+                    "info",
+                    "ollama",
+                    &format!("bundled runtime: {state}"),
+                );
+            }
+            Err(error) => {
+                if let Ok(mut runtime) = runtime.lock() {
+                    if runtime.ollama_start_generation == start_generation {
+                        runtime.ollama_startup = "failed".to_string();
+                        runtime.ollama_error = error.clone();
+                    }
+                }
+                let _ = app_log::append(&ollama_app, "warn", "ollama", &error);
+            }
+        });
+        "starting".to_string()
     }
 
     pub fn start(&self, app: &AppHandle) -> Result<String, String> {
         match probe_backend(PORT) {
             ProbeResult::Ready => {
+                self.ensure_ollama_started(app);
                 {
                     let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
                     runtime.attached_existing = true;
@@ -135,8 +224,6 @@ impl SidecarManager {
         if !entry.is_file() {
             return Err(format!("missing runtime entry: {}", entry.display()));
         }
-        let ollama_state = self.ollama.start(app)?;
-        app_log::append(app, "info", "ollama", &format!("bundled runtime: {ollama_state}"))?;
         let (stdout, stderr) = app_log::runtime_log_files(app)?;
         let token = ownership_token();
         let mut command = Command::new(&python);
@@ -147,7 +234,6 @@ impl SidecarManager {
             .env("PORT", PORT.to_string())
             .env("JAVIS_SIDECAR_OWNERSHIP", &token)
             .env("JAVIS_DATA_ROOT", &root)
-            .env("JAVIS_BUNDLED_MODEL", "deepseek-r1:8b")
             .env("JAVIS_BUNDLED_OLLAMA_URL", self.ollama.openai_base_url())
             .env("OLLAMA_MODELS", self.ollama.model_root())
             .stdout(Stdio::from(stdout))
@@ -173,6 +259,7 @@ impl SidecarManager {
             runtime.attached_existing = false;
             runtime.last_error.clear();
         }
+        self.ensure_ollama_started(app);
 
         for _ in 0..STARTUP_POLLS {
             thread::sleep(Duration::from_millis(400));
@@ -190,6 +277,9 @@ impl SidecarManager {
 
     pub fn stop_owned(&self) -> Result<String, String> {
         let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.ollama_start_generation = runtime.ollama_start_generation.saturating_add(1);
+        runtime.ollama_startup = "idle".to_string();
+        runtime.ollama_error.clear();
         if runtime.ownership_token.is_none() || runtime.owned_pid.is_none() {
             runtime.attached_existing = false;
             drop(runtime);

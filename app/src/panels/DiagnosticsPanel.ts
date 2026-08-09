@@ -1,6 +1,12 @@
 import type { BackendClient } from "../bridge/backendClient";
 import type { SidecarClient } from "../bridge/sidecarClient";
 import type { VoiceCapture } from "../live/VoiceCapture";
+import {
+  summarizeBackendReliability,
+  summarizeDiagnosticChecks,
+  summarizeVoiceRuntime,
+  type VoiceRuntimeDiagnostics,
+} from "./reliabilityDiagnostics.ts";
 
 type DiagnosticScope = "full" | "model" | "data";
 type DiagnosticStatus = "pass" | "warn" | "fail";
@@ -19,7 +25,7 @@ type DiagnosticReport = {
   summary: string;
   checks: DiagnosticCheck[];
 };
-type VoiceCapabilities = {
+type VoiceCapabilities = VoiceRuntimeDiagnostics & {
   capture?: { available?: boolean; backend?: string; native?: boolean; webview_permission_required?: boolean };
   stt?: { available?: boolean; model?: string; offline?: boolean };
   tts?: { available?: boolean; voice?: string; network_required?: boolean; backend?: string; offline?: boolean };
@@ -145,16 +151,22 @@ export function createDiagnosticsPanel(
     setDiagnosticBusy(true, scope);
     summary.textContent = "正在检查本机组件…";
     overview.dataset.overall = "loading";
-    const [reportResult, sidecarResult, runtimeFallback] = await Promise.allSettled([
+    const [reportResult, sidecarResult, runtimeFallback, voiceResult] = await Promise.allSettled([
       client.post<DiagnosticReport>("/api/diagnostics/self-test", { scope }),
       sidecar.status(),
       client.get<Record<string, unknown>>("/api/runtime/status"),
+      client.get<VoiceCapabilities>("/api/voice/diagnostics"),
     ]);
     const checks: DiagnosticCheck[] = [];
-    let report: DiagnosticReport | null = null;
+    const reliability = summarizeBackendReliability(client.reliabilitySnapshot());
+    checks.push({
+      id: "conversation_reliability",
+      label: reliability.label,
+      status: reliability.status,
+      message: reliability.message,
+    });
     if (reportResult.status === "fulfilled") {
-      report = reportResult.value;
-      checks.push(...report.checks);
+      checks.push(...reportResult.value.checks);
     } else {
       checks.push({
         id: "backend_self_test",
@@ -185,18 +197,28 @@ export function createDiagnosticsPanel(
         action: healthy ? undefined : "restart_runtime",
       });
     }
-    renderChecks(checks);
-    const failCount = checks.filter((check) => check.status === "fail").length;
-    const warnCount = checks.filter((check) => check.status === "warn").length;
-    const passCount = checks.filter((check) => check.status === "pass").length;
-    const overall: DiagnosticStatus = failCount ? "fail" : warnCount ? "warn" : "pass";
-    overview.dataset.overall = overall;
-    summary.textContent = report?.summary || `${passCount} 项通过，${warnCount} 项需留意，${failCount} 项失败`;
-    try {
-      voiceCapabilities = await client.get<VoiceCapabilities>("/api/voice/diagnostics");
-    } catch {
+    if (voiceResult.status === "fulfilled") {
+      voiceCapabilities = voiceResult.value;
+      const voiceRuntime = summarizeVoiceRuntime(voiceCapabilities);
+      checks.push({
+        id: "continuous_voice_runtime",
+        label: voiceRuntime.label,
+        status: voiceRuntime.status,
+        message: voiceRuntime.message,
+      });
+    } else {
       voiceCapabilities = {};
+      checks.push({
+        id: "continuous_voice_runtime",
+        label: "连续语音运行链",
+        status: "warn",
+        message: "语音运行指标暂不可读",
+      });
     }
+    renderChecks(checks);
+    const finalSummary = summarizeDiagnosticChecks(checks);
+    overview.dataset.overall = finalSummary.overall;
+    summary.textContent = finalSummary.text;
     setDiagnosticBusy(false, scope);
   }
 

@@ -7,6 +7,11 @@ export type SidecarSnapshot = {
   owned_pid?: number | null;
   restart_attempts?: number;
   last_error?: string;
+  ollama?: "healthy" | "attached" | "not-installed" | "offline";
+  ollama_installed?: boolean;
+  ollama_base_url?: string;
+  ollama_recovery?: "none" | "open-model-settings" | "restart-sidecar";
+  ollama_error?: string;
 };
 
 type SidecarListener = (snapshot: SidecarSnapshot) => void;
