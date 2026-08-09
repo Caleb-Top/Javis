@@ -58,18 +58,93 @@ class ModelConnectionSettingsTests(unittest.TestCase):
             def read(self, *_):
                 return json.dumps({"data": [{"id": "account-preview-model"}]}).encode()
 
-        with patch.object(config_api.request, "urlopen", return_value=Response()) as urlopen:
-            result = config_api.discover_remote_provider_models(
-                "deepseek",
-                "https://api.deepseek.com/v1",
-                "private-key",
-            )
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch.object(config_api, "CONFIG_PATH", Path(root) / "config.yaml"),
+                patch.object(config_api.request, "urlopen", return_value=Response()) as urlopen,
+            ):
+                result = config_api.discover_remote_provider_models(
+                    "deepseek",
+                    "https://api.deepseek.com/v1",
+                    "private-key",
+                )
 
         self.assertTrue(result["connected"])
         self.assertIn("account-preview-model", {model["id"] for model in result["models"]})
         self.assertNotIn("private-key", json.dumps(result, ensure_ascii=False))
         sent_request = urlopen.call_args.args[0]
         self.assertEqual(sent_request.headers["Authorization"], "Bearer private-key")
+
+    def test_anthropic_catalog_sync_reads_every_page(self):
+        class Response:
+            def __init__(self, payload: dict):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, *_):
+                return json.dumps(self.payload).encode()
+
+        pages = [
+            Response({"data": [{"id": "claude-page-one"}], "has_more": True, "last_id": "claude-page-one"}),
+            Response({"data": [{"id": "claude-page-two"}], "has_more": False}),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch.object(config_api, "CONFIG_PATH", Path(root) / "config.yaml"),
+                patch.object(config_api.request, "urlopen", side_effect=pages) as urlopen,
+            ):
+                result = config_api.discover_remote_provider_models(
+                    "anthropic",
+                    "https://api.anthropic.com/v1",
+                    "private-key",
+                )
+
+        model_ids = {model["id"] for model in result["models"]}
+        self.assertTrue(result["connected"])
+        self.assertEqual(result["catalog_source"], "account")
+        self.assertIn("claude-page-one", model_ids)
+        self.assertIn("claude-page-two", model_ids)
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertIn("after_id=claude-page-one", urlopen.call_args_list[1].args[0].full_url)
+
+    def test_provider_catalog_falls_back_to_versioned_cache_without_leaking_key(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, *_):
+                return json.dumps({"data": [{"id": "account-cached-model"}]}).encode()
+
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                with patch.object(config_api.request, "urlopen", return_value=Response()):
+                    fresh = config_api.discover_remote_provider_models(
+                        "openai",
+                        "https://api.openai.com/v1",
+                        "private-key",
+                    )
+                with patch.object(config_api.request, "urlopen", side_effect=config_api.URLError("offline")):
+                    cached = config_api.discover_remote_provider_models(
+                        "openai",
+                        "https://api.openai.com/v1",
+                        "private-key",
+                    )
+                cache_text = config_api._catalog_cache_path().read_text(encoding="utf-8")
+
+        self.assertEqual(fresh["catalog_source"], "account")
+        self.assertFalse(cached["connected"])
+        self.assertEqual(cached["catalog_source"], "cache")
+        self.assertIn("account-cached-model", {model["id"] for model in cached["models"]})
+        self.assertNotIn("private-key", cache_text)
 
     def test_legacy_config_migrates_once_and_survives_three_restart_cycles(self):
         with tempfile.TemporaryDirectory() as root:

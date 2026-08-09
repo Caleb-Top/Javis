@@ -1,9 +1,9 @@
 """配置管理 API"""
-import copy, os, base64, json, logging, shutil, threading
+import copy, os, base64, json, logging, shutil, threading, time
 from pathlib import Path
 from urllib import request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 try:
     import yaml
@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # Optional for import-only tools and UI tests.
 logger = logging.getLogger("config_api")
 CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 CONFIG_SCHEMA_VERSION = 2
+CATALOG_CACHE_SCHEMA_VERSION = 1
 ENCODED_PREFIX = "b64:"
 _CONFIG_LOCK = threading.RLock()
 
@@ -406,6 +407,64 @@ def _provider_models(provider: str) -> list[dict]:
     ]
 
 
+def _catalog_cache_path() -> Path:
+    return CONFIG_PATH.with_name("model-catalog-cache.json")
+
+
+def _read_catalog_cache() -> dict:
+    path = _catalog_cache_path()
+    if not path.is_file():
+        return {"schema_version": CATALOG_CACHE_SCHEMA_VERSION, "providers": {}}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict) or loaded.get("schema_version") != CATALOG_CACHE_SCHEMA_VERSION:
+            raise ValueError("catalog cache schema mismatch")
+        if not isinstance(loaded.get("providers"), dict):
+            loaded["providers"] = {}
+        return loaded
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {"schema_version": CATALOG_CACHE_SCHEMA_VERSION, "providers": {}}
+
+
+def _cached_provider_models(provider: str, base_url: str) -> list[str]:
+    with _CONFIG_LOCK:
+        entry = _read_catalog_cache().get("providers", {}).get(provider, {})
+    if not isinstance(entry, dict) or entry.get("base_url") != base_url:
+        return []
+    return sorted({
+        str(model_id).strip()
+        for model_id in entry.get("models", [])
+        if str(model_id).strip()
+    })
+
+
+def _store_provider_models(provider: str, base_url: str, model_ids: list[str]) -> None:
+    with _CONFIG_LOCK:
+        cache = _read_catalog_cache()
+        cache.setdefault("providers", {})[provider] = {
+            "base_url": base_url,
+            "updated_at": int(time.time()),
+            "models": sorted(set(model_ids)),
+        }
+        path = _catalog_cache_path()
+        temporary = Path(str(path) + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_fsynced(temporary, json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True))
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _merge_catalog_models(built_in: list[dict], model_ids: list[str], description: str) -> list[dict]:
+    merged = list(built_in)
+    known = {item["id"] for item in merged}
+    for model_id in sorted(set(model_ids)):
+        if model_id not in known:
+            merged.append({"id": model_id, "label": model_id, "description": description})
+    return merged
+
+
 def discover_remote_provider_models(
     provider: str,
     base_url: str = "",
@@ -418,24 +477,27 @@ def discover_remote_provider_models(
 
     built_in = _provider_models(normalized)
     key = str(api_key or "").strip() or _get_api_key(normalized)
-    if not key:
-        return {
-            "connected": False,
-            "models": built_in,
-            "discovered_count": 0,
-            "message": f"已列出 {len(built_in)} 个内置兼容模型；配置 API Key 后可同步账户模型",
-        }
-
     configured_base = str(base_url or "").strip()
     if not configured_base:
         cfg = load_config()
         profile = cfg.get("model", {}).get(normalized, {})
         if isinstance(profile, dict):
             configured_base = str(profile.get("base_url") or "")
-    endpoint = _validate_model_endpoint(
+    validated_base = _validate_model_endpoint(
         configured_base or DEFAULT_REMOTE_BASE_URLS[normalized],
         "API 地址",
-    ) + "/models"
+    )
+    cached_ids = _cached_provider_models(normalized, validated_base)
+    if not key:
+        merged = _merge_catalog_models(built_in, cached_ids, "上次账户同步缓存")
+        return {
+            "connected": False,
+            "models": merged,
+            "discovered_count": 0,
+            "catalog_source": "cache" if cached_ids else "builtin",
+            "message": f"已列出 {len(merged)} 个兼容模型；配置 API Key 后可同步账户模型",
+        }
+    endpoint = validated_base + "/models"
     headers = {"Accept": "application/json"}
     if normalized == "anthropic":
         headers.update({
@@ -446,27 +508,40 @@ def discover_remote_provider_models(
         headers["Authorization"] = f"Bearer {key}"
 
     try:
-        with request.urlopen(request.Request(endpoint, headers=headers), timeout=15) as response:
-            payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
-        rows = payload.get("data", []) if isinstance(payload, dict) else []
-        discovered = sorted({
-            str(row.get("id") or "").strip()
-            for row in rows
-            if isinstance(row, dict) and str(row.get("id") or "").strip()
-        })
-        merged = list(built_in)
-        known = {item["id"] for item in merged}
-        for model_id in discovered:
-            if model_id not in known:
-                merged.append({
-                    "id": model_id,
-                    "label": model_id,
-                    "description": "账户 API 返回",
-                })
+        discovered_set: set[str] = set()
+        cursor = ""
+        for _page in range(20):
+            page_url = endpoint
+            if normalized == "anthropic":
+                query = {"limit": 100}
+                if cursor:
+                    query["after_id"] = cursor
+                page_url += "?" + urlencode(query)
+            with request.urlopen(request.Request(page_url, headers=headers), timeout=15) as response:
+                payload = json.loads(response.read(2 * 1024 * 1024).decode("utf-8"))
+            rows = payload.get("data", []) if isinstance(payload, dict) else []
+            discovered_set.update({
+                str(row.get("id") or "").strip()
+                for row in rows
+                if isinstance(row, dict) and str(row.get("id") or "").strip()
+            })
+            if normalized != "anthropic" or not bool(payload.get("has_more")):
+                break
+            cursor = str(payload.get("last_id") or "").strip()
+            if not cursor and rows:
+                cursor = str(rows[-1].get("id") or "").strip()
+            if not cursor:
+                raise ValueError("Anthropic 模型目录分页缺少 last_id")
+        else:
+            raise ValueError("Anthropic 模型目录分页超过安全上限")
+        discovered = sorted(discovered_set)
+        _store_provider_models(normalized, validated_base, discovered)
+        merged = _merge_catalog_models(built_in, discovered, "账户 API 返回")
         return {
             "connected": True,
             "models": merged,
             "discovered_count": len(discovered),
+            "catalog_source": "account",
             "message": f"已同步账户模型 {len(discovered)} 个；合并后共 {len(merged)} 个",
         }
     except HTTPError as error:
@@ -474,11 +549,13 @@ def discover_remote_provider_models(
     except (URLError, TimeoutError, ValueError, json.JSONDecodeError) as error:
         reason = getattr(error, "reason", error)
         message = f"无法同步供应商模型：{str(reason)[:120]}"
+    fallback = _merge_catalog_models(built_in, cached_ids, "上次账户同步缓存")
     return {
         "connected": False,
-        "models": built_in,
+        "models": fallback,
         "discovered_count": 0,
-        "message": f"{message}；仍显示 {len(built_in)} 个内置兼容模型",
+        "catalog_source": "cache" if cached_ids else "builtin",
+        "message": f"{message}；仍显示 {len(fallback)} 个兼容模型",
     }
 
 
