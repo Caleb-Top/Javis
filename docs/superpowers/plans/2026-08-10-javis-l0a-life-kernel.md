@@ -33,6 +33,7 @@
 
 - `core/life/__init__.py`：导出公共类型与 `LifeService`。
 - `core/life/contracts.py`：身份、实例、事件、快照、表达意图数据契约和枚举。
+- `core/life/paths.py`：代码根与用户数据根的确定性解析，不创建目录。
 - `core/life/identity.py`：身份宪章版本链、哈希、原子写入与恢复。
 - `core/life/lineage.py`：实例记录、谱系、检查点和异常关闭识别。
 - `core/life/state.py`：最小生命周期状态机与快照投影。
@@ -54,11 +55,13 @@
 - `core/conversation_hub.py`：增加受控的公共 session event 发布方法，不暴露私有 `_publish`。
 - `memory/session_db.py`：把现有通配同步 SQLite 写入改为有界异步写入，并限制全文索引范围。
 - `main.py`：挂载只读 life router，并把当前 session 的生命快照推送到统一会话。
+- `app/src-tauri/src/sidecar.rs`：传入真实用户数据根，并先尝试所有权令牌保护的优雅关闭。
 - `app/src/main.ts`：在唯一 `onEvent` 链中调用 LifeStateBridge，不新增平行 WebSocket。
 
 ### Tests
 
 - `tests/test_life_contracts.py`
+- `tests/test_life_paths.py`
 - `tests/test_life_identity.py`
 - `tests/test_life_lineage.py`
 - `tests/test_life_state.py`
@@ -83,6 +86,28 @@
 
 ---
 
+## Data Root Contract (applies before Task 2)
+
+`root` 始终表示只读源码/运行时代码根；`data_root` 表示可写用户数据基础根。两者不得隐式等同。正式入口冻结为：
+
+```python
+def create_runtime(
+    root: str | Path,
+    startup_side_effects: bool = True,
+    *,
+    data_root: str | Path | None = None,
+) -> JarvisRuntime:
+    ...
+```
+
+解析优先级固定为：显式 `data_root` → 非空 `JAVIS_DATA_ROOT` → 兼容默认 `Path(root) / "data"`。解析器只执行 `expanduser()`、绝对化和规范化，不创建目录、不检查网络、不回退 D 盘。
+
+`LifeService` 始终接收基础 `data_root`；各 Store 自己追加 `life/identity`、`life/instances`、`life/journal`。任何调用点都不得把 `data_root / "life"` 再传给 `LifeService`。
+
+隔离开发测试必须显式传 `tmp_path / "user-data"`，并断言代码根无新增文件。Tauri 安装运行时使用应用用户数据目录或用户明确配置的目录传入 `JAVIS_DATA_ROOT`，不能继续把打包代码根当用户数据根。
+
+---
+
 ### Task 1: Lock the Life Contracts
 
 **Files:**
@@ -92,16 +117,71 @@
 
 **Interfaces:**
 - Consumes: Python standard library only.
-- Produces: `LifeCycleState`, `PrivacyClass`, `RetentionClass`, `IdentityConstitution`, `InstanceRecord`, `LifeEvent`, `LifeSnapshot`, `ExpressionIntent`.
+- Produces: `LifeCycleState`, `PrivacyClass`, `RetentionClass`, `ExpressionBaseState`, `GazeTarget`, `VoiceActivity`, `IdentityConstitution`, `InstanceRecord`, `ContinuityCheckpoint`, `StartupAssessment`, `LifeEvent`, `IdentitySummary`, `InstanceSummary`, `HealthSummary`, `LifeSnapshot`, `ExpressionIntent`, `canonical_json_bytes()` and `canonical_content_hash()`.
+
+**Frozen wire rules:**
+
+- all timestamps are RFC3339 UTC strings with millisecond precision, for example `1970-01-01T00:01:40.000Z`; injected epoch floats are converted at the boundary;
+- `monotonic_offset_ms`, `sequence`, `revision`, `version` and `generation` are non-negative integers;
+- IDs are non-empty UTF-8 strings of at most 256 characters without control characters;
+- confidence and intensity are finite floats in `[0.0, 1.0]`;
+- collection fields are tuples or recursively frozen mappings internally; `frozen=True` around a mutable dict/list is not accepted;
+- every `from_dict()` rejects missing fields, extra fields, unknown enum values and unknown schema versions;
+- every `to_dict()` returns a newly allocated JSON-compatible structure;
+- canonical bytes are exactly:
+
+```python
+json.dumps(
+    payload_without_content_hash,
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+).encode("utf-8")
+```
+
+- hashes are lowercase SHA-256 hex over those bytes; no platform newline participates.
+
+**Exact contract fields:**
+
+| Type | Fields |
+|---|---|
+| `IdentityConstitution` | `schema_version:int`, `identity_id:str`, `name:str`, `kind:str`, `relationship_role:str`, `persona_invariants:tuple[str,...]`, `values:tuple[str,...]`, `hard_boundaries:tuple[str,...]`, `created_at:str`, `version:int`, `previous_version_hash:str|None`, `content_hash:str`, `approved_by:str`, `approved_at:str` |
+| `InstanceRecord` | `schema_version:int`, `identity_id:str`, `lineage_id:str`, `instance_id:str`, `parent_instance_id:str|None`, `generation:int`, `environment_fingerprint_hash:str`, `created_at:str`, `last_started_at:str|None`, `last_clean_shutdown_at:str|None`, `fork_pending_review:bool` |
+| `ContinuityCheckpoint` | `schema_version:int`, `instance_id:str`, `boot_id:str`, `started_at:str`, `clean_shutdown_at:str|None`, `last_event_cursor:int`, `active_request_id:str|None`, `temporary_authority_valid:bool`, `content_hash:str` |
+| `StartupAssessment` | `schema_version:int`, `instance_id:str`, `previous_boot_id:str|None`, `unclean_shutdown:bool`, `temporary_authority_valid:bool`, `last_event_cursor:int`, `active_request_id:str|None`, `reason_code:str` |
+| `LifeEvent` | `schema_version:int`, `event_id:str`, `event_type:str`, `timestamp_utc:str`, `monotonic_offset_ms:int`, `source:str`, `source_event_id:str|None`, `session_id:str|None`, `request_id:str|None`, `correlation_id:str|None`, `causation_id:str|None`, `sequence:int`, `identity_id:str`, `instance_id:str`, `payload:FrozenJsonObject`, `privacy_class:PrivacyClass`, `retention_class:RetentionClass`, `confidence:float`, `provenance:FrozenJsonObject`, `redaction_summary:tuple[str,...]` |
+| `IdentitySummary` | `identity_id:str`, `name:str`, `kind:str`, `relationship_role:str`, `version:int`, `content_hash:str` |
+| `InstanceSummary` | `lineage_id:str`, `instance_id:str`, `parent_instance_id:str|None`, `generation:int`, `fork_pending_review:bool` |
+| `HealthSummary` | `status:str`, `degraded_components:tuple[str,...]`, `reason_codes:tuple[str,...]` |
+| `LifeSnapshot` | `schema_version:int`, `revision:int`, `identity:IdentitySummary`, `instance:InstanceSummary`, `lifecycle_state:LifeCycleState`, `active_session_id:str|None`, `active_request_id:str|None`, `activity:str`, `health:HealthSummary`, `degradation_level:int`, `recovery_required:bool`, `last_event_id:str|None`, `last_sequence:int`, `updated_at:str`, `explanation:str` |
+| `ExpressionIntent` | `schema_version:int`, `revision:int`, `base_state:ExpressionBaseState`, `intensity:float`, `gaze_target:GazeTarget`, `voice_activity:VoiceActivity`, `transition_ms:int`, `interrupt:bool`, `source_snapshot_revision:int`, `generated_at:str`, `expires_at:str`, `explanation_code:str` |
+
+`PrivacyClass` 的完整值为 `public_surface/local_internal/user_private/secret/biometric/restricted_system`；`RetentionClass` 为 `ephemeral/session/operational/continuity/memory_candidate/audit/never_persist`。`LifeCycleState` 与设计规格的八种状态完全一致。Expression 三个枚举必须与 L0-B 的九种 base state、四种 gaze 和三种 voice activity 完全一致。
 
 - [ ] **Step 1: Write the failing contract tests**
 
 ```python
+import dataclasses
+import pytest
+
 from core.life.contracts import (
+    ContinuityCheckpoint,
     ExpressionIntent,
+    ExpressionBaseState,
+    GazeTarget,
+    HealthSummary,
     IdentityConstitution,
+    IdentitySummary,
+    InstanceRecord,
+    InstanceSummary,
+    LifeEvent,
     LifeCycleState,
+    PrivacyClass,
+    RetentionClass,
     LifeSnapshot,
+    StartupAssessment,
+    VoiceActivity,
+    canonical_content_hash,
 )
 
 
@@ -118,20 +198,149 @@ def test_default_constitution_is_javis_and_model_independent():
 
 
 def test_expression_intent_v1_has_exact_wire_keys():
-    snapshot = LifeSnapshot.quiet(
-        identity_id="identity-1",
-        instance_id="instance-1",
+    intent = ExpressionIntent(
+        schema_version=1,
         revision=4,
-        now=100.0,
+        base_state=ExpressionBaseState.IDLE,
+        intensity=0.2,
+        gaze_target=GazeTarget.NONE,
+        voice_activity=VoiceActivity.SILENT,
+        transition_ms=180,
+        interrupt=False,
+        source_snapshot_revision=4,
+        generated_at="1970-01-01T00:01:41.000Z",
+        expires_at="1970-01-01T00:01:46.000Z",
+        explanation_code="quiet",
     )
-    intent = ExpressionIntent.from_snapshot(snapshot, now=101.0)
     assert set(intent.to_dict()) == {
         "schema_version", "revision", "base_state", "intensity",
         "gaze_target", "voice_activity", "transition_ms", "interrupt",
         "source_snapshot_revision", "generated_at", "expires_at",
         "explanation_code",
     }
-    assert snapshot.lifecycle_state is LifeCycleState.QUIET
+
+
+def test_enum_sets_and_canonical_hash_are_frozen():
+    assert {item.value for item in LifeCycleState} == {
+        "booting", "awake", "quiet", "engaged", "degraded",
+        "recovering", "stopping", "offline",
+    }
+    assert {item.value for item in PrivacyClass} == {
+        "public_surface", "local_internal", "user_private", "secret",
+        "biometric", "restricted_system",
+    }
+    assert {item.value for item in RetentionClass} == {
+        "ephemeral", "session", "operational", "continuity",
+        "memory_candidate", "audit", "never_persist",
+    }
+    assert {item.value for item in ExpressionBaseState} == {
+        "idle", "attention", "listening", "thinking", "speaking",
+        "executing", "blocked", "error", "offline",
+    }
+    assert {item.value for item in GazeTarget} == {
+        "none", "user", "content", "task",
+    }
+    assert {item.value for item in VoiceActivity} == {
+        "silent", "listening", "speaking",
+    }
+    assert canonical_content_hash({"b": 1, "a": "贾维斯"}) == (
+        "e6362375790e9ed55a0541d5cc1b62e2ef45366c5ff17b0d49620f819e96bb06"
+    )
+
+
+def test_all_public_contract_field_names_are_frozen():
+    expected = {
+        IdentityConstitution: (
+            "schema_version", "identity_id", "name", "kind",
+            "relationship_role", "persona_invariants", "values",
+            "hard_boundaries", "created_at", "version",
+            "previous_version_hash", "content_hash", "approved_by", "approved_at",
+        ),
+        InstanceRecord: (
+            "schema_version", "identity_id", "lineage_id", "instance_id",
+            "parent_instance_id", "generation", "environment_fingerprint_hash",
+            "created_at", "last_started_at", "last_clean_shutdown_at",
+            "fork_pending_review",
+        ),
+        ContinuityCheckpoint: (
+            "schema_version", "instance_id", "boot_id", "started_at",
+            "clean_shutdown_at", "last_event_cursor", "active_request_id",
+            "temporary_authority_valid", "content_hash",
+        ),
+        StartupAssessment: (
+            "schema_version", "instance_id", "previous_boot_id",
+            "unclean_shutdown", "temporary_authority_valid",
+            "last_event_cursor", "active_request_id", "reason_code",
+        ),
+        LifeEvent: (
+            "schema_version", "event_id", "event_type", "timestamp_utc",
+            "monotonic_offset_ms", "source", "source_event_id", "session_id",
+            "request_id", "correlation_id", "causation_id", "sequence",
+            "identity_id", "instance_id", "payload", "privacy_class",
+            "retention_class", "confidence", "provenance", "redaction_summary",
+        ),
+        IdentitySummary: (
+            "identity_id", "name", "kind", "relationship_role", "version",
+            "content_hash",
+        ),
+        InstanceSummary: (
+            "lineage_id", "instance_id", "parent_instance_id", "generation",
+            "fork_pending_review",
+        ),
+        HealthSummary: ("status", "degraded_components", "reason_codes"),
+        LifeSnapshot: (
+            "schema_version", "revision", "identity", "instance",
+            "lifecycle_state", "active_session_id", "active_request_id",
+            "activity", "health", "degradation_level", "recovery_required",
+            "last_event_id", "last_sequence", "updated_at", "explanation",
+        ),
+        ExpressionIntent: (
+            "schema_version", "revision", "base_state", "intensity",
+            "gaze_target", "voice_activity", "transition_ms", "interrupt",
+            "source_snapshot_revision", "generated_at", "expires_at",
+            "explanation_code",
+        ),
+    }
+    for contract, field_names in expected.items():
+        assert tuple(field.name for field in dataclasses.fields(contract)) == field_names
+
+
+def test_round_trip_rejects_extra_fields_and_does_not_share_mutable_state():
+    identity = IdentityConstitution.create_default(
+        identity_id="identity-1",
+        now=100.0,
+    )
+    wire = identity.to_dict()
+    assert IdentityConstitution.from_dict(wire) == identity
+    wire["persona_invariants"].append("mutated outside")
+    assert "mutated outside" not in identity.persona_invariants
+    invalid = identity.to_dict() | {"model": "forbidden"}
+    with pytest.raises(ValueError, match="unexpected field"):
+        IdentityConstitution.from_dict(invalid)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("intensity", -0.1), ("intensity", 1.1), ("transition_ms", -1)],
+)
+def test_expression_rejects_out_of_range_values(field, value):
+    kwargs = {
+        "schema_version": 1,
+        "revision": 1,
+        "base_state": "idle",
+        "intensity": 0.2,
+        "gaze_target": "none",
+        "voice_activity": "silent",
+        "transition_ms": 100,
+        "interrupt": False,
+        "source_snapshot_revision": 1,
+        "generated_at": "1970-01-01T00:00:01.000Z",
+        "expires_at": "1970-01-01T00:00:02.000Z",
+        "explanation_code": "quiet",
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError):
+        ExpressionIntent.from_dict(kwargs)
 ```
 
 - [ ] **Step 2: Run the contract test and verify red**
@@ -146,7 +355,9 @@ Expected: collection fails because `core.life.contracts` does not exist.
 
 - [ ] **Step 3: Implement the immutable data contracts**
 
-Use frozen dataclasses and string enums. `IdentityConstitution.create_default()` must calculate `content_hash` from canonical JSON excluding the hash field itself. `from_dict()` must reject unknown schema versions and missing required fields. `ExpressionIntent.from_snapshot()` maps `quiet` to `idle` and sets a finite expiration.
+Use frozen dataclasses, string enums and recursive freeze/thaw helpers. `IdentityConstitution.create_default()` must calculate `content_hash` from canonical JSON excluding the hash field itself. Every `from_dict()` enforces the frozen wire rules above. `LifeEvent` must enforce `secret → never_persist` unless payload contains only a dedicated secure-store reference.
+
+Task 1 is contract-only: it must not create directories, write files, inspect hardware, register EventBus handlers, implement lifecycle transitions or map snapshots to expressions. `quiet → idle`, expiration and expression revision belong only to Task 4 `ExpressionProjector`.
 
 ```python
 class LifeCycleState(str, Enum):
@@ -164,15 +375,15 @@ class LifeCycleState(str, Enum):
 class ExpressionIntent:
     schema_version: int
     revision: int
-    base_state: str
+    base_state: ExpressionBaseState
     intensity: float
-    gaze_target: str
-    voice_activity: str
+    gaze_target: GazeTarget
+    voice_activity: VoiceActivity
     transition_ms: int
     interrupt: bool
     source_snapshot_revision: int
-    generated_at: float
-    expires_at: float
+    generated_at: str
+    expires_at: str
     explanation_code: str
 ```
 
@@ -189,6 +400,85 @@ git commit -m "feat(life): define identity and event contracts"
 
 ---
 
+### Task 1B: Separate Code Root from User Data Root
+
+**Files:**
+- Create: `core/life/paths.py`
+- Modify: `core/runtime.py`
+- Test: `tests/test_life_paths.py`
+
+**Interfaces:**
+- Consumes: code `root`, optional explicit `data_root`, environment mapping.
+- Produces: `resolve_data_root(root, *, explicit=None, environ=os.environ)` and the kw-only `create_runtime(..., data_root=None)` contract.
+
+- [ ] **Step 1: Write failing path-precedence and no-code-root-write tests**
+
+```python
+from pathlib import Path
+
+import pytest
+
+from core.life.paths import resolve_data_root
+from core.runtime import create_runtime
+
+
+def test_data_root_precedence_is_explicit_then_env_then_compat_default(tmp_path):
+    code = tmp_path / "code"
+    explicit = tmp_path / "explicit-data"
+    env = tmp_path / "env-data"
+    assert resolve_data_root(
+        code, explicit=explicit, environ={"JAVIS_DATA_ROOT": str(env)}
+    ) == explicit.resolve()
+    assert resolve_data_root(
+        code, environ={"JAVIS_DATA_ROOT": str(env)}
+    ) == env.resolve()
+    assert resolve_data_root(code, environ={}) == (code / "data").resolve()
+
+
+@pytest.mark.asyncio
+async def test_explicit_data_root_keeps_runtime_databases_out_of_code_root(tmp_path):
+    code = tmp_path / "readonly-code"
+    data = tmp_path / "user-data"
+    code.mkdir()
+    runtime = create_runtime(code, startup_side_effects=False, data_root=data)
+    try:
+        assert runtime.root == code.resolve()
+        assert runtime.data_root == data.resolve()
+        assert not (code / "data").exists()
+        assert (data / "skills" / "catalog.sqlite3").exists()
+        assert (data / "agent_runs" / "runs.sqlite3").exists()
+        assert (data / "conversations" / "conversations.sqlite3").exists()
+    finally:
+        await runtime.aclose()
+```
+
+- [ ] **Step 2: Run and verify red**
+
+```powershell
+& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_paths.py -q
+```
+
+Expected: collection fails because `core.life.paths` and the runtime `data_root` field do not exist.
+
+- [ ] **Step 3: Implement the resolver and migrate runtime-owned stores**
+
+`resolve_data_root()` performs no I/O. `create_runtime()` resolves once, stores `JarvisRuntime.data_root`, and uses it for `SkillCatalog`, `AgentRunStore` and `ConversationStore`. It continues to use code `root` for `config.yaml`, source skills and executables. Do not silently catch an invalid explicit data path and fall back to the code root.
+
+- [ ] **Step 4: Run focused and runtime regressions**
+
+```powershell
+& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_paths.py tests/test_runtime_agent_fusion.py tests/test_conversation_store.py -q
+```
+
+- [ ] **Step 5: Commit the root boundary**
+
+```powershell
+git add core/life/paths.py core/runtime.py tests/test_life_paths.py
+git commit -m "refactor(runtime): separate code and user data roots"
+```
+
+---
+
 ### Task 2: Implement the Versioned Identity Constitution
 
 **Files:**
@@ -196,8 +486,8 @@ git commit -m "feat(life): define identity and event contracts"
 - Test: `tests/test_life_identity.py`
 
 **Interfaces:**
-- Consumes: `IdentityConstitution` from Task 1 and a user-data `Path`.
-- Produces: `IdentityConstitutionStore.load_or_create()`, `load()`, `write_version(current, *, changes, approved_by)`, `recover_previous()` and `summary()`.
+- Consumes: `IdentityConstitution` from Task 1 and the base user `data_root` from Task 1B.
+- Produces: `IdentityConstitutionStore.load_or_create()`, `load()`, `load_last_verified()`, `write_version(current, *, changes, approved_by)`, `rollback_to_previous(*, approved_by)` and `summary()`.
 
 - [ ] **Step 1: Write failing first-birth, restart, mutation and corruption tests**
 
@@ -212,7 +502,7 @@ def test_first_birth_creates_one_stable_identity(tmp_path):
     assert second.content_hash == first.content_hash
 
 
-def test_corrupt_current_identity_recovers_previous_without_overwrite(tmp_path):
+def test_corrupt_current_identity_requires_recovery_without_overwrite(tmp_path):
     store = IdentityConstitutionStore(tmp_path, id_factory=lambda: "identity-one", now=lambda: 10.0)
     first = store.load_or_create()
     second = store.write_version(
@@ -221,9 +511,29 @@ def test_corrupt_current_identity_recovers_previous_without_overwrite(tmp_path):
         approved_by="user",
     )
     store.current_path.write_text("{broken", encoding="utf-8")
-    recovered = store.recover_previous()
-    assert recovered.content_hash == first.content_hash
-    assert second.content_hash != recovered.content_hash
+    before_v1 = store.version_path(first).read_bytes()
+    before_v2 = store.version_path(second).read_bytes()
+    with pytest.raises(IdentityRecoveryRequired, match="current constitution"):
+        store.load()
+    assert store.current_path.read_text(encoding="utf-8") == "{broken"
+    assert store.version_path(first).read_bytes() == before_v1
+    assert store.version_path(second).read_bytes() == before_v2
+    assert store.load_last_verified().content_hash == second.content_hash
+
+
+def test_rollback_is_explicit_and_auditable(tmp_path):
+    store = IdentityConstitutionStore(tmp_path, id_factory=lambda: "identity-one", now=lambda: 10.0)
+    first = store.load_or_create()
+    second = store.write_version(
+        first,
+        changes={"persona_invariants": ["quiet", "focused", "measured", "truthful"]},
+        approved_by="user",
+    )
+    rolled_back = store.rollback_to_previous(approved_by="user")
+    assert rolled_back.version == second.version + 1
+    assert rolled_back.previous_version_hash == second.content_hash
+    assert rolled_back.persona_invariants == first.persona_invariants
+    assert store.audit_records()[-1]["action"] == "identity.rollback"
 ```
 
 - [ ] **Step 2: Run tests and verify the missing implementation failure**
@@ -234,11 +544,13 @@ def test_corrupt_current_identity_recovers_previous_without_overwrite(tmp_path):
 
 - [ ] **Step 3: Implement atomic storage and version validation**
 
-Store files under `<data_root>/life/identity/`:
+`IdentityConstitutionStore` receives the base `data_root` and itself stores files under `<data_root>/life/identity/`:
 
 - `current.json` for the active constitution;
 - `versions/<version>-<hash>.json` for immutable history;
 - `recovery.json` for the last known valid version pointer.
+
+`load()` never mutates disk and never silently rolls back. If `current.json` is corrupt, missing while versions exist, or its hash/version chain is invalid, raise `IdentityRecoveryRequired` and let `LifeService` enter read-only recovery. `load_last_verified()` scans immutable versions and returns the highest valid version; in the test above that is v2. `rollback_to_previous()` is a separate, explicitly approved operation: it creates a new version whose semantic fields match the prior version and appends an audit record; it never rewrites v1/v2 history.
 
 Write to a sibling temporary file, `flush()` and `os.fsync()`, then `os.replace()`. Initial `approved_by` is `built_in_constitution`; later versions require a non-empty explicit approver. Never store model configuration or user secrets.
 
@@ -277,7 +589,7 @@ git commit -m "feat(life): persist versioned identity constitution"
 
 **Interfaces:**
 - Consumes: `identity_id`, data root, deterministic environment fingerprint, injected clock and ID factory.
-- Produces: `InstanceLineageStore.load_or_create()`, `mark_started()`, `mark_clean_shutdown()`, `startup_assessment()` and `fork_for_environment()`.
+- Produces: `InstanceLineageStore.load_or_create()`, `assess_previous_run(instance_id)`, `mark_started(instance_id, *, boot_id)`, `mark_clean_shutdown(instance_id, *, boot_id, last_event_cursor, active_request_id)` and `fork_for_environment()`.
 
 - [ ] **Step 1: Write the failing lineage tests**
 
@@ -307,10 +619,37 @@ def test_unclean_shutdown_expires_temporary_authority(tmp_path):
         now=lambda: 10.0,
     )
     instance = store.load_or_create("identity-one", "env-a")
-    store.mark_started(instance.instance_id)
-    assessment = store.startup_assessment(instance.instance_id)
+    store.mark_started(instance.instance_id, boot_id="boot-one")
+    restarted = InstanceLineageStore(
+        tmp_path,
+        instance_id_factory=lambda: "unused",
+        lineage_id_factory=lambda: "unused",
+        now=lambda: 20.0,
+    )
+    assessment = restarted.assess_previous_run(instance.instance_id)
     assert assessment.unclean_shutdown is True
     assert assessment.temporary_authority_valid is False
+
+
+def test_assessment_happens_before_current_boot_is_marked_started(tmp_path):
+    store = InstanceLineageStore(
+        tmp_path,
+        instance_id_factory=lambda: "instance-one",
+        lineage_id_factory=lambda: "lineage-one",
+        now=lambda: 10.0,
+    )
+    instance = store.load_or_create("identity-one", "env-a")
+    store.mark_started(instance.instance_id, boot_id="boot-one")
+    store.mark_clean_shutdown(
+        instance.instance_id,
+        boot_id="boot-one",
+        last_event_cursor=42,
+        active_request_id=None,
+    )
+    assessment = store.assess_previous_run(instance.instance_id)
+    assert assessment.unclean_shutdown is False
+    assert assessment.last_event_cursor == 42
+    store.mark_started(instance.instance_id, boot_id="boot-two")
 ```
 
 - [ ] **Step 2: Run and verify red**
@@ -321,7 +660,23 @@ def test_unclean_shutdown_expires_temporary_authority(tmp_path):
 
 - [ ] **Step 3: Implement `InstanceLineageStore`**
 
-Use JSON records under `<data_root>/life/instances/` and one atomic `active.json` pointer. The environment fingerprint must be injected; the store must not collect hardware serials itself. A clean shutdown checkpoint records the last life event cursor and active request ID but never stores temporary approval tokens.
+`InstanceLineageStore` receives the base `data_root`; it uses JSON records under `<data_root>/life/instances/` and one atomic `active.json` pointer. The environment fingerprint must be injected; the store must not collect hardware serials itself. A clean shutdown checkpoint records the last life event cursor and active request ID but never stores temporary approval tokens.
+
+Startup order is a hard protocol:
+
+```python
+assessment = store.assess_previous_run(instance.instance_id)
+store.mark_started(instance.instance_id, boot_id=current_boot_id)
+# runtime runs
+store.mark_clean_shutdown(
+    instance.instance_id,
+    boot_id=current_boot_id,
+    last_event_cursor=journal.cursor,
+    active_request_id=conversation_hub.active_request_id,
+)
+```
+
+Never call `mark_started()` before assessing the previous boot. `mark_clean_shutdown()` must reject a stale or mismatched boot ID.
 
 - [ ] **Step 4: Run lineage and identity tests**
 
@@ -646,7 +1001,11 @@ git commit -m "feat(life): persist life events off the hot path"
 
 ```python
 def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path):
-    runtime = create_runtime(root=tmp_path, startup_side_effects=False)
+    runtime = create_runtime(
+        root=tmp_path / "code",
+        startup_side_effects=False,
+        data_root=tmp_path / "user-data",
+    )
     try:
         assert runtime.life is runtime.subsystems["life"]
         assert runtime.life.snapshot().identity_id
@@ -665,7 +1024,9 @@ def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path
 
 - [ ] **Step 3: Implement service start/stop and runtime field**
 
-Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with `root / "data" / "life"`, register it after the existing stores exist and before `runtime.created` is published. Pass the existing runtime `EventBus` into `ConversationHub`; do not create a second bus. `start()` subscribes one EventBus wildcard handler; `stop()` unsubscribes or disables the handler, writes a clean checkpoint and joins the journal worker.
+Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with the base `runtime.data_root` from Task 1B; never pass `data_root / "life"`. Register it after the existing stores exist and before `runtime.created` is published. Pass the existing runtime `EventBus` into `ConversationHub`; do not create a second bus.
+
+Startup performs `assess_previous_run()` before `mark_started(current_boot_id)`. `start()` installs exactly one wildcard handler. Because the existing EventBus has no unsubscribe, `stop()` atomically disables that handler before flushing; repeated `start()` is rejected and stopped callbacks become no-ops. It then writes the clean checkpoint and joins the journal worker. EventBus API expansion is not required for L0-A.
 
 - [ ] **Step 4: Prove no synchronous SQLite in the handler**
 
@@ -682,6 +1043,62 @@ Patch `journal._write_batch` to block and publish `tool.completed`; assert `Even
 ```powershell
 git add core/life/service.py core/runtime.py core/conversation_hub.py tests/test_life_service.py
 git commit -m "feat(life): assemble life service in runtime"
+```
+
+---
+
+### Task 7B: Add an Owned Graceful Desktop Shutdown
+
+**Files:**
+- Modify: `main.py`
+- Modify: `app/src-tauri/src/sidecar.rs`
+- Test: `tests/test_owned_runtime_shutdown.py`
+- Test: `app/src-tauri/src/sidecar.rs` inline Rust tests
+
+**Interfaces:**
+- Consumes: per-process `JAVIS_SIDECAR_OWNERSHIP`, FastAPI lifespan, Tauri-owned child PID.
+- Produces: loopback-only `POST /api/runtime/shutdown`, finite graceful wait, force-kill fallback.
+
+- [ ] **Step 1: Write failing ownership and lifecycle tests**
+
+Python tests prove missing/wrong tokens return 403 without closing runtime, the correct constant-time token comparison schedules server exit only after `runtime.aclose()` completes, and the endpoint is unavailable to non-loopback clients. Inject the shutdown callback; tests must not terminate the pytest process.
+
+Rust tests use an injected HTTP requester and child handle to prove this order:
+
+```text
+POST loopback shutdown with ownership token
+→ wait up to 5 seconds for owned child exit
+→ if exited: clear ownership without kill
+→ if request/timeout fails: kill and wait
+```
+
+- [ ] **Step 2: Run and verify red**
+
+```powershell
+& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_owned_runtime_shutdown.py -q
+Push-Location app/src-tauri
+try { cargo test sidecar --quiet } finally { Pop-Location }
+```
+
+- [ ] **Step 3: Implement the protected handshake**
+
+`main.py` reads the ownership token once at process start, compares with `hmac.compare_digest()`, rejects an empty configured token, and accepts only loopback peers. The endpoint sets a shutdown-requested flag; the ASGI server exits through its normal lifespan so `runtime.aclose()` and LifeService clean checkpoint run exactly once.
+
+Tauri must pass a real user-data root in `JAVIS_DATA_ROOT`—the app data directory or the user's explicit configured directory—not the packaged code `root`. `stop_owned()` copies the token/PID without holding the mutex across HTTP/wait operations, requests graceful shutdown, polls the owned child for at most 5 seconds, and only then uses `kill()` as a fallback. It never sends the token to any non-loopback address and never stops an attached, unowned backend.
+
+- [ ] **Step 4: Run Python, Rust and shutdown regressions**
+
+```powershell
+& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_owned_runtime_shutdown.py tests/test_life_lineage.py tests/test_life_service.py -q
+Push-Location app/src-tauri
+try { cargo test --quiet } finally { Pop-Location }
+```
+
+- [ ] **Step 5: Commit the shutdown boundary**
+
+```powershell
+git add main.py app/src-tauri/src/sidecar.rs tests/test_owned_runtime_shutdown.py
+git commit -m "fix(runtime): checkpoint before owned sidecar exit"
 ```
 
 ---
@@ -749,6 +1166,16 @@ async def test_conversation_lifecycle_reaches_runtime_bus_without_private_text(r
     assert "private user sentence" not in json.dumps(
         [event.payload for event in lifecycle]
     )
+    accepted = lifecycle[0]
+    canonical = runtime.conversation_store.events_after("session-1", sequence=0)
+    canonical_accepted = next(event for event in canonical if event["type"] == "request.accepted")
+    assert accepted.payload["source_event_id"] == canonical_accepted["event_id"]
+    assert accepted.payload["source_sequence"] == canonical_accepted["sequence"]
+    assert accepted.payload["source_sequence_domain"] == "conversation_store:session-1"
+    assert accepted.payload["session_id"] == "session-1"
+    assert accepted.payload["request_id"] == "request-1"
+    assert accepted.payload["correlation_id"] == "request-1"
+    assert accepted.payload["interaction_mode"] == "live"
 ```
 
 - [ ] **Step 2: Run and verify red**
@@ -763,7 +1190,11 @@ async def test_conversation_lifecycle_reaches_runtime_bus_without_private_text(r
 
 `subscribed_sessions()` returns an immutable tuple of normalized session IDs. It does not expose subscriber queues.
 
-Add a private `_publish_runtime_observation()` called by `_publish()` only after the ConversationStore append succeeds. It publishes the same event type on the injected runtime EventBus for this closed allowlist: `request.accepted`, `request.cancellation_pending`, `request.completed`, `request.cancelled`, `request.failed`, `activity.understanding`, validated `activity.*` states and `approval.required`. The projection contains only normalized `session_id`, `request_id`, `interaction_mode`, activity code, tool name, success boolean and bounded diagnostic code. It must drop user text, `response.delta`, model output, tool params/data, approval params and free-form private detail. `life.snapshot` and `life.expression` are outbound system events and must not loop back into the runtime observation bridge.
+Add a private `_publish_runtime_observation()` called by `_publish()` only after the ConversationStore append succeeds. It publishes the same event type on the injected runtime EventBus for this closed allowlist: `request.accepted`, `request.cancellation_pending`, `request.completed`, `request.cancelled`, `request.failed`, `activity.understanding`, validated `activity.*` states and `approval.required`.
+
+Every bridge payload preserves the canonical conversation `event_id` as `source_event_id`, its session sequence as `source_sequence`, `source_sequence_domain="conversation_store:<session_id>"`, normalized `session_id`, `request_id`, `correlation_id=request_id` and the request's `interaction_mode`. Activity code, tool name, success boolean and bounded diagnostic code may be added when allowlisted. The EventBus's own event ID/sequence remain a separate transport domain and never replace these source fields.
+
+The bridge must drop user text, `response.delta`, model output, tool params/data, approval params and free-form private detail. `life.snapshot` and `life.expression` are outbound system events and must not loop back into the runtime observation bridge.
 
 - [ ] **Step 4: Wire main without adding write routes**
 
