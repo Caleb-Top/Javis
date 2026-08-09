@@ -430,6 +430,19 @@ class CandidateManifestContractTests(unittest.TestCase):
 
 
 class ReleaseGateContractTests(unittest.TestCase):
+    def test_release_source_ignores_local_dependencies_and_generated_artifacts(self):
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for path in (
+            ".hermes/",
+            ".superpowers/",
+            "artifacts/",
+            "models/",
+            "tools/cvu_data/",
+            "tools/python-runtime-3.11/",
+            "tools/yolo/",
+        ):
+            self.assertIn(path, ignored)
+
     def test_release_gate_uses_external_cache_and_test_only_tauri_resources(self):
         from scripts.javis_release_gate import GateCheck, _subprocess_runner
 
