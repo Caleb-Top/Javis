@@ -3,10 +3,15 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from scripts.app_build_preflight import _shared_tool_root
+from scripts.javis_release_version import load_version_contract
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
 TAURI = APP / "src-tauri"
+CURRENT_VERSION = load_version_contract(ROOT)["version"]
+DEPENDENCY_ROOT = _shared_tool_root(ROOT)
 
 
 class AppReleaseContinuityTests(unittest.TestCase):
@@ -15,11 +20,11 @@ class AppReleaseContinuityTests(unittest.TestCase):
         tauri = json.loads((TAURI / "tauri.conf.json").read_text(encoding="utf-8"))
         cargo = tomllib.loads((TAURI / "Cargo.toml").read_text(encoding="utf-8"))
 
-        self.assertEqual(package["version"], "3.0.0")
-        self.assertEqual(tauri["version"], "3.0.0")
-        self.assertEqual(cargo["package"]["version"], "3.0.0")
+        self.assertEqual(package["version"], CURRENT_VERSION)
+        self.assertEqual(tauri["version"], CURRENT_VERSION)
+        self.assertEqual(cargo["package"]["version"], CURRENT_VERSION)
         self.assertTrue(
-            (ROOT / "artifacts/Javis-v1.0.0-archive/Javis_1.0.0_x64-setup.exe").is_file()
+            (DEPENDENCY_ROOT / "artifacts/Javis-v1.0.0-archive/Javis_1.0.0_x64-setup.exe").is_file()
         )
 
     def test_windows_test_bundle_is_enabled_with_existing_icon(self):

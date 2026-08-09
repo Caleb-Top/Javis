@@ -62,6 +62,23 @@ $PayloadWork = Join-Path $BuildTemp "payloads"
 if ([IO.Path]::GetFullPath($JavisRoot).Substring(0, 2).ToUpperInvariant() -ne "G:") {
     throw "Javis development and build root must stay on G:."
 }
+
+if ($SkipBundle -or $SkipRuntime -or $SkipDesktopBuild -or $SkipAddonBuild -or $SkipInstallVerification) {
+    throw "Release mode does not permit skip switches; use a separate development command."
+}
+
+$ReleaseGatePython = Join-Path $JavisRoot "venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $ReleaseGatePython -PathType Leaf)) {
+    throw "Release gate Python with pytest is missing: $ReleaseGatePython"
+}
+$ReleaseGateReport = Join-Path $JavisRoot "tmp\release-gate-report.json"
+& $ReleaseGatePython -B (Join-Path $JavisRoot "scripts\javis_release_gate.py") `
+    --root $JavisRoot `
+    --report $ReleaseGateReport
+if ($LASTEXITCODE -ne 0) {
+    throw "Required release gate failed; packaging is forbidden. Report: $ReleaseGateReport"
+}
+
 foreach ($path in @($BuildTemp, $ArtifactDir, $MainInstaller, $PayloadWork)) {
     if ([IO.Path]::GetFullPath($path).Substring(0, 2).ToUpperInvariant() -ne "G:") {
         throw "Build path escaped G:: $path"
@@ -269,7 +286,10 @@ $HashFile = Join-Path $ArtifactDir "SHA256SUMS.txt"
 & $JavisPython (Join-Path $JavisRoot "scripts\finalize_javis_release.py") `
     --artifact-dir $ArtifactDir `
     --runtime-manifest (Join-Path $JavisResources "javis-runtime-manifest.json") `
-    --release-manifest (Join-Path $JavisRoot "app\release.manifest.json") | Out-Null
+    --release-manifest (Join-Path $JavisRoot "app\release.manifest.json") `
+    --runtime-archive $JavisRuntimeArchive `
+    --gate-report $ReleaseGateReport `
+    --root $JavisRoot | Out-Null
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $HashFile)) {
     throw "Final release hash and manifest validation failed."
 }

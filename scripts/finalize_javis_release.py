@@ -7,6 +7,15 @@ import json
 import shutil
 from pathlib import Path
 
+try:
+    from scripts.javis_candidate_manifest import build_candidate_manifest, validate_candidate_manifest
+    from scripts.javis_release_gate import source_tree_head, validate_release_gate_report
+    from scripts.javis_release_version import load_version_contract, release_artifact_names
+except ModuleNotFoundError:
+    from javis_candidate_manifest import build_candidate_manifest, validate_candidate_manifest
+    from javis_release_gate import source_tree_head, validate_release_gate_report
+    from javis_release_version import load_version_contract, release_artifact_names
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -21,6 +30,9 @@ def main() -> int:
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--runtime-manifest", type=Path, required=True)
     parser.add_argument("--release-manifest", type=Path, required=True)
+    parser.add_argument("--runtime-archive", type=Path, required=True)
+    parser.add_argument("--gate-report", type=Path, required=True)
+    parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
 
     artifact = args.artifact_dir.resolve()
@@ -92,6 +104,36 @@ def main() -> int:
     }
     if summary["runtime_test"] != "PASS" or summary["installation_test"] != "PASS":
         raise ValueError("release test reports are not PASS")
+    contract = load_version_contract(args.root)
+    gate_report = json.loads(args.gate_report.read_text(encoding="utf-8"))
+    head = source_tree_head(args.root)
+    gate_errors = validate_release_gate_report(
+        gate_report,
+        expected_version=contract["version"],
+        expected_commit=head,
+    )
+    if gate_errors:
+        raise ValueError("release gate report is invalid: " + "; ".join(gate_errors))
+    candidate = build_candidate_manifest(
+        version=contract["version"],
+        runtime_archive=args.runtime_archive,
+        package=setup,
+        gate_report=gate_report,
+    )
+    candidate_errors = validate_candidate_manifest(candidate)
+    if candidate_errors:
+        raise ValueError("candidate manifest is invalid: " + "; ".join(candidate_errors))
+    if candidate["package_sha256"] != hashes[setup.name]:
+        raise ValueError("candidate package hash diverged during finalization")
+    runtime_metadata = json.loads(args.runtime_manifest.read_text(encoding="utf-8"))
+    expected_runtime_hash = str(runtime_metadata.get("archive", {}).get("sha256") or "").lower()
+    if candidate["runtime_sha256"] != expected_runtime_hash:
+        raise ValueError("candidate runtime hash does not match runtime manifest")
+    candidate_path = artifact / release_artifact_names(contract["version"])["candidate_manifest"]
+    candidate_temp = candidate_path.with_suffix(candidate_path.suffix + ".tmp")
+    candidate_temp.write_text(json.dumps(candidate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    candidate_temp.replace(candidate_path)
+    hashes[candidate_path.name] = sha256(candidate_path)
     (artifact / "Javis-v3.0.0-Release.manifest.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )

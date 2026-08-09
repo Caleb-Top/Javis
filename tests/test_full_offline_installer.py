@@ -4,8 +4,14 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from scripts.app_build_preflight import _shared_tool_root
+from scripts.javis_release_version import load_version_contract, release_artifact_names
+
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_VERSION = load_version_contract(ROOT)["version"]
+CURRENT_ARTIFACTS = release_artifact_names(CURRENT_VERSION)
+DEPENDENCY_ROOT = _shared_tool_root(ROOT)
 
 
 class FullOfflineInstallerTests(unittest.TestCase):
@@ -90,8 +96,8 @@ class FullOfflineInstallerTests(unittest.TestCase):
             self.assertEqual(Path(layout[key]).drive.upper(), "G:", key)
         for key in ("delivery_dir", "delivery_installer", "install_test_root", "install_test_data"):
             self.assertEqual(Path(layout[key]).drive.upper(), "D:", key)
-        self.assertEqual(Path(layout["package_output"]).name, "Javis-v3.0.0-Setup.exe")
-        self.assertEqual(Path(layout["delivery_dir"]).name, "Javis-v3.0.0-User-Test")
+        self.assertEqual(Path(layout["package_output"]).name, CURRENT_ARTIFACTS["package"])
+        self.assertEqual(Path(layout["delivery_dir"]).name, CURRENT_ARTIFACTS["delivery_directory"])
 
     def test_optional_r1_addon_has_a_consent_wizard_manifest(self):
         from scripts.javis_full_installer import build_r1_addon
@@ -129,7 +135,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
     def test_current_r1_model_is_complete_and_large_enough_to_be_real(self):
         from scripts.javis_full_installer import collect_ollama_model
 
-        result = collect_ollama_model(ROOT / "ollama_models" / "models", "deepseek-r1:8b")
+        result = collect_ollama_model(DEPENDENCY_ROOT / "ollama_models" / "models", "deepseek-r1:8b")
 
         self.assertGreater(result["bytes"], 4 * 1024**3)
         self.assertGreaterEqual(len(result["files"]), 3)
@@ -204,7 +210,7 @@ class FullOfflineInstallerTests(unittest.TestCase):
                 [("app-setup.exe", app_setup), ("model.zip", model)],
                 output,
             )
-            setup = output / "Javis-v3.0.0-Setup.exe"
+            setup = output / CURRENT_ARTIFACTS["package"]
             parsed = read_external_bundle_index(setup)
             setup_bytes = setup.read_bytes()
             app_setup_bytes = (output / "payloads" / "app-setup.exe").read_bytes()
@@ -242,9 +248,9 @@ class FullOfflineInstallerTests(unittest.TestCase):
                 work_dir=temp / "payloads",
                 model="deepseek-r1:8b",
             )
-            setup_path = output / "Javis-v3.0.0-Setup.exe"
+            setup_path = output / CURRENT_ARTIFACTS["package"]
             parsed = read_external_bundle_index(setup_path)
-            manifest_path = output / "Javis-v3.0.0-Offline.manifest.json"
+            manifest_path = output / CURRENT_ARTIFACTS["offline_manifest"]
             persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
