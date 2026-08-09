@@ -1240,6 +1240,15 @@ def _download_hf_file(
     current_url = url
     current_headers = dict(headers)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    existing = destination.stat().st_size if destination.is_file() else 0
+    if existing > expected_size:
+        destination.unlink(missing_ok=True)
+        existing = 0
+    if existing == expected_size:
+        _set_progress("running", "Hugging Face GGUF 已下载；正在继续校验", 70, existing, expected_size)
+        return
+    if existing:
+        current_headers["Range"] = f"bytes={existing}-"
     try:
         for redirect_count in range(MAX_HF_REDIRECTS + 1):
             _install_control_checkpoint()
@@ -1264,19 +1273,29 @@ def _download_hf_file(
                         current_headers.pop("Authorization", None)
                     current_url = next_url
                     continue
-                if response.status_code != 200:
+                if response.status_code not in {200, 206}:
                     response.raise_for_status()
                     raise RuntimeError(f"Hugging Face 下载返回意外状态：{response.status_code}")
+                if response.status_code == 206:
+                    if existing <= 0:
+                        raise RuntimeError("Hugging Face 返回了未请求的分段响应")
+                    content_range = str(response.headers.get("Content-Range") or "").strip()
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", content_range)
+                    if not match or int(match.group(1)) != existing:
+                        raise RuntimeError("Hugging Face 断点响应范围与本地检查点不一致")
+                elif existing:
+                    existing = 0
+                    current_headers.pop("Range", None)
                 content_length = str(response.headers.get("Content-Length") or "").strip()
                 if content_length:
                     try:
                         declared_size = int(content_length)
                     except ValueError as error:
                         raise RuntimeError("Hugging Face Content-Length 无效") from error
-                    if declared_size > expected_size or declared_size > MAX_HF_DOWNLOAD_BYTES:
+                    if existing + declared_size > expected_size or declared_size > MAX_HF_DOWNLOAD_BYTES:
                         raise RuntimeError("Hugging Face 下载大小超过已确认计划或安全上限")
-                downloaded = 0
-                with destination.open("xb") as stream:
+                downloaded = existing
+                with destination.open("ab" if existing else "wb") as stream:
                     for chunk in response.iter_content(8 * 1024 * 1024):
                         _install_control_checkpoint()
                         if not chunk:
@@ -1293,12 +1312,14 @@ def _download_hf_file(
                             expected_size,
                         )
                 if downloaded != expected_size:
-                    raise RuntimeError("Hugging Face 下载大小校验失败")
+                    raise requests.ConnectionError("Hugging Face 下载提前结束；已保留断点")
                 return
             finally:
                 response.close()
         raise RuntimeError("Hugging Face 下载重定向次数超过上限")
-    except Exception:
+    except requests.RequestException:
+        raise
+    except BaseException:
         destination.unlink(missing_ok=True)
         raise
 
@@ -1329,6 +1350,11 @@ def _download_huggingface(
         raise RuntimeError("所选位置尚未安装 Javis Ollama；请先用 R1 附加包完成运行时安装")
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".javis-model-staging-", dir=target.parent))
+    checkpoint_root = target.parent / ".javis-model-downloads"
+    checkpoint_key = hashlib.sha256(
+        f"{repo_id}\n{revision}\n{filename}\n{expected_hash}\n{expected_size}".encode("utf-8")
+    ).hexdigest()
+    checkpoint_file = checkpoint_root / f"{checkpoint_key}.part"
     transaction: _OverlayTransaction | None = None
     try:
         staged_tree = staging / "local-ai"
@@ -1340,10 +1366,17 @@ def _download_huggingface(
             f"https://huggingface.co/{quote(repo_id, safe='/')}/resolve/"
             f"{quote(revision, safe='')}/{quote(filename, safe='/')}"
         )
-        _download_hf_file(url, headers, staged_gguf, expected_size)
-        actual_hash = _sha256(staged_gguf)
+        _download_hf_file(url, headers, checkpoint_file, expected_size)
+        actual_hash = _sha256(checkpoint_file)
         if not hmac.compare_digest(actual_hash, expected_hash):
+            checkpoint_file.unlink(missing_ok=True)
             raise RuntimeError("Hugging Face 下载 SHA-256 校验失败")
+        staged_gguf.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(checkpoint_file, staged_gguf)
+        try:
+            checkpoint_root.rmdir()
+        except OSError:
+            pass
         metadata = _inspect_gguf(staged_gguf)
         model_name = _normalize_model_name(str(authorized.get("model") or Path(filename).stem))
         adapter = staged_model_root / "Javis-Modelfile"
@@ -1382,6 +1415,10 @@ def _download_huggingface(
             transaction.rollback()
         else:
             shutil.rmtree(staging, ignore_errors=True)
+        try:
+            checkpoint_root.rmdir()
+        except OSError:
+            pass
         raise
 
 

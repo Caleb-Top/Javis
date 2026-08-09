@@ -871,6 +871,155 @@ class ModelInstallerTests(unittest.TestCase):
             self.assertFalse((target / "local-ai" / "huggingface" / "owner--model" / "model.gguf").exists())
             self.assertEqual(list(target.parent.glob(".javis-model-staging-*")), [])
 
+    def test_huggingface_download_resumes_a_partial_file_with_http_range(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            destination = root / "model.gguf.part"
+            destination.write_bytes(b"first-")
+            response = self._response(
+                status=206,
+                body=b"second",
+                headers={
+                    "Content-Length": "6",
+                    "Content-Range": "bytes 6-11/12",
+                    "ETag": '"fixed-etag"',
+                },
+            )
+            with (
+                patch.object(model_installer.requests, "get", return_value=response) as get,
+                patch.object(
+                    model_installer.socket,
+                    "getaddrinfo",
+                    return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+                ),
+            ):
+                model_installer._download_hf_file(
+                    "https://huggingface.co/owner/model/resolve/fixed/model.gguf",
+                    {},
+                    destination,
+                    12,
+                )
+
+            self.assertEqual(destination.read_bytes(), b"first-second")
+            sent_headers = get.call_args.kwargs["headers"]
+            self.assertEqual(sent_headers["Range"], "bytes=6-")
+            self.assertEqual(model_installer.get_model_install_progress()["completed_bytes"], 12)
+
+    def test_huggingface_stream_interruption_keeps_only_a_resumable_part(self):
+        class InterruptedResponse:
+            status_code = 200
+            headers = {"Content-Length": "12", "ETag": '"fixed-etag"'}
+
+            def iter_content(self, _chunk_size):
+                yield b"first-"
+                raise model_installer.requests.ConnectionError("connection dropped")
+
+            def close(self):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root_value:
+            destination = Path(root_value) / "model.gguf.part"
+            with (
+                patch.object(model_installer.requests, "get", return_value=InterruptedResponse()),
+                patch.object(
+                    model_installer.socket,
+                    "getaddrinfo",
+                    return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+                ),
+            ):
+                with self.assertRaises(model_installer.requests.ConnectionError):
+                    model_installer._download_hf_file(
+                        "https://huggingface.co/owner/model/resolve/fixed/model.gguf",
+                        {},
+                        destination,
+                        12,
+                    )
+
+            self.assertEqual(destination.read_bytes(), b"first-")
+
+    def test_huggingface_install_resumes_from_a_stable_checkpoint(self):
+        class InterruptedResponse:
+            status_code = 200
+
+            def __init__(self, first: bytes, total: int):
+                self.first = first
+                self.headers = {"Content-Length": str(total), "ETag": '"fixed-etag"'}
+
+            def iter_content(self, _chunk_size):
+                yield self.first
+                raise model_installer.requests.ConnectionError("connection dropped")
+
+            def close(self):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            target = root / "selected"
+            runtime = target / "local-ai" / "ollama" / "ollama.exe"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"runtime")
+            gguf_bytes = self._gguf(root / "download.gguf").read_bytes()
+            split = max(1, len(gguf_bytes) // 2)
+            info = {
+                "siblings": [{
+                    "rfilename": "model.gguf",
+                    "size": len(gguf_bytes),
+                    "lfs": {
+                        "size": len(gguf_bytes),
+                        "sha256": hashlib.sha256(gguf_bytes).hexdigest(),
+                    },
+                }],
+                "sha": "fixed-revision",
+            }
+            values = {
+                "source": "huggingface",
+                "repo_id": "owner/model",
+                "filename": "model.gguf",
+                "install_dir": str(target),
+                "targets": [],
+            }
+            with patch.object(model_installer, "_huggingface_model_info", return_value=info):
+                plan = model_installer.plan_model_install(values)
+                resumed_response = self._response(
+                    status=206,
+                    body=gguf_bytes[split:],
+                    headers={
+                        "Content-Length": str(len(gguf_bytes) - split),
+                        "Content-Range": f"bytes {split}-{len(gguf_bytes) - 1}/{len(gguf_bytes)}",
+                    },
+                )
+                with (
+                    patch.object(model_installer, "_data_root", return_value=root / "data"),
+                    patch.object(
+                        model_installer.requests,
+                        "get",
+                        side_effect=[InterruptedResponse(gguf_bytes[:split], len(gguf_bytes)), resumed_response],
+                    ) as get,
+                    patch.object(
+                        model_installer.socket,
+                        "getaddrinfo",
+                        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+                    ),
+                    patch.object(model_installer, "_adapt_gguf_with_ollama"),
+                ):
+                    with self.assertRaises(model_installer.requests.ConnectionError):
+                        model_installer.install_model(self._approved(plan, values))
+                    checkpoints = list((target.parent / ".javis-model-downloads").glob("*.part"))
+                    self.assertEqual(len(checkpoints), 1)
+                    self.assertEqual(checkpoints[0].read_bytes(), gguf_bytes[:split])
+
+                    result = model_installer.install_model(self._approved(plan, values))
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(get.call_args_list[1].kwargs["headers"]["Range"], f"bytes={split}-")
+            self.assertFalse((target.parent / ".javis-model-downloads").exists())
+
     def test_huggingface_configuration_failure_rolls_back_download_model_store_and_pointer(self):
         with tempfile.TemporaryDirectory() as root_value:
             root = Path(root_value)
