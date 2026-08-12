@@ -1,9 +1,9 @@
 # Javis Life OS 综合执行计划
 
-**日期：** 2026-08-12  
-**状态：** 执行中  
-**实现基线：** `eeebcbd`  
-**实现分支：** `codex/javis-life-os-l0-foundation-20260812`  
+**日期：** 2026-08-12
+**状态：** 执行中
+**实现基线：** `eeebcbd`
+**实现分支：** `codex/javis-life-os-l0-foundation-20260812`
 **实现工作区：** `G:\Javis\.codex\worktrees\javis-life-os-l0-foundation-20260812`
 
 ## 1. 目的与依据
