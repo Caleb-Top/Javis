@@ -1,5 +1,7 @@
 # Javis L0-A Life Kernel Implementation Plan
 
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，并通过 770 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立独立于模型、界面和 Agent 的 Javis 身份宪章、实例谱系、最小生命周期、完整生命事件信封、异步事件日志与只读生命快照。
@@ -158,7 +160,7 @@ json.dumps(
 
 `PrivacyClass` 的完整值为 `public_surface/local_internal/user_private/secret/biometric/restricted_system`；`RetentionClass` 为 `ephemeral/session/operational/continuity/memory_candidate/audit/never_persist`。`LifeCycleState` 与设计规格的八种状态完全一致。Expression 三个枚举必须与 L0-B 的九种 base state、四种 gaze 和三种 voice activity 完全一致。
 
-- [ ] **Step 1: Write the failing contract tests**
+- [x] **Step 1: Write the failing contract tests**
 
 ```python
 import dataclasses
@@ -344,7 +346,7 @@ def test_expression_rejects_out_of_range_values(field, value):
         ExpressionIntent.from_dict(kwargs)
 ```
 
-- [ ] **Step 2: Run the contract test and verify red**
+- [x] **Step 2: Run the contract test and verify red**
 
 Run:
 
@@ -354,7 +356,7 @@ Run:
 
 Expected: collection fails because `core.life.contracts` does not exist.
 
-- [ ] **Step 3: Implement the immutable data contracts**
+- [x] **Step 3: Implement the immutable data contracts**
 
 Use frozen dataclasses, string enums and recursive freeze/thaw helpers. `IdentityConstitution.create_default()` must calculate `content_hash` from canonical JSON excluding the hash field itself. Every `from_dict()` enforces the frozen wire rules above. `LifeEvent` must enforce `secret → never_persist` unless payload contains only a dedicated secure-store reference.
 
@@ -388,11 +390,11 @@ class ExpressionIntent:
     explanation_code: str
 ```
 
-- [ ] **Step 4: Run the focused tests**
+- [x] **Step 4: Run the focused tests**
 
 Run the Task 1 command. Expected: all tests pass.
 
-- [ ] **Step 5: Commit the contract boundary**
+- [x] **Step 5: Commit the contract boundary**
 
 ```powershell
 git add core/life/__init__.py core/life/contracts.py tests/test_life_contracts.py
@@ -412,7 +414,7 @@ git commit -m "feat(life): define identity and event contracts"
 - Consumes: code `root`, optional explicit `data_root`, environment mapping.
 - Produces: `resolve_data_root(root, *, explicit=None, environ=os.environ)` and the kw-only `create_runtime(..., data_root=None)` contract.
 
-- [ ] **Step 1: Write failing path-precedence and no-code-root-write tests**
+- [x] **Step 1: Write failing path-precedence and no-code-root-write tests**
 
 ```python
 from pathlib import Path
@@ -453,7 +455,7 @@ async def test_explicit_data_root_keeps_runtime_databases_out_of_code_root(tmp_p
         await runtime.aclose()
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_paths.py -q
@@ -461,17 +463,17 @@ async def test_explicit_data_root_keeps_runtime_databases_out_of_code_root(tmp_p
 
 Expected: collection fails because `core.life.paths` and the runtime `data_root` field do not exist.
 
-- [ ] **Step 3: Implement the resolver and migrate runtime-owned stores**
+- [x] **Step 3: Implement the resolver and migrate runtime-owned stores**
 
 `resolve_data_root()` performs no I/O. `create_runtime()` resolves once, stores `JarvisRuntime.data_root`, and uses it for `SkillCatalog`, `AgentRunStore` and `ConversationStore`. It continues to use code `root` for `config.yaml`, source skills and executables. Do not silently catch an invalid explicit data path and fall back to the code root.
 
-- [ ] **Step 4: Run focused and runtime regressions**
+- [x] **Step 4: Run focused and runtime regressions**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_paths.py tests/test_runtime_agent_fusion.py tests/test_conversation_store.py -q
 ```
 
-- [ ] **Step 5: Commit the root boundary**
+- [x] **Step 5: Commit the root boundary**
 
 ```powershell
 git add core/life/paths.py core/runtime.py tests/test_life_paths.py
