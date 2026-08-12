@@ -1,6 +1,6 @@
 # Javis L0-A Life Kernel Implementation Plan
 
-**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，并通过 770 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 和 Task 3 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 792 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -438,8 +438,7 @@ def test_data_root_precedence_is_explicit_then_env_then_compat_default(tmp_path)
     assert resolve_data_root(code, environ={}) == (code / "data").resolve()
 
 
-@pytest.mark.asyncio
-async def test_explicit_data_root_keeps_runtime_databases_out_of_code_root(tmp_path):
+def test_explicit_data_root_keeps_runtime_databases_out_of_code_root(tmp_path):
     code = tmp_path / "readonly-code"
     data = tmp_path / "user-data"
     code.mkdir()
@@ -452,7 +451,7 @@ async def test_explicit_data_root_keeps_runtime_databases_out_of_code_root(tmp_p
         assert (data / "agent_runs" / "runs.sqlite3").exists()
         assert (data / "conversations" / "conversations.sqlite3").exists()
     finally:
-        await runtime.aclose()
+        runtime.close()
 ```
 
 - [x] **Step 2: Run and verify red**
@@ -492,7 +491,7 @@ git commit -m "refactor(runtime): separate code and user data roots"
 - Consumes: `IdentityConstitution` from Task 1 and the base user `data_root` from Task 2.
 - Produces: `IdentityConstitutionStore.load_or_create()`, `load()`, `load_last_verified()`, `write_version(current, *, changes, approved_by)`, `rollback_to_previous(*, approved_by)` and `summary()`.
 
-- [ ] **Step 1: Write failing first-birth, restart, mutation and corruption tests**
+- [x] **Step 1: Write failing first-birth, restart, mutation and corruption tests**
 
 ```python
 def test_first_birth_creates_one_stable_identity(tmp_path):
@@ -510,7 +509,7 @@ def test_corrupt_current_identity_requires_recovery_without_overwrite(tmp_path):
     first = store.load_or_create()
     second = store.write_version(
         first,
-        changes={"persona_invariants": ["quiet", "focused", "measured", "truthful"]},
+        changes={"persona_invariants": ["quiet", "focused", "measured", "truthful", "patient"]},
         approved_by="user",
     )
     store.current_path.write_text("{broken", encoding="utf-8")
@@ -529,7 +528,7 @@ def test_rollback_is_explicit_and_auditable(tmp_path):
     first = store.load_or_create()
     second = store.write_version(
         first,
-        changes={"persona_invariants": ["quiet", "focused", "measured", "truthful"]},
+        changes={"persona_invariants": ["quiet", "focused", "measured", "truthful", "patient"]},
         approved_by="user",
     )
     rolled_back = store.rollback_to_previous(approved_by="user")
@@ -539,13 +538,13 @@ def test_rollback_is_explicit_and_auditable(tmp_path):
     assert store.audit_records()[-1]["action"] == "identity.rollback"
 ```
 
-- [ ] **Step 2: Run tests and verify the missing implementation failure**
+- [x] **Step 2: Run tests and verify the missing implementation failure**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_identity.py -q
 ```
 
-- [ ] **Step 3: Implement atomic storage and version validation**
+- [x] **Step 3: Implement atomic storage and version validation**
 
 `IdentityConstitutionStore` receives the base `data_root` and itself stores files under `<data_root>/life/identity/`:
 
@@ -557,7 +556,7 @@ def test_rollback_is_explicit_and_auditable(tmp_path):
 
 Write to a sibling temporary file, `flush()` and `os.fsync()`, then `os.replace()`. Initial `approved_by` is `built_in_constitution`; later versions require a non-empty explicit approver. Never store model configuration or user secrets.
 
-- [ ] **Step 4: Add rejection tests for model, secret and unapproved fields**
+- [x] **Step 4: Add rejection tests for model, secret and unapproved fields**
 
 ```python
 def test_identity_rejects_runtime_and_secret_fields(tmp_path):
@@ -569,13 +568,13 @@ def test_identity_rejects_runtime_and_secret_fields(tmp_path):
         store.write_version(identity, changes={"persona_invariants": ["quiet"]}, approved_by="")
 ```
 
-- [ ] **Step 5: Run Task 1 and Task 3 tests together**
+- [x] **Step 5: Run Task 1 and Task 3 tests together**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_contracts.py tests/test_life_identity.py -q
 ```
 
-- [ ] **Step 6: Commit identity storage**
+- [x] **Step 6: Commit identity storage**
 
 ```powershell
 git add core/life/identity.py tests/test_life_identity.py
