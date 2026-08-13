@@ -1,6 +1,6 @@
 # Javis L0-A Life Kernel Implementation Plan
 
-**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 6 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 859 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 7 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 879 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -864,7 +864,7 @@ git commit -m "feat(life): classify and map runtime events safely"
 - Consumes: `LifeEvent` and `PrivacyPolicy.index_summary()`.
 - Produces: `LifeEventJournal.start()`, `enqueue()`, `recent()`, `status()`, `flush()`, `stop()`.
 
-- [ ] **Step 1: Write failing persistence, idempotency and slow-I/O tests**
+- [x] **Step 1: Write failing persistence, idempotency and slow-I/O tests**
 
 ```python
 import time
@@ -932,17 +932,17 @@ def test_slow_sqlite_does_not_block_enqueue(tmp_path, monkeypatch):
     journal.stop(timeout=1.0)
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_journal.py -q
 ```
 
-- [ ] **Step 3: Implement schema, worker and priority queue rules**
+- [x] **Step 3: Implement schema, worker and priority queue rules**
 
 Use one daemon worker with explicit `start()`/`stop()` and bounded `queue.Queue`. Construction creates no worker; `enqueue()` is valid before `start()` so overload behavior can be tested deterministically. Create `events` and allowed-summary FTS tables. Critical identity, approval, deletion, recovery and action-result events reserve queue capacity; duplicate surface state events coalesce by `(event_type, correlation_id)`.
 
-- [ ] **Step 4: Add overload and shutdown tests**
+- [x] **Step 4: Add overload and shutdown tests**
 
 ```python
 def test_full_queue_drops_low_value_but_preserves_audit(tmp_path):
@@ -954,7 +954,7 @@ def test_full_queue_drops_low_value_but_preserves_audit(tmp_path):
     assert "audit-1" in journal.pending_event_ids()
 ```
 
-- [ ] **Step 5: Move the existing SessionEventStore off the synchronous wildcard hot path**
+- [x] **Step 5: Move the existing SessionEventStore off the synchronous wildcard hot path**
 
 Change `SessionEventStore.attach(bus)` to enqueue an allowlisted, redacted event record and let one owned worker call the existing SQLite code. Preserve `recent_events()`, memory candidates and evolution candidates. Index only the explicit redacted summary; never index the original full payload.
 
@@ -974,13 +974,13 @@ def test_attached_session_store_does_not_write_sqlite_in_publish_thread(tmp_path
     store.close()
 ```
 
-- [ ] **Step 6: Run journal, adapter and SessionEventStore regressions**
+- [x] **Step 6: Run journal, adapter and SessionEventStore regressions**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_journal.py tests/test_life_event_adapter.py tests/test_session_event_store_async.py tests/test_p0_runtime.py -q
 ```
 
-- [ ] **Step 7: Commit both asynchronous journals**
+- [x] **Step 7: Commit both asynchronous journals**
 
 ```powershell
 git add core/life/journal.py memory/session_db.py tests/test_life_journal.py tests/test_session_event_store_async.py

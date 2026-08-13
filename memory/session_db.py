@@ -3,26 +3,179 @@
 from __future__ import annotations
 
 import json
+import math
+import queue
 import sqlite3
+import threading
+import time
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from core.events import Event, EventBus
+from core.life.contracts import PrivacyClass
+from core.life.privacy import PayloadRejected, PrivacyPolicy
+
+
+_GENERIC_EVENT_FIELDS = frozenset(
+    {
+        "code",
+        "count",
+        "key",
+        "kind",
+        "name",
+        "ok",
+        "state",
+        "status",
+        "step",
+        "summary",
+        "success",
+        "value",
+        "version",
+    }
+)
+_TOOL_EVENT_FIELDS = frozenset(
+    {
+        "category",
+        "confirmed",
+        "duration_ms",
+        "latency_ms",
+        "params",
+        "success",
+        "task",
+        "tool",
+    }
+)
+_SAFE_TOOL_PARAM_FIELDS = frozenset(
+    {
+        "language",
+        "limit",
+        "mode",
+        "model",
+        "query",
+        "selector",
+        "url",
+    }
+)
+_EVENT_FIELDS = {
+    "user.preference": frozenset({"key", "value"}),
+    "permission.changed": frozenset({"permission"}),
+    "runtime.status": frozenset({"status"}),
+    "subsystem.registered": frozenset({"name"}),
+}
+_IGNORED_SESSION_EVENTS = frozenset(
+    {
+        "event_store.registered",
+        "memory.candidate.applied",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _SessionEventRecord:
+    event: Event
+    index_summary: str
 
 
 class SessionEventStore:
     """Persists EventBus events for future memory consolidation."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, capacity: int = 1_024):
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("capacity must be a positive integer")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.capacity = capacity
+        self._privacy = PrivacyPolicy()
+        self._queue: queue.Queue[_SessionEventRecord] = queue.Queue(capacity)
+        self._lock = threading.RLock()
+        self._stop_requested = threading.Event()
+        self._worker: threading.Thread | None = None
+        self._attached_bus_ids: set[int] = set()
+        self._accepting = True
+        self._state = "paused"
+        self._seen_event_ids: set[str] = set()
+        self._accepted = 0
+        self._persisted = 0
+        self._duplicates = 0
+        self._dropped = 0
+        self._write_failures = 0
+        self._last_error: str | None = None
         self._init_db()
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT event_id FROM events").fetchall()
+        self._seen_event_ids.update(str(row["event_id"]) for row in rows)
 
-    def attach(self, bus: EventBus) -> None:
+    def attach(self, bus: EventBus) -> bool:
+        if not isinstance(bus, EventBus):
+            raise TypeError("bus must be an EventBus")
+        with self._lock:
+            if not self._accepting or id(bus) in self._attached_bus_ids:
+                return False
+            self._start_worker_locked()
+            self._attached_bus_ids.add(id(bus))
         bus.subscribe("*", self.record_event)
+        return True
 
-    def record_event(self, event: Event) -> None:
+    def record_event(self, event: Event) -> bool:
+        if not isinstance(event, Event):
+            return False
+        if not self._valid_event_metadata(event):
+            return False
+        if event.type in _IGNORED_SESSION_EVENTS:
+            return False
+        record = self._redact_event(event)
+        with self._lock:
+            if not self._accepting:
+                return False
+            if record is None:
+                self._dropped += 1
+                return False
+            if record.event.id in self._seen_event_ids:
+                self._duplicates += 1
+                return False
+            if self._worker is None:
+                self._start_worker_locked()
+            try:
+                self._queue.put_nowait(record)
+            except queue.Full:
+                self._dropped += 1
+                return False
+            self._seen_event_ids.add(record.event.id)
+            self._accepted += 1
+            return True
+
+    def flush(self, timeout: float = 2.0) -> bool:
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(remaining)
+        return True
+
+    def close(self, timeout: float = 2.0) -> bool:
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            if self._state == "stopped":
+                return True
+            self._accepting = False
+            worker = self._worker
+        flushed = self.flush(timeout=max(0.0, deadline - time.monotonic()))
+        self._stop_requested.set()
+        if worker is not None:
+            worker.join(max(0.0, deadline - time.monotonic()))
+        stopped = worker is None or not worker.is_alive()
+        with self._lock:
+            self._state = "stopped" if flushed and stopped else "degraded"
+        return flushed and stopped
+
+    def _record_event_db(self, record: _SessionEventRecord) -> int:
+        event = record.event
         with closing(self._connect()) as db:
             with db:
                 cursor = db.execute(
@@ -39,16 +192,19 @@ class SessionEventStore:
                         json.dumps(event.payload, ensure_ascii=False, sort_keys=True),
                     ),
                 )
-                if cursor.rowcount:
+                if cursor.rowcount and record.index_summary:
                     self._index_memory_text_db(
                         db,
                         "event",
                         event.id,
-                        f"{event.type} {event.source} {json.dumps(event.payload, ensure_ascii=False, sort_keys=True)}",
+                        record.index_summary,
                         [event.id],
                     )
+                return int(cursor.rowcount)
 
     def recent_events(self, limit: int = 50, event_type: str | None = None) -> list[dict[str, Any]]:
+        if self._state == "running":
+            self.flush(timeout=2.0)
         limit = max(1, min(int(limit), 500))
         params: list[Any] = []
         where = ""
@@ -435,18 +591,170 @@ class SessionEventStore:
                 ).fetchall()
         return [self._recall_row_to_dict(row, query) for row in rows]
 
+    def _start_worker_locked(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        self._stop_requested.clear()
+        self._state = "running"
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="javis-session-event-store",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            if self._stop_requested.is_set() and self._queue.empty():
+                return
+            try:
+                record = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            succeeded = False
+            inserted = 0
+            for attempt in range(3):
+                try:
+                    inserted = int(self._record_event_db(record) or 0)
+                    succeeded = True
+                    break
+                except Exception as exc:
+                    with self._lock:
+                        self._write_failures += 1
+                        self._last_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                    if attempt < 2:
+                        time.sleep(0.01 * (attempt + 1))
+            with self._lock:
+                if succeeded:
+                    self._persisted += inserted
+                else:
+                    self._seen_event_ids.discard(record.event.id)
+                    self._dropped += 1
+            self._queue.task_done()
+
+    def _redact_event(self, event: Event) -> _SessionEventRecord | None:
+        event_type = event.type if type(event.type) is str else "invalid.event"
+        privacy, _ = self._privacy.classify(event_type, event.payload)
+        if privacy in {PrivacyClass.SECRET, PrivacyClass.BIOMETRIC}:
+            return None
+        allowed_fields = self._allowed_fields(event_type)
+        try:
+            payload = self._privacy.redact_allowlisted(
+                event.payload,
+                allowed_fields=allowed_fields,
+            ).payload
+        except (PayloadRejected, TypeError, ValueError):
+            payload = {"diagnostic": "payload_rejected"}
+        if event_type.startswith("tool.") and isinstance(payload.get("params"), dict):
+            payload["params"] = {
+                key: value
+                for key, value in payload["params"].items()
+                if key in _SAFE_TOOL_PARAM_FIELDS
+                and (value is None or type(value) in {bool, int, float, str})
+            }
+        elif event_type not in _EVENT_FIELDS:
+            payload = {
+                key: value
+                for key, value in payload.items()
+                if value is None or type(value) in {bool, int, float, str}
+            }
+        redacted = Event(
+            id=event.id,
+            type=event_type,
+            payload=payload,
+            source=event.source,
+            timestamp=event.timestamp,
+            schema_version=event.schema_version,
+            correlation_id=event.correlation_id,
+            causation_id=event.causation_id,
+            sequence=event.sequence,
+        )
+        return _SessionEventRecord(
+            event=redacted,
+            index_summary=self._index_summary(redacted),
+        )
+
+    @staticmethod
+    def _allowed_fields(event_type: str) -> frozenset[str]:
+        if event_type.startswith("tool."):
+            return _TOOL_EVENT_FIELDS
+        return _EVENT_FIELDS.get(event_type, _GENERIC_EVENT_FIELDS)
+
+    @staticmethod
+    def _valid_event_metadata(event: Event) -> bool:
+        text_fields = (
+            (event.id, 256),
+            (event.type, 128),
+            (event.source, 256),
+        )
+        for value, limit in text_fields:
+            if type(value) is not str or not value or len(value) > limit:
+                return False
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                return False
+            if any(ord(character) < 32 for character in value):
+                return False
+        if isinstance(event.timestamp, bool) or not isinstance(
+            event.timestamp,
+            (int, float),
+        ):
+            return False
+        if not math.isfinite(float(event.timestamp)):
+            return False
+        return type(event.sequence) is int and event.sequence >= 0
+
+    @staticmethod
+    def _index_summary(event: Event) -> str:
+        payload = event.payload
+        if event.type == "user.preference":
+            return " ".join(
+                str(value)
+                for value in (
+                    event.type,
+                    payload.get("key", ""),
+                    payload.get("value", ""),
+                )
+                if value != ""
+            )[:768]
+        if event.type.startswith("tool."):
+            return " ".join(
+                str(value)
+                for value in (
+                    event.type,
+                    payload.get("tool", ""),
+                    payload.get("task", ""),
+                    payload.get("success", ""),
+                )
+                if value != ""
+            )[:768]
+        if event.type.startswith("perception."):
+            return f"{event.type} {payload.get('summary', '')}"[:768].strip()
+        return f"{event.type} {event.source}"[:512]
+
     def status(self) -> dict[str, Any]:
+        if self._state == "running":
+            self.flush(timeout=0.5)
         with closing(self._connect()) as db:
             events = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             candidates = db.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0]
             evolution_candidates = db.execute("SELECT COUNT(*) FROM evolution_candidates").fetchone()[0]
-        return {
-            "state": "running",
-            "path": str(self.path),
-            "events": int(events),
-            "candidates": int(candidates),
-            "evolution_candidates": int(evolution_candidates),
-        }
+        with self._lock:
+            return {
+                "state": self._state,
+                "path": str(self.path),
+                "events": int(events),
+                "candidates": int(candidates),
+                "evolution_candidates": int(evolution_candidates),
+                "pending": self._queue.qsize(),
+                "accepted": self._accepted,
+                "persisted": self._persisted,
+                "duplicates": self._duplicates,
+                "dropped": self._dropped,
+                "write_failures": self._write_failures,
+                "last_error": self._last_error,
+            }
 
     def _init_db(self) -> None:
         with closing(self._connect()) as db:
