@@ -219,6 +219,7 @@ class P0RuntimeTests(unittest.TestCase):
 
             event = bus.publish("perception.event", {"summary": "OCR read: Build"}, source="perception")
             rows = store.recent_events(limit=5)
+            store.close()
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["event_id"], event.id)
@@ -238,6 +239,7 @@ class P0RuntimeTests(unittest.TestCase):
 
             rows = store.recent_events(limit=5)
             status = runtime.get_runtime_status()
+            runtime.close()
 
         self.assertEqual(rows[-1]["type"], "memory.write")
         self.assertEqual(rows[-1]["payload"]["key"], "preference")
@@ -257,6 +259,7 @@ class P0RuntimeTests(unittest.TestCase):
 
             result = EventMemoryConsolidator(store).consolidate(limit=20)
             candidates = store.memory_candidates(kind="semantic")
+            store.close()
 
         self.assertEqual(result["semantic"], 1)
         self.assertEqual(candidates[0]["kind"], "semantic")
@@ -280,6 +283,7 @@ class P0RuntimeTests(unittest.TestCase):
             updated = store.update_memory_candidate_status(candidate_id, "active")
             active = store.memory_candidates(kind="semantic", status="active")
             rejected = store.update_memory_candidate_status(candidate_id, "unknown")
+            store.close()
 
         self.assertTrue(updated)
         self.assertEqual(active[0]["candidate_id"], candidate_id)
@@ -298,6 +302,7 @@ class P0RuntimeTests(unittest.TestCase):
                 {"key": "theme", "value": "holographic dark"},
                 source="unit",
             )
+            self.assertTrue(store.flush())
             store.upsert_memory_candidate(
                 kind="semantic",
                 content="User preference: theme = holographic dark",
@@ -306,6 +311,7 @@ class P0RuntimeTests(unittest.TestCase):
             )
 
             results = store.recall("theme holographic", limit=5)
+            store.close()
 
         self.assertGreaterEqual(len(results), 2)
         self.assertEqual(results[0]["query"], "theme holographic")
@@ -441,6 +447,7 @@ class P0RuntimeTests(unittest.TestCase):
             runtime.register_event_store(store)
 
             result = ActiveMemoryApplier(runtime).apply(limit=20)
+            runtime.close()
 
         self.assertEqual(result["semantic"], 1)
         self.assertTrue(any(
@@ -463,6 +470,7 @@ class P0RuntimeTests(unittest.TestCase):
 
             result = EventMemoryConsolidator(store, min_tool_successes=3).consolidate(limit=20)
             candidates = store.memory_candidates(kind="procedural")
+            store.close()
 
         self.assertEqual(result["procedural"], 1)
         self.assertEqual(candidates[0]["kind"], "procedural")
@@ -497,6 +505,7 @@ class P0RuntimeTests(unittest.TestCase):
             result = ProceduralMemoryMaterializer(store, Path(td) / "procedural").materialize(limit=20)
             workflow_files = list((Path(td) / "procedural").glob("wft_*.json"))
             workflow = json.loads(workflow_files[0].read_text(encoding="utf-8"))
+            store.close()
 
         self.assertEqual(result["procedural"], 1)
         self.assertEqual(workflow["type"], "workflow")
@@ -535,6 +544,7 @@ class P0RuntimeTests(unittest.TestCase):
             second = materializer.materialize(limit=20)
             files = sorted(output_dir.glob("wft_*.json"))
             workflow = json.loads(files[0].read_text(encoding="utf-8"))
+            store.close()
 
         self.assertEqual(first["procedural"], 1)
         self.assertEqual(second["procedural"], 0)
@@ -596,6 +606,7 @@ class P0RuntimeTests(unittest.TestCase):
 
             result = EvolutionCandidateEngine(store, min_successes=4).review(limit=20)
             candidates = store.evolution_candidates(kind="workflow")
+            store.close()
 
         self.assertEqual(result["workflow"], 1)
         self.assertEqual(candidates[0]["status"], "candidate")
@@ -622,6 +633,7 @@ class P0RuntimeTests(unittest.TestCase):
             validated = store.validate_evolution_candidate(candidate_id)
             staged = store.update_evolution_candidate_status(candidate_id, "staged")
             active = store.update_evolution_candidate_status(candidate_id, "active")
+            store.close()
 
         self.assertFalse(direct_active)
         self.assertFalse(direct_staged)
@@ -800,6 +812,7 @@ class P0RuntimeTests(unittest.TestCase):
             runtime.register_subsystem(CommandTaskRunner(Path.cwd()))
 
             report = BlueprintAuditor(runtime).coverage()
+            runtime.close()
 
         system_ids = {item["id"] for item in report["systems"]}
         memory = next(item for item in report["systems"] if item["id"] == "memory")
