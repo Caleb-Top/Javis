@@ -1,6 +1,6 @@
 # Javis L0-A Life Kernel Implementation Plan
 
-**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 5 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 836 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 6 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 859 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -793,7 +793,7 @@ git commit -m "feat(life): add minimal lifecycle and expression projection"
 - Consumes: existing `core.events.Event`, current identity/instance IDs.
 - Produces: `PrivacyPolicy.classify()`, `redact_payload()`, `index_summary()` and `LifeEventAdapter.map(event)`.
 
-- [ ] **Step 1: Write failing mapping and privacy tests**
+- [x] **Step 1: Write failing mapping and privacy tests**
 
 ```python
 def test_tool_payload_mapping_preserves_existing_fields_without_inventing_task():
@@ -823,27 +823,27 @@ def test_secrets_are_redacted_and_never_indexed():
     assert policy.index_summary("provider.configured", payload) == ""
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_event_adapter.py -q
 ```
 
-- [ ] **Step 3: Implement allowlisted mapping rules**
+- [x] **Step 3: Implement allowlisted mapping rules**
 
 Create an explicit map for runtime, subsystem, thinking, tool, approval, agent_run, memory and request/activity event families. Unknown events either become `life.observation.unknown` with a redacted summary or are ignored according to retention policy. Never copy a payload wholesale before classification.
 
-- [ ] **Step 4: Add regression tests for malformed and oversized payloads**
+- [x] **Step 4: Add regression tests for malformed and oversized payloads**
 
 Limit string values, nesting depth, collection length and total serialized bytes. Cyclic or unserializable objects produce a diagnostic event without raising into EventBus.
 
-- [ ] **Step 5: Run focused tests and existing typed-event tests**
+- [x] **Step 5: Run focused tests and existing typed-event tests**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_event_adapter.py tests/test_typed_events.py -q
 ```
 
-- [ ] **Step 6: Commit mapping and privacy**
+- [x] **Step 6: Commit mapping and privacy**
 
 ```powershell
 git add core/life/privacy.py core/life/event_adapter.py tests/test_life_event_adapter.py

@@ -59,7 +59,8 @@
 | L0-A Task 3 身份宪章存储 | 已完成 | `IdentityConstitutionStore`；792 tests + 28 subtests |
 | L0-A Task 4 实例谱系与连续性 | 已完成 | 启动顺序、异常关闭、复制分叉及恢复已验证 |
 | L0-A Task 5 生命周期与表达投影 | 已完成 | 状态转换、终态保护、九态表达和过期语义已验证 |
-| L0-A Task 6-12 | 未开始 | 必须按依赖顺序推进 |
+| L0-A Task 6 隐私分类与事件映射 | 已完成 | 27 项聚焦测试；完整回归 859 tests + 28 subtests |
+| L0-A Task 7-12 | 未开始 | 必须按依赖顺序推进 |
 | L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 等待 L0-A Task 11 |
 | L1 产品实现 | 未开始 | 依赖 L0-A 纵切与表达桥 |
 
@@ -176,7 +177,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 | WP-A03 | 身份宪章存储 | A02 | 完成；版本链、原子写、显式回滚、审计与只读恢复已验证 |
 | WP-A04 | 实例谱系和连续性 | A03 | 完成；810 tests + 28 subtests |
 | WP-A05 | 生命周期与表达投影 | A03、A04 | 完成；836 tests + 28 subtests |
-| WP-A06 | 隐私映射 | A05 | 待执行 |
+| WP-A06 | 隐私映射 | A05 | 完成；27 focused tests；859 tests + 28 subtests |
 | WP-A07 | 异步 Journal | A06 | 待执行 |
 | WP-A08 | LifeService 装配 | A07 | 待执行 |
 | WP-A09 | 所有权关闭 | A08 | 待执行 |
