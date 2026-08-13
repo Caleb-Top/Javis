@@ -15,6 +15,30 @@ from core.events import EventBus
 
 Runner = Callable[["ConversationRequest", CancellationToken], AsyncIterator[dict[str, Any]]]
 
+_SYSTEM_EVENT_TYPES = frozenset({"life.snapshot", "life.expression"})
+_RUNTIME_REQUEST_EVENTS = frozenset(
+    {
+        "request.accepted",
+        "request.cancellation_pending",
+        "request.completed",
+        "request.cancelled",
+        "request.failed",
+    }
+)
+_RUNTIME_ACTIVITY_EVENTS = frozenset(
+    {
+        "activity.understanding",
+        "activity.thinking",
+        "activity.tool_started",
+        "activity.tool_completed",
+        "activity.blocked",
+        "activity.error",
+    }
+)
+_RUNTIME_OBSERVATION_EVENTS = (
+    _RUNTIME_REQUEST_EVENTS | _RUNTIME_ACTIVITY_EVENTS | {"approval.required"}
+)
+
 
 @dataclass(frozen=True)
 class ConversationRequest:
@@ -93,6 +117,25 @@ class ConversationHub:
         async with self._lock:
             self._subscribers.setdefault(session, set()).add(queue)
         return ConversationSubscription(self, session, queue, replay)
+
+    def subscribed_sessions(self) -> tuple[str, ...]:
+        """Return session identifiers without exposing subscriber queues."""
+
+        return tuple(sorted(self._subscribers))
+
+    async def publish_system_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if event_type not in _SYSTEM_EVENT_TYPES:
+            raise ConversationStoreError(
+                f"system conversation event is not registered: {event_type}"
+            )
+        if not isinstance(payload, dict):
+            raise ConversationStoreError("system event payload must be an object")
+        return await self._publish(session_id, "", event_type, payload)
 
     async def submit(
         self,
@@ -474,6 +517,7 @@ class ConversationHub:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         event = self.store.append_event(session_id, request_id, event_type, payload)
+        self._publish_runtime_observation(event)
         for queue in tuple(self._subscribers.get(session_id, ())):
             if queue.full():
                 try:
@@ -482,6 +526,59 @@ class ConversationHub:
                     pass
             queue.put_nowait(dict(event))
         return event
+
+    def _publish_runtime_observation(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if self.event_bus is None or event_type not in _RUNTIME_OBSERVATION_EVENTS:
+            return
+        session_id = str(event.get("session_id") or "")
+        request_id = str(event.get("request_id") or "")
+        if not session_id or not request_id:
+            return
+        canonical_payload = event.get("payload")
+        if not isinstance(canonical_payload, dict):
+            canonical_payload = {}
+        active = self._request_index.get(request_id)
+        interaction_mode = (
+            active.request.interaction_mode
+            if active is not None
+            else str(canonical_payload.get("interaction_mode") or "")[:32]
+        )
+        observation: dict[str, Any] = {
+            "source_event_id": str(event.get("event_id") or ""),
+            "source_sequence": int(event.get("sequence") or 0),
+            "source_sequence_domain": f"conversation_store:{session_id}",
+            "session_id": session_id,
+            "request_id": request_id,
+            "correlation_id": request_id,
+            "interaction_mode": interaction_mode,
+        }
+        if event_type in {
+            "activity.tool_started",
+            "activity.tool_completed",
+            "approval.required",
+        }:
+            tool = str(canonical_payload.get("tool") or "").strip()[:128]
+            if tool:
+                observation["tool"] = tool
+        if event_type == "activity.tool_completed":
+            observation["success"] = bool(canonical_payload.get("success", False))
+        if event_type == "approval.required":
+            approval_id = str(canonical_payload.get("approval_id") or "").strip()[:256]
+            if approval_id:
+                observation["approval_id"] = approval_id
+        diagnostic_code = str(canonical_payload.get("code") or "").strip()[:80]
+        if diagnostic_code and all(
+            char.isalnum() or char in "._-" for char in diagnostic_code
+        ):
+            observation["code"] = diagnostic_code
+        self.event_bus.publish(
+            event_type,
+            observation,
+            source="conversation",
+            correlation_id=request_id,
+            causation_id=observation["source_event_id"],
+        )
 
     async def _detach(self, session_id: str, queue: asyncio.Queue) -> None:
         async with self._lock:

@@ -409,7 +409,7 @@ class LifeEventAdapter:
         if type(event.sequence) is not int or event.sequence < 0:
             raise ValueError("invalid sequence")
         timestamp = self._timestamp(event.timestamp)
-        return {
+        metadata = {
             "source_event_id": source_event_id,
             "source": source,
             "timestamp": timestamp,
@@ -419,6 +419,39 @@ class LifeEventAdapter:
             "session_id": None,
             "request_id": None,
         }
+        if source == "conversation" and isinstance(event.payload, Mapping):
+            bridge_source_id = self._safe_optional_id(
+                event.payload.get("source_event_id"),
+                "source_event_id",
+            )
+            bridge_session_id = self._safe_optional_id(
+                event.payload.get("session_id"),
+                "session_id",
+            )
+            bridge_sequence = event.payload.get("source_sequence")
+            bridge_domain = event.payload.get("source_sequence_domain")
+            expected_domain = (
+                f"conversation_store:{bridge_session_id}"
+                if bridge_session_id is not None
+                else None
+            )
+            if (
+                bridge_source_id is not None
+                and causation_id == bridge_source_id
+                and type(bridge_sequence) is int
+                and bridge_sequence >= 0
+                and bridge_domain == expected_domain
+            ):
+                metadata.update(
+                    {
+                        "source_event_id": bridge_source_id,
+                        "source_sequence": bridge_sequence,
+                        "source_sequence_domain": bridge_domain,
+                        "transport_event_id": source_event_id,
+                        "transport_sequence": event.sequence,
+                    }
+                )
+        return metadata
 
     def _build_event(
         self,
@@ -437,6 +470,18 @@ class LifeEventAdapter:
         event_id = hashlib.sha256(
             f"life:{self.instance_id}:{stable_source}:{life_type}".encode("utf-8")
         ).hexdigest()
+        provenance = {
+            "mapper": "life_event_adapter_v1",
+            "source_event_type": self._bounded_type(source_type),
+        }
+        for field in (
+            "source_sequence",
+            "source_sequence_domain",
+            "transport_event_id",
+            "transport_sequence",
+        ):
+            if field in metadata:
+                provenance[field] = metadata[field]
         return LifeEvent(
             schema_version=1,
             event_id=event_id,
@@ -456,10 +501,7 @@ class LifeEventAdapter:
             privacy_class=privacy,
             retention_class=retention,
             confidence=confidence,
-            provenance={
-                "mapper": "life_event_adapter_v1",
-                "source_event_type": self._bounded_type(source_type),
-            },
+            provenance=provenance,
             redaction_summary=redaction_summary,
         )
 

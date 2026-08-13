@@ -1123,7 +1123,7 @@ git commit -m "fix(runtime): checkpoint before owned sidecar exit"
 - Consumes: `LifeService`, active ConversationHub subscriptions and the runtime EventBus injected in Task 8.
 - Produces: `GET /api/life/identity`, `/api/life/snapshot`, `/api/life/lineage`, `/api/life/events`; `ConversationHub.publish_system_event()`, `subscribed_sessions()`, allowlisted conversation observations; `life.snapshot` and `life.expression` session events.
 
-- [ ] **Step 1: Write failing API authorization and redaction tests**
+- [x] **Step 1: Write failing API authorization and redaction tests**
 
 ```python
 def test_life_snapshot_api_is_read_only_and_redacted(client):
@@ -1185,13 +1185,13 @@ async def test_conversation_lifecycle_reaches_runtime_bus_without_private_text(r
     assert accepted.payload["interaction_mode"] == "live"
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_api.py -q
 ```
 
-- [ ] **Step 3: Implement the router and public hub method**
+- [x] **Step 3: Implement the router and public hub method**
 
 `publish_system_event(session_id, event_type, payload)` must allow only `life.snapshot`, `life.expression` and future explicitly registered system event types. It calls the existing durable `_publish` path with an empty request ID and must not expose arbitrary event injection to HTTP clients.
 
@@ -1203,17 +1203,19 @@ Every bridge payload preserves the canonical conversation `event_id` as `source_
 
 The bridge must drop user text, `response.delta`, model output, tool params/data, approval params and free-form private detail. `life.snapshot` and `life.expression` are outbound system events and must not loop back into the runtime observation bridge.
 
-- [ ] **Step 4: Wire main without adding write routes**
+- [x] **Step 4: Wire main without adding write routes**
 
 Create the router from `runtime.life`, include it once, and register a LifeService listener that schedules snapshot/expression publication only for `subscribed_sessions()`. Capture the FastAPI event loop during startup and use `loop.call_soon_threadsafe()` before `asyncio.create_task()` so EventBus publications from worker threads never call asyncio APIs directly. Coalesce multiple state changes per event-loop tick.
 
-- [ ] **Step 5: Run API and conversation integration tests**
+- [x] **Step 5: Run API and conversation integration tests**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_api.py tests/test_conversation_life_event_bridge.py tests/test_unified_conversation_integration.py tests/test_conversation_watchdog_harness.py -q
 ```
 
-- [ ] **Step 6: Commit API and session push**
+Evidence: 68 related API, conversation, watchdog, LifeService, adapter and asynchronous event-store tests passed. The complete Python suite passed with 908 tests and 28 subtests. Canonical conversation event IDs and session sequence domains remain distinct from EventBus transport IDs/sequences in persisted provenance.
+
+- [x] **Step 6: Commit API and session push**
 
 ```powershell
 git add core/life/api.py core/conversation_hub.py main.py tests/test_life_api.py tests/test_conversation_life_event_bridge.py

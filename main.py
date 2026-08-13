@@ -213,17 +213,23 @@ def _discover():
     return SKILL_LIST
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body,Header,HTTPException,Request
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
+from core.life.api import LifeSessionPublisher, create_life_router
 from utils.app_cors import install_desktop_cors
+
+
+life_session_publisher = LifeSessionPublisher(runtime.life, runtime.conversation_hub)
 
 
 @asynccontextmanager
 async def _app_lifespan(_app):
     warmup_task = None
+    life_session_publisher.start(asyncio.get_running_loop())
     if _STARTUP_SIDE_EFFECTS:
         warmup_task = asyncio.create_task(asyncio.to_thread(preload_model))
     try:
         yield
     finally:
+        await life_session_publisher.stop()
         await asyncio.to_thread(native_playback_manager.stop)
         await asyncio.to_thread(continuous_capture_manager.stop)
         if warmup_task is not None and warmup_task.done():
@@ -236,6 +242,7 @@ async def _app_lifespan(_app):
 
 app=FastAPI(title="JARVIS",version="2.0",lifespan=_app_lifespan)
 install_desktop_cors(app)
+app.include_router(create_life_router(runtime.life))
 
 @app.get("/")
 async def root():return FileResponse(str(ROOT/"web"/"index.html"))
