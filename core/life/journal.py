@@ -83,6 +83,12 @@ class LifeEventJournal:
         self._last_error: str | None = None
         self._init_db()
         self._seen_event_ids.update(self._load_event_ids())
+        self._cursor = self._load_cursor()
+
+    @property
+    def cursor(self) -> int:
+        with self._lock:
+            return self._cursor
 
     def start(self) -> bool:
         with self._lock:
@@ -248,6 +254,7 @@ class LifeEventJournal:
             with self._lock:
                 if succeeded:
                     self._persisted += inserted
+                    self._cursor += inserted
                 else:
                     self._dropped_write_failure += len(batch)
                     self._state = "degraded"
@@ -427,6 +434,11 @@ class LifeEventJournal:
         with closing(self._connect()) as db:
             rows = db.execute("SELECT event_id FROM events").fetchall()
         return {str(row["event_id"]) for row in rows}
+
+    def _load_cursor(self) -> int:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT COALESCE(MAX(id), 0) AS cursor FROM events").fetchone()
+        return int(row["cursor"])
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5.0)

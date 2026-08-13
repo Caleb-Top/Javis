@@ -28,6 +28,7 @@ from core.life.contracts import (
     canonical_content_hash,
     canonical_json_bytes,
 )
+from core.life.service import LifeService
 
 
 IDENTITY_WIRE = {
@@ -224,6 +225,7 @@ def test_package_exports_the_frozen_contract_surface():
         "ExpressionIntent",
         "canonical_json_bytes",
         "canonical_content_hash",
+        "LifeService",
     }
     assert set(life.__all__) == expected
     for name in expected:

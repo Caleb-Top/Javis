@@ -24,8 +24,30 @@ class _Rule:
     retention: RetentionClass
 
 
-_TOOL_FIELDS = frozenset({"tool", "category", "success", "duration_ms", "confirmed"})
+_TOOL_FIELDS = frozenset(
+    {
+        "tool",
+        "category",
+        "success",
+        "duration_ms",
+        "confirmed",
+        "session_id",
+        "request_id",
+    }
+)
 _RULES: dict[str, _Rule] = {
+    "life.identity.created": _Rule(
+        "life.identity.created",
+        frozenset({"version"}),
+        PrivacyClass.LOCAL_INTERNAL,
+        RetentionClass.CONTINUITY,
+    ),
+    "life.instance.created": _Rule(
+        "life.instance.created",
+        frozenset({"generation", "fork_pending_review"}),
+        PrivacyClass.LOCAL_INTERNAL,
+        RetentionClass.CONTINUITY,
+    ),
     "runtime.created": _Rule(
         "life.runtime.created",
         frozenset(),
@@ -82,21 +104,71 @@ _RULES: dict[str, _Rule] = {
     ),
     "approval.requested": _Rule(
         "life.approval.requested",
-        frozenset({"approval_id", "tool"}),
+        frozenset({"approval_id", "tool", "session_id", "request_id"}),
         PrivacyClass.RESTRICTED_SYSTEM,
         RetentionClass.AUDIT,
     ),
     "approval.required": _Rule(
         "life.approval.required",
-        frozenset({"approval_id", "tool"}),
+        frozenset({"approval_id", "tool", "session_id", "request_id"}),
         PrivacyClass.RESTRICTED_SYSTEM,
         RetentionClass.AUDIT,
     ),
     "approval.resolved": _Rule(
         "life.approval.resolved",
-        frozenset({"approval_id", "confirmed"}),
+        frozenset(
+            {"approval_id", "confirmed", "session_id", "request_id"}
+        ),
         PrivacyClass.RESTRICTED_SYSTEM,
         RetentionClass.AUDIT,
+    ),
+    "health.degraded": _Rule(
+        "life.health.degraded",
+        frozenset({"components", "reason_codes", "degradation_level"}),
+        PrivacyClass.LOCAL_INTERNAL,
+        RetentionClass.OPERATIONAL,
+    ),
+    "health.recovered": _Rule(
+        "life.health.recovered",
+        frozenset(),
+        PrivacyClass.LOCAL_INTERNAL,
+        RetentionClass.OPERATIONAL,
+    ),
+    "life.recovery.required": _Rule(
+        "life.recovery.required",
+        frozenset({"reason_codes"}),
+        PrivacyClass.LOCAL_INTERNAL,
+        RetentionClass.CONTINUITY,
+    ),
+    "client.offline": _Rule(
+        "life.client.offline",
+        frozenset(),
+        PrivacyClass.PUBLIC_SURFACE,
+        RetentionClass.EPHEMERAL,
+    ),
+    "client.reconnected": _Rule(
+        "life.client.reconnected",
+        frozenset(),
+        PrivacyClass.PUBLIC_SURFACE,
+        RetentionClass.EPHEMERAL,
+    ),
+    "voice.listening": _Rule(
+        "life.voice.listening",
+        frozenset({"session_id", "request_id"}),
+        PrivacyClass.USER_PRIVATE,
+        RetentionClass.SESSION,
+    ),
+    "voice.speaking": _Rule(
+        "life.voice.speaking",
+        frozenset({"session_id", "request_id"}),
+        PrivacyClass.USER_PRIVATE,
+        RetentionClass.SESSION,
+    ),
+    "response.speaking": _Rule(
+        "life.response.speaking",
+        frozenset({"session_id", "request_id"}),
+        PrivacyClass.USER_PRIVATE,
+        RetentionClass.SESSION,
     ),
 }
 

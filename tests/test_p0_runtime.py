@@ -1147,7 +1147,7 @@ class P0RuntimeTests(unittest.TestCase):
         status = runtime.get_runtime_status()
 
         self.assertTrue(status["ok"])
-        self.assertEqual(status["subsystems"], ["demo"])
+        self.assertEqual(status["subsystems"], ["demo", "life"])
         self.assertGreaterEqual(status["event_count"], 2)
         self.assertIn("runtime.created", status["recent_events"])
         self.assertIn("subsystem.registered", status["recent_events"])

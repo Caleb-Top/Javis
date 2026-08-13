@@ -10,7 +10,9 @@ import importlib
 import json
 import logging
 import os
+import platform
 import pkgutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
 from core.life.paths import resolve_data_root
+from core.life.service import LifeService
 from core.middleware import MiddlewarePipeline
 from core.skill_catalog import SkillCatalog, SkillGovernanceError
 from core.subsystem import SubsystemStatus
@@ -55,6 +58,7 @@ class JarvisRuntime:
     agent_runs: AgentRunStore
     conversation_store: ConversationStore
     conversation_hub: ConversationHub
+    life: LifeService
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -477,6 +481,19 @@ def create_runtime(
         conversation_store,
         agent_runs,
         resolve_confirmation=agent.resolve_confirm,
+        event_bus=event_bus,
+    )
+    environment_fingerprint = "|".join(
+        (
+            os.name,
+            sys.platform,
+            platform.machine().casefold() or "unknown-machine",
+            str(root),
+        )
+    )
+    life = LifeService(
+        resolved_data_root,
+        environment_fingerprint=environment_fingerprint,
     )
 
     runtime = JarvisRuntime(
@@ -496,6 +513,7 @@ def create_runtime(
         agent_runs=agent_runs,
         conversation_store=conversation_store,
         conversation_hub=conversation_hub,
+        life=life,
     )
     runtime.register_always_on_tools()
     _discover_external_skill_imports(runtime)
@@ -508,6 +526,7 @@ def create_runtime(
         runtime.discover_skills()
         runtime.load_skill("全功能")
 
+    runtime.register_subsystem(life)
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     return runtime
 

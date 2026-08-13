@@ -1,6 +1,6 @@
 # Javis L0-A Life Kernel Implementation Plan
 
-**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 7 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 879 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 8 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 893 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -1001,7 +1001,7 @@ git commit -m "feat(life): persist life events off the hot path"
 - Consumes: stores, state machine, adapter, journal, expression projector and Runtime EventBus.
 - Produces: `LifeService.start(runtime)`, `stop()`, `snapshot()`, `identity_summary()`, `lineage_summary()`, `recent_events()` and `subscribe(listener)`.
 
-- [ ] **Step 1: Write the failing runtime assembly test**
+- [x] **Step 1: Write the failing runtime assembly test**
 
 ```python
 def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path):
@@ -1020,29 +1020,29 @@ def test_runtime_registers_one_life_service_with_no_startup_model_calls(tmp_path
     assert runtime.life.status()["journal_state"] == "stopped"
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_service.py -q
 ```
 
-- [ ] **Step 3: Implement service start/stop and runtime field**
+- [x] **Step 3: Implement service start/stop and runtime field**
 
 Add `life: LifeService` to `JarvisRuntime`. During `create_runtime()`, instantiate it with the base `runtime.data_root` from Task 2; never pass `data_root / "life"`. Register it after the existing stores exist and before `runtime.created` is published. Pass the existing runtime `EventBus` into `ConversationHub`; do not create a second bus.
 
 Startup performs `assess_previous_run()` before `mark_started(current_boot_id)`. `start()` installs exactly one wildcard handler. Because the existing EventBus has no unsubscribe, `stop()` atomically disables that handler before flushing; repeated `start()` is rejected and stopped callbacks become no-ops. It then writes the clean checkpoint and joins the journal worker. EventBus API expansion is not required for L0-A.
 
-- [ ] **Step 4: Prove no synchronous SQLite in the handler**
+- [x] **Step 4: Prove no synchronous SQLite in the handler**
 
 Patch `journal._write_batch` to block and publish `tool.completed`; assert `EventBus.publish()` returns before the block is released.
 
-- [ ] **Step 5: Run runtime regressions**
+- [x] **Step 5: Run runtime regressions**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_service.py tests/test_runtime_agent_fusion.py tests/test_p0_runtime.py -q
 ```
 
-- [ ] **Step 6: Commit runtime assembly**
+- [x] **Step 6: Commit runtime assembly**
 
 ```powershell
 git add core/life/service.py core/runtime.py core/conversation_hub.py tests/test_life_service.py

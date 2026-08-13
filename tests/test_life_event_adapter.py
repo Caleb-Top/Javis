@@ -174,6 +174,28 @@ def test_runtime_and_event_store_paths_are_removed_before_mapping():
             "life.activity.tool_completed",
             RetentionClass.SESSION,
         ),
+        (
+            "health.degraded",
+            {
+                "components": ["journal"],
+                "reason_codes": ["write_failed"],
+                "degradation_level": 1,
+            },
+            "life.health.degraded",
+            RetentionClass.OPERATIONAL,
+        ),
+        (
+            "life.recovery.required",
+            {"reason_codes": ["unclean_shutdown"]},
+            "life.recovery.required",
+            RetentionClass.CONTINUITY,
+        ),
+        (
+            "voice.listening",
+            {"session_id": "s1", "request_id": "r1", "text": "private"},
+            "life.voice.listening",
+            RetentionClass.SESSION,
+        ),
     ],
 )
 def test_real_event_families_have_explicit_allowlisted_mappings(

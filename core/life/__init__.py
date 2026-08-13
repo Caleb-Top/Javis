@@ -20,6 +20,7 @@ from .contracts import (
     canonical_content_hash,
     canonical_json_bytes,
 )
+from .service import LifeService
 
 __all__ = [
     "LifeCycleState",
@@ -40,4 +41,5 @@ __all__ = [
     "ExpressionIntent",
     "canonical_json_bytes",
     "canonical_content_hash",
+    "LifeService",
 ]

@@ -10,6 +10,7 @@ from core.agent_run_recorder import AgentRunRecorder
 from core.agent_runs import AgentRunStore
 from core.cancellation import CancellationToken, RequestCancelled
 from core.conversation_store import ConversationStore, ConversationStoreError
+from core.events import EventBus
 
 
 Runner = Callable[["ConversationRequest", CancellationToken], AsyncIterator[dict[str, Any]]]
@@ -66,9 +67,11 @@ class ConversationHub:
         run_store: AgentRunStore,
         *,
         resolve_confirmation: Callable[[bool], None] | None = None,
+        event_bus: EventBus | None = None,
     ):
         self.store = store
         self.run_store = run_store
+        self.event_bus = event_bus
         self._resolve_confirmation = resolve_confirmation
         self._lock = asyncio.Lock()
         self._execution_lock = asyncio.Lock()

@@ -61,7 +61,8 @@
 | L0-A Task 5 生命周期与表达投影 | 已完成 | 状态转换、终态保护、九态表达和过期语义已验证 |
 | L0-A Task 6 隐私分类与事件映射 | 已完成 | 27 项聚焦测试；完整回归 859 tests + 28 subtests |
 | L0-A Task 7 异步生命日志 | 已完成 | 20 项聚焦测试；完整回归 879 tests + 28 subtests |
-| L0-A Task 8-12 | 未开始 | 必须按依赖顺序推进 |
+| L0-A Task 8 LifeService 装配 | 已完成 | 11 项聚焦测试；完整回归 893 tests + 28 subtests |
+| L0-A Task 9-12 | 未开始 | 必须按依赖顺序推进 |
 | L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 等待 L0-A Task 11 |
 | L1 产品实现 | 未开始 | 依赖 L0-A 纵切与表达桥 |
 
@@ -180,7 +181,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 | WP-A05 | 生命周期与表达投影 | A03、A04 | 完成；836 tests + 28 subtests |
 | WP-A06 | 隐私映射 | A05 | 完成；27 focused tests；859 tests + 28 subtests |
 | WP-A07 | 异步 Journal | A06 | 完成；142 related tests；879 tests + 28 subtests |
-| WP-A08 | LifeService 装配 | A07 | 待执行 |
+| WP-A08 | LifeService 装配 | A07 | 完成；116 related tests；893 tests + 28 subtests |
 | WP-A09 | 所有权关闭 | A08 | 待执行 |
 | WP-A10 | 只读 API/推送 | A08、A09 | 待执行 |
 | WP-A11 | TypeScript 兼容桥 | A10 | 待执行 |
