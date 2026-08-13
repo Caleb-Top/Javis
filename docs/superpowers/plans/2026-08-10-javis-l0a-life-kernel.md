@@ -1,6 +1,6 @@
 # Javis L0-A Life Kernel Implementation Plan
 
-**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 和 Task 3 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 792 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 4 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 810 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -593,7 +593,7 @@ git commit -m "feat(life): persist versioned identity constitution"
 - Consumes: `identity_id`, data root, deterministic environment fingerprint, injected clock and ID factory.
 - Produces: `InstanceLineageStore.load_or_create()`, `assess_previous_run(instance_id)`, `mark_started(instance_id, *, boot_id)`, `mark_clean_shutdown(instance_id, *, boot_id, last_event_cursor, active_request_id)` and `fork_for_environment()`.
 
-- [ ] **Step 1: Write the failing lineage tests**
+- [x] **Step 1: Write the failing lineage tests**
 
 ```python
 def test_restart_keeps_instance_but_copy_creates_reviewable_fork(tmp_path):
@@ -621,6 +621,7 @@ def test_unclean_shutdown_expires_temporary_authority(tmp_path):
         now=lambda: 10.0,
     )
     instance = store.load_or_create("identity-one", "env-a")
+    store.assess_previous_run(instance.instance_id)
     store.mark_started(instance.instance_id, boot_id="boot-one")
     restarted = InstanceLineageStore(
         tmp_path,
@@ -641,6 +642,7 @@ def test_assessment_happens_before_current_boot_is_marked_started(tmp_path):
         now=lambda: 10.0,
     )
     instance = store.load_or_create("identity-one", "env-a")
+    store.assess_previous_run(instance.instance_id)
     store.mark_started(instance.instance_id, boot_id="boot-one")
     store.mark_clean_shutdown(
         instance.instance_id,
@@ -654,13 +656,13 @@ def test_assessment_happens_before_current_boot_is_marked_started(tmp_path):
     store.mark_started(instance.instance_id, boot_id="boot-two")
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_lineage.py -q
 ```
 
-- [ ] **Step 3: Implement `InstanceLineageStore`**
+- [x] **Step 3: Implement `InstanceLineageStore`**
 
 `InstanceLineageStore` receives the base `data_root`; it uses JSON records under `<data_root>/life/instances/` and one atomic `active.json` pointer. The environment fingerprint must be injected; the store must not collect hardware serials itself. A clean shutdown checkpoint records the last life event cursor and active request ID but never stores temporary approval tokens.
 
@@ -680,13 +682,13 @@ store.mark_clean_shutdown(
 
 Never call `mark_started()` before assessing the previous boot. `mark_clean_shutdown()` must reject a stale or mismatched boot ID.
 
-- [ ] **Step 4: Run lineage and identity tests**
+- [x] **Step 4: Run lineage and identity tests**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_identity.py tests/test_life_lineage.py -q
 ```
 
-- [ ] **Step 5: Commit lineage storage**
+- [x] **Step 5: Commit lineage storage**
 
 ```powershell
 git add core/life/lineage.py tests/test_life_lineage.py
