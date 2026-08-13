@@ -1,6 +1,7 @@
 ﻿"""JARVIS Web 版入口"""
-import os,sys,json,logging,asyncio
+import os,sys,json,logging,asyncio,hmac,inspect,ipaddress
 from contextlib import asynccontextmanager
+from typing import Any, Callable
 sys.excepthook=lambda t,v,tb:print(f"FATAL: {t.__name__}: {v}",file=sys.stderr,flush=True)
 from pathlib import Path
 ROOT=Path(__file__).parent;sys.path.insert(0,str(ROOT))
@@ -15,6 +16,72 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 _TEST_MODE = _env_flag("JAVIS_TEST_MODE")
 _STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_SIDE_EFFECTS")
+_SIDECAR_OWNERSHIP_TOKEN = os.environ.get("JAVIS_SIDECAR_OWNERSHIP", "")
+
+
+class OwnedRuntimeShutdown:
+    """Authorize one owned, loopback-only graceful runtime shutdown."""
+
+    def __init__(
+        self,
+        *,
+        configured_token: str,
+        close_runtime: Callable[[], Any],
+    ) -> None:
+        self._configured_token = str(configured_token or "")
+        self._close_runtime = close_runtime
+        self._exit_callback: Callable[[], Any] | None = None
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._exit_requested = False
+
+    def set_exit_callback(self, callback: Callable[[], Any]) -> None:
+        if not callable(callback):
+            raise TypeError("shutdown callback must be callable")
+        self._exit_callback = callback
+
+    async def close_once(self) -> bool:
+        async with self._lock:
+            return await self._close_once_locked()
+
+    async def request(self, peer_host: str, presented_token: str) -> bool:
+        if not self._authorized(peer_host, presented_token):
+            raise PermissionError("owned runtime shutdown is forbidden")
+        async with self._lock:
+            if self._exit_requested:
+                return False
+            callback = self._exit_callback
+            if callback is None:
+                raise RuntimeError("owned runtime shutdown callback is unavailable")
+            await self._close_once_locked()
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+            self._exit_requested = True
+            return True
+
+    async def _close_once_locked(self) -> bool:
+        if self._closed:
+            return False
+        result = self._close_runtime()
+        if inspect.isawaitable(result):
+            await result
+        self._closed = True
+        return True
+
+    def _authorized(self, peer_host: str, presented_token: str) -> bool:
+        if not self._configured_token:
+            return False
+        try:
+            host = str(peer_host or "").split("%", 1)[0]
+            if not ipaddress.ip_address(host).is_loopback:
+                return False
+        except ValueError:
+            return False
+        return hmac.compare_digest(
+            self._configured_token.encode("utf-8"),
+            str(presented_token or "").encode("utf-8"),
+        )
 
 from core.runtime import create_runtime
 from core.agent_run_recorder import AgentRunRecorder
@@ -120,6 +187,16 @@ voice_diagnostics_collector = VoiceDiagnosticsCollector(
     tts_getter=get_tts_diagnostics,
 )
 
+
+async def _close_runtime_once() -> None:
+    await runtime.aclose()
+
+
+owned_runtime_shutdown = OwnedRuntimeShutdown(
+    configured_token=_SIDECAR_OWNERSHIP_TOKEN,
+    close_runtime=_close_runtime_once,
+)
+
 def _register_always_on_tools():
     runtime.register_always_on_tools()
 
@@ -134,7 +211,7 @@ def _discover():
     global SKILL_LIST
     SKILL_LIST = runtime.discover_skills()
     return SKILL_LIST
-from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body
+from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body,Header,HTTPException,Request
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
 from utils.app_cors import install_desktop_cors
 
@@ -154,7 +231,7 @@ async def _app_lifespan(_app):
                 warmup_task.result()
             except Exception as error:
                 logger.warning("STT model warmup failed: %s", error)
-        await runtime.aclose()
+        await owned_runtime_shutdown.close_once()
 
 
 app=FastAPI(title="JARVIS",version="2.0",lifespan=_app_lifespan)
@@ -165,6 +242,25 @@ async def root():return FileResponse(str(ROOT/"web"/"index.html"))
 
 @app.get("/favicon.ico")
 async def favicon():return FileResponse(str(ROOT/"web"/"favicon.ico"))
+
+
+@app.post("/api/runtime/shutdown")
+async def api_runtime_shutdown(
+    request: Request,
+    x_javis_sidecar_ownership: str = Header(default=""),
+):
+    peer_host = request.client.host if request.client is not None else ""
+    try:
+        await owned_runtime_shutdown.request(
+            peer_host,
+            x_javis_sidecar_ownership,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="forbidden") from exc
+    except Exception as exc:
+        logger.error("Owned runtime shutdown failed: %s", exc)
+        raise HTTPException(status_code=503, detail="shutdown unavailable") from exc
+    return {"ok": True, "state": "shutdown_requested"}
 
 def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
     safe = Path(path or "").name
@@ -1705,4 +1801,9 @@ if __name__=="__main__":
     from voice.tts import _trim_cache
     try:_trim_cache()
     except Exception:pass
-    uvicorn.run(app,host=h,port=p,log_level="info")
+    config = uvicorn.Config(app, host=h, port=p, log_level="info")
+    server = uvicorn.Server(config)
+    owned_runtime_shutdown.set_exit_callback(
+        lambda: setattr(server, "should_exit", True)
+    )
+    server.run()

@@ -62,7 +62,8 @@
 | L0-A Task 6 隐私分类与事件映射 | 已完成 | 27 项聚焦测试；完整回归 859 tests + 28 subtests |
 | L0-A Task 7 异步生命日志 | 已完成 | 20 项聚焦测试；完整回归 879 tests + 28 subtests |
 | L0-A Task 8 LifeService 装配 | 已完成 | 11 项聚焦测试；完整回归 893 tests + 28 subtests |
-| L0-A Task 9-12 | 未开始 | 必须按依赖顺序推进 |
+| L0-A Task 9 所有权关闭 | 已完成 | 36 项定向 Python 测试；完整回归 900 tests + 28 subtests；Rust 12 tests |
+| L0-A Task 10-12 | 未开始 | 必须按依赖顺序推进 |
 | L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 等待 L0-A Task 11 |
 | L1 产品实现 | 未开始 | 依赖 L0-A 纵切与表达桥 |
 
@@ -182,7 +183,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 | WP-A06 | 隐私映射 | A05 | 完成；27 focused tests；859 tests + 28 subtests |
 | WP-A07 | 异步 Journal | A06 | 完成；142 related tests；879 tests + 28 subtests |
 | WP-A08 | LifeService 装配 | A07 | 完成；116 related tests；893 tests + 28 subtests |
-| WP-A09 | 所有权关闭 | A08 | 待执行 |
+| WP-A09 | 所有权关闭 | A08 | 完成；loopback 令牌握手、干净检查点、5 秒等待、强杀兜底及用户数据根已验证；900 tests + 28 subtests；Rust 12 tests |
 | WP-A10 | 只读 API/推送 | A08、A09 | 待执行 |
 | WP-A11 | TypeScript 兼容桥 | A10 | 待执行 |
 | WP-A12 | 恢复/隐私/发布合同 | A11 | 待执行 |
@@ -216,13 +217,17 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 
 ## 10. 当前迭代
 
-本轮只交付基础工作，不修改正式源码区，不构建安装包：
+本轮持续在隔离工作区交付 L0-A，不修改正式源码区，不构建安装包：
 
 - [x] 从 `eeebcbd` 创建独立 `codex/` 工作区。
 - [x] 复验 Task 1 契约。
 - [x] 建立综合执行计划和区域规则。
 - [x] 完成 WP-A02 数据根隔离的红绿测试。
 - [x] 运行 WP-A02 定向回归、完整 Python 回归和 `git diff --check`。
+- [x] 完成 WP-A03 至 WP-A08 的身份、连续性、生命周期、隐私映射、异步 Journal 和 LifeService 装配。
+- [x] 完成 WP-A09 所有权关闭；完整 Python 回归 900 tests + 28 subtests，完整 Rust/Tauri 回归 12 tests。
+- [ ] 执行 WP-A10 只读 API 与统一会话推送。
+- [ ] 执行 WP-A11 TypeScript 兼容桥与 WP-A12 发布合同。
 - [x] 核验 `G:\Javis` 主工作树内容状态与本轮开始时一致。
 
 ## 11. 完成定义

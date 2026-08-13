@@ -1056,14 +1056,15 @@ git commit -m "feat(life): assemble life service in runtime"
 **Files:**
 - Modify: `main.py`
 - Modify: `app/src-tauri/src/sidecar.rs`
+- Create: `app/src-tauri/src/sidecar_shutdown.rs`
 - Test: `tests/test_owned_runtime_shutdown.py`
-- Test: `app/src-tauri/src/sidecar.rs` inline Rust tests
+- Test: `app/src-tauri/src/sidecar_shutdown.rs` inline Rust tests
 
 **Interfaces:**
 - Consumes: per-process `JAVIS_SIDECAR_OWNERSHIP`, FastAPI lifespan, Tauri-owned child PID.
 - Produces: loopback-only `POST /api/runtime/shutdown`, finite graceful wait, force-kill fallback.
 
-- [ ] **Step 1: Write failing ownership and lifecycle tests**
+- [x] **Step 1: Write failing ownership and lifecycle tests**
 
 Python tests prove missing/wrong tokens return 403 without closing runtime, the correct constant-time token comparison schedules server exit only after `runtime.aclose()` completes, and the endpoint is unavailable to non-loopback clients. Inject the shutdown callback; tests must not terminate the pytest process.
 
@@ -1076,7 +1077,7 @@ POST loopback shutdown with ownership token
 → if request/timeout fails: kill and wait
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_owned_runtime_shutdown.py -q
@@ -1084,13 +1085,13 @@ Push-Location app/src-tauri
 try { cargo test sidecar --quiet } finally { Pop-Location }
 ```
 
-- [ ] **Step 3: Implement the protected handshake**
+- [x] **Step 3: Implement the protected handshake**
 
 `main.py` reads the ownership token once at process start, compares with `hmac.compare_digest()`, rejects an empty configured token, and accepts only loopback peers. The endpoint sets a shutdown-requested flag; the ASGI server exits through its normal lifespan so `runtime.aclose()` and LifeService clean checkpoint run exactly once.
 
 Tauri must pass a real user-data root in `JAVIS_DATA_ROOT`—the app data directory or the user's explicit configured directory—not the packaged code `root`. `stop_owned()` copies the token/PID without holding the mutex across HTTP/wait operations, requests graceful shutdown, polls the owned child for at most 5 seconds, and only then uses `kill()` as a fallback. It never sends the token to any non-loopback address and never stops an attached, unowned backend.
 
-- [ ] **Step 4: Run Python, Rust and shutdown regressions**
+- [x] **Step 4: Run Python, Rust and shutdown regressions**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_owned_runtime_shutdown.py tests/test_life_lineage.py tests/test_life_service.py -q
@@ -1098,10 +1099,12 @@ Push-Location app/src-tauri
 try { cargo test --quiet } finally { Pop-Location }
 ```
 
-- [ ] **Step 5: Commit the shutdown boundary**
+Evidence: 36 focused Python tests passed, the full Python suite passed with 900 tests and 28 subtests, and the complete Rust/Tauri crate passed all 12 tests offline.
+
+- [x] **Step 5: Commit the shutdown boundary**
 
 ```powershell
-git add main.py app/src-tauri/src/sidecar.rs tests/test_owned_runtime_shutdown.py
+git add main.py app/src-tauri/src/sidecar.rs app/src-tauri/src/sidecar_shutdown.rs tests/test_owned_runtime_shutdown.py
 git commit -m "fix(runtime): checkpoint before owned sidecar exit"
 ```
 
