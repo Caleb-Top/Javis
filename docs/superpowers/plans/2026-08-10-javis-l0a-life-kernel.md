@@ -1,6 +1,6 @@
 # Javis L0-A Life Kernel Implementation Plan
 
-**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 4 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 810 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
+**执行状态（2026-08-12）：** Task 1 已在 `eeebcbd` 完成并复验；Task 2 至 Task 5 已在 `codex/javis-life-os-l0-foundation-20260812` 实现，最新完整回归为 836 项测试和 28 项 subtests。综合状态与后续依赖以 `2026-08-12-javis-life-os-integrated-execution.md` 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -708,7 +708,7 @@ git commit -m "feat(life): track instance lineage and checkpoints"
 - Consumes: `IdentityConstitution`, `InstanceRecord`, normalized observations.
 - Produces: `MinimalLifeStateMachine.apply(event_type, payload, now)`, `snapshot()`, and `ExpressionProjector.project(snapshot, now)`.
 
-- [ ] **Step 1: Write failing transition and stale-event tests**
+- [x] **Step 1: Write failing transition and stale-event tests**
 
 ```python
 def test_quiet_request_listening_terminal_order_is_safe():
@@ -737,19 +737,19 @@ def test_expression_revision_and_expiry_are_monotonic():
     assert second.expires_at > second.generated_at
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_state.py -q
 ```
 
-- [ ] **Step 3: Implement the explicit transition table**
+- [x] **Step 3: Implement the explicit transition table**
 
 Define the allowed lifecycle transitions as data, not nested implicit conditionals. Track `revision`, `active_session_id`, `active_request_id`, `activity`, `health`, `degradation_level`, `recovery_required`, `last_event_id`, `last_sequence`, `updated_at` and `explanation`.
 
 Terminal events may clear only the matching request. `offline` is accepted only as a client projection and is not persisted as the backend's final lifecycle checkpoint.
 
-- [ ] **Step 4: Implement exact ExpressionIntent mapping**
+- [x] **Step 4: Implement exact ExpressionIntent mapping**
 
 ```python
 BASE_STATE_BY_ACTIVITY = {
@@ -767,13 +767,13 @@ BASE_STATE_BY_ACTIVITY = {
 
 Clamp intensity to `[0.0, 1.0]`; restrict gaze to `none/user/content/task`; restrict voice activity to `silent/listening/speaking`.
 
-- [ ] **Step 5: Run Tasks 1 and 3-5 tests**
+- [x] **Step 5: Run Tasks 1 and 3-5 tests**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_contracts.py tests/test_life_identity.py tests/test_life_lineage.py tests/test_life_state.py -q
 ```
 
-- [ ] **Step 6: Commit lifecycle and expression projection**
+- [x] **Step 6: Commit lifecycle and expression projection**
 
 ```powershell
 git add core/life/state.py core/life/expression.py tests/test_life_state.py
