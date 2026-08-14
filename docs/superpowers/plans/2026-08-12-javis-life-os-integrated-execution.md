@@ -3,8 +3,8 @@
 **日期：** 2026-08-12
 **状态：** 执行中
 **实现基线：** `eeebcbd`
-**实现分支：** `codex/javis-life-os-l0-foundation-20260812`
-**实现工作区：** `G:\Javis\.codex\worktrees\javis-life-os-l0-foundation-20260812`
+**实现分支：** `codex/javis-life-os-l1-presence-20260812`
+**实现工作区：** `G:\Javis\.codex\worktrees\javis-life-os-l1-presence-20260812`
 
 ## 1. 目的与依据
 
@@ -27,7 +27,8 @@
 | 区域 | 路径 | 权限与用途 |
 |---|---|---|
 | 正式源码区 | `G:\Javis` | 本轮只读；保留现有语音/模型修复，不写 Life OS 文件 |
-| Life OS 工作区 | `G:\Javis\.codex\worktrees\javis-life-os-l0-foundation-20260812` | 本轮唯一代码、文档和测试编辑区 |
+| L0-A 冻结工作区 | `G:\Javis\.codex\worktrees\javis-life-os-l0-foundation-20260812` | 只读；冻结完整 L0-A 自动化出口 |
+| L1 工作区 | `G:\Javis\.codex\worktrees\javis-life-os-l1-presence-20260812` | 当前唯一 L1 代码、文档和测试编辑区 |
 | 历史冻结区 | `G:\Javis-worktrees\javis-life-os-master-v3` | 只读参考；冻结在 `eeebcbd` |
 | 临时区 | 当前工作区下 `.tmp` | 测试临时文件；运行测试时显式设置 `TEMP/TMP` |
 | 用户验收区 | `D:\Javis` 或最终安装位置 | 只安装和真实用户验收，不现场修改安装文件 |
@@ -219,7 +220,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 
 ## 10. 当前迭代
 
-本轮持续在隔离工作区交付 L0-A，不修改正式源码区，不构建安装包：
+L0-A 已在独立分支完成并冻结；本轮继续在新的隔离工作区交付 L1，不修改正式源码区，不构建安装包：
 
 - [x] 从 `eeebcbd` 创建独立 `codex/` 工作区。
 - [x] 复验 Task 1 契约。
@@ -231,6 +232,9 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 - [x] 完成 WP-A10 只读 API 与统一会话推送；完整 Python 回归 908 tests + 28 subtests。
 - [x] 执行 WP-A11 TypeScript 兼容桥与 WP-A12 发布合同。
 - [x] 核验 `G:\Javis` 主工作树内容状态与本轮开始时一致。
+- [x] 从完整 L0-A 提交创建独立 L1 分支和工作区。
+- [x] 编写 L1 十二工作包实施计划，保持安全前置和单写者依赖顺序。
+- [ ] 执行 WP-L101 runtime access 与 capture authorization。
 
 ## 11. 完成定义
 
