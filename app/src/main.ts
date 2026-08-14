@@ -20,6 +20,7 @@ import { createCommandComposer } from "./live/CommandComposer";
 import { createLiveCaption } from "./live/LiveCaption";
 import { renderLiveStage } from "./live/LiveStage";
 import { createSurfaceStatus } from "./live/SurfaceStatus.ts";
+import { createLifeStateBridge } from "./life/LifeStateBridge.ts";
 import {
   isLocalSurfaceCommand,
   parseLocalSurfaceCommand,
@@ -107,6 +108,9 @@ const conversationEvents = new ConversationEventReducer(
   conversationId,
   Number.isFinite(storedConversationCursor) ? storedConversationCursor : 0,
 );
+const lifeStateBridge = createLifeStateBridge({
+  signal: (signal) => runtimeStateCoordinator.signal(signal),
+});
 const liveSurfaceStatus = createSurfaceStatus(
   document.querySelector<HTMLElement>(".live-surface-status")!,
 );
@@ -247,6 +251,7 @@ const client = createBackendClient({
     mergeConnectionDetails();
   },
   onEvent: (event) => {
+    lifeStateBridge.handle(event);
     let acceptedServerFailure = false;
     if (event.type === "request.failed" && event.local === true) {
       if (event.request_id) voiceRequestIds.delete(event.request_id);

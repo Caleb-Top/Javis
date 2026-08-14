@@ -64,8 +64,9 @@
 | L0-A Task 8 LifeService 装配 | 已完成 | 11 项聚焦测试；完整回归 893 tests + 28 subtests |
 | L0-A Task 9 所有权关闭 | 已完成 | 36 项定向 Python 测试；完整回归 900 tests + 28 subtests；Rust 12 tests |
 | L0-A Task 10 只读 API/推送 | 已完成 | 68 项相关测试；完整回归 908 tests + 28 subtests |
-| L0-A Task 11-12 | 未开始 | 必须按依赖顺序推进 |
-| L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 等待 L0-A Task 11 |
+| L0-A Task 11 TypeScript 兼容桥 | 已完成 | 专项 6 tests；完整 App 154 tests；TypeScript 与生产构建通过 |
+| L0-A Task 12 | 未开始 | 必须在 Task 11 提交后推进 |
+| L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 前置依赖已满足 |
 | L1 产品实现 | 未开始 | 依赖 L0-A 纵切与表达桥 |
 
 `eeebcbd` 是实现起点，不是完整 L0-A 完成点。现有 `core/life/contracts.py` 只冻结数据边界，不代表身份持久化、生命周期、日志、API、前端桥或 L1 内稳态已经实现。
@@ -186,7 +187,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 | WP-A08 | LifeService 装配 | A07 | 完成；116 related tests；893 tests + 28 subtests |
 | WP-A09 | 所有权关闭 | A08 | 完成；loopback 令牌握手、干净检查点、5 秒等待、强杀兜底及用户数据根已验证；900 tests + 28 subtests；Rust 12 tests |
 | WP-A10 | 只读 API/推送 | A08、A09 | 完成；四个只读端点、会话来源桥、跨线程合并推送及递归脱敏已验证；68 related tests；908 tests + 28 subtests |
-| WP-A11 | TypeScript 兼容桥 | A10 | 待执行 |
+| WP-A11 | TypeScript 兼容桥 | A10 | 已完成 |
 | WP-A12 | 恢复/隐私/发布合同 | A11 | 待执行 |
 | WP-B01 | 3D 依赖与锁文件 | 用户下载许可 | 阻塞于许可门，不是技术失败 |
 | WP-B02-B05 | Manifest、Surface、Lightform、Pet 集成 | B01 | 待执行，可在 A02-A10 期间独立分支推进 |

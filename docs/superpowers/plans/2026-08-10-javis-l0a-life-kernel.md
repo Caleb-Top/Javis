@@ -1236,7 +1236,7 @@ git commit -m "feat(life): expose read-only life snapshots"
 - Consumes: `BackendEvent` types `life.snapshot` and `life.expression`.
 - Produces: `LifeStateBridge.handle(event)`, `snapshot()`, `subscribeExpression(listener)`; existing RuntimeStateCoordinator signals.
 
-- [ ] **Step 1: Write failing TypeScript guard and stale-revision tests**
+- [x] **Step 1: Write failing TypeScript guard and stale-revision tests**
 
 ```typescript
 type LifeSurfaceState =
@@ -1297,7 +1297,7 @@ test("offline remains a client projection and reconnect accepts a newer snapshot
 });
 ```
 
-- [ ] **Step 2: Run and verify red**
+- [x] **Step 2: Run and verify red**
 
 ```powershell
 Set-Location app
@@ -1306,15 +1306,15 @@ pnpm.cmd test
 
 Expected: TypeScript test import fails because the bridge does not exist.
 
-- [ ] **Step 3: Implement strict wire guards and compatibility mapping**
+- [x] **Step 3: Implement strict wire guards and compatibility mapping**
 
 Do not cast arbitrary `BackendEvent.payload` directly. Validate schema version, revision, state enum, timestamps and intent fields. Map life states to existing LiveState. Unknown or unsupported life events return `false`, allowing existing BackendClient state handling to remain authoritative.
 
-- [ ] **Step 4: Wire one call in `main.ts`**
+- [x] **Step 4: Wire one call in `main.ts`**
 
 Inside the existing `onEvent` callback, call `lifeStateBridge.handle(event)` before normal conversation rendering. Do not create another WebSocket or add another direct writer to Pet/Orb.
 
-- [ ] **Step 5: Run all App tests and build**
+- [x] **Step 5: Run all App tests and build**
 
 ```powershell
 Set-Location app
@@ -1322,7 +1322,7 @@ pnpm.cmd test
 pnpm.cmd build
 ```
 
-- [ ] **Step 6: Commit the compatibility bridge**
+- [x] **Step 6: Commit the compatibility bridge**
 
 ```powershell
 git add app/src/life/lifeTypes.ts app/src/life/LifeStateBridge.ts app/src/main.ts app/tests/lifeStateBridge.test.ts
