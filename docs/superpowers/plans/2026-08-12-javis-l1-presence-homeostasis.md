@@ -2,11 +2,11 @@
 
 > **Execution rule:** implement each work package with a failing test first, keep commits independently revertible, and do not wait for additional design confirmation.
 
-**Date:** 2026-08-12  
-**Status:** In progress  
-**Approved design:** `docs/superpowers/specs/2026-08-10-javis-l1-presence-homeostasis-design.md`  
-**Base commit:** `5f152ecb`  
-**Branch:** `codex/javis-life-os-l1-presence-20260812`  
+**Date:** 2026-08-12
+**Status:** In progress
+**Approved design:** `docs/superpowers/specs/2026-08-10-javis-l1-presence-homeostasis-design.md`
+**Base commit:** `5f152ecb`
+**Branch:** `codex/javis-life-os-l1-presence-20260812`
 **Worktree:** `G:\Javis\.codex\worktrees\javis-life-os-l1-presence-20260812`
 
 ## 1. Delivery Boundary
