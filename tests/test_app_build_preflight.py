@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,7 @@ class AppBuildPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with unittest.mock.patch(
+            with mock.patch(
                 "scripts.app_build_preflight._drive_is_g",
                 return_value=True,
             ):
@@ -147,7 +148,11 @@ class AppBuildPreflightTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report = collect_build_preflight(root)
+            with mock.patch(
+                "scripts.app_build_preflight._drive_is_g",
+                return_value=True,
+            ):
+                report = collect_build_preflight(root)
 
             self.assertTrue(report["ready_for_offline_build"])
             self.assertEqual(report["blockers"], [])

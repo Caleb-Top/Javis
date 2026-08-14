@@ -65,7 +65,7 @@
 | L0-A Task 9 所有权关闭 | 已完成 | 36 项定向 Python 测试；完整回归 900 tests + 28 subtests；Rust 12 tests |
 | L0-A Task 10 只读 API/推送 | 已完成 | 68 项相关测试；完整回归 908 tests + 28 subtests |
 | L0-A Task 11 TypeScript 兼容桥 | 已完成 | 专项 6 tests；完整 App 154 tests；TypeScript 与生产构建通过 |
-| L0-A Task 12 | 未开始 | 必须在 Task 11 提交后推进 |
+| L0-A Task 12 发布/恢复合同 | 已完成 | 发布合同 6 tests；核心门 490 tests；完整 Python 912 tests + 28 subtests；App 154 tests 与生产构建通过；D 盘实机验收仍为 NOT EXECUTED |
 | L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 前置依赖已满足 |
 | L1 产品实现 | 未开始 | 依赖 L0-A 纵切与表达桥 |
 
@@ -188,7 +188,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 | WP-A09 | 所有权关闭 | A08 | 完成；loopback 令牌握手、干净检查点、5 秒等待、强杀兜底及用户数据根已验证；900 tests + 28 subtests；Rust 12 tests |
 | WP-A10 | 只读 API/推送 | A08、A09 | 完成；四个只读端点、会话来源桥、跨线程合并推送及递归脱敏已验证；68 related tests；908 tests + 28 subtests |
 | WP-A11 | TypeScript 兼容桥 | A10 | 已完成 |
-| WP-A12 | 恢复/隐私/发布合同 | A11 | 待执行 |
+| WP-A12 | 恢复/隐私/发布合同 | A11 | 已完成；恢复手册、D 盘证据模板、生产发布者审计及跨语言 12 字段合同已锁定 |
 | WP-B01 | 3D 依赖与锁文件 | 用户下载许可 | 阻塞于许可门，不是技术失败 |
 | WP-B02-B05 | Manifest、Surface、Lightform、Pet 集成 | B01 | 待执行，可在 A02-A10 期间独立分支推进 |
 | WP-B06-B10 | 表达、口型、性能、预览、验收 | A11、B05 | 待执行 |
@@ -229,7 +229,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 - [x] 完成 WP-A03 至 WP-A08 的身份、连续性、生命周期、隐私映射、异步 Journal 和 LifeService 装配。
 - [x] 完成 WP-A09 所有权关闭；完整 Python 回归 900 tests + 28 subtests，完整 Rust/Tauri 回归 12 tests。
 - [x] 完成 WP-A10 只读 API 与统一会话推送；完整 Python 回归 908 tests + 28 subtests。
-- [ ] 执行 WP-A11 TypeScript 兼容桥与 WP-A12 发布合同。
+- [x] 执行 WP-A11 TypeScript 兼容桥与 WP-A12 发布合同。
 - [x] 核验 `G:\Javis` 主工作树内容状态与本轮开始时一致。
 
 ## 11. 完成定义

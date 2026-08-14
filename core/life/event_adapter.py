@@ -54,12 +54,6 @@ _RULES: dict[str, _Rule] = {
         PrivacyClass.LOCAL_INTERNAL,
         RetentionClass.CONTINUITY,
     ),
-    "runtime.status": _Rule(
-        "life.runtime.status",
-        frozenset({"status"}),
-        PrivacyClass.LOCAL_INTERNAL,
-        RetentionClass.OPERATIONAL,
-    ),
     "subsystem.registered": _Rule(
         "life.subsystem.registered",
         frozenset({"name"}),
@@ -71,18 +65,6 @@ _RULES: dict[str, _Rule] = {
         frozenset(),
         PrivacyClass.LOCAL_INTERNAL,
         RetentionClass.OPERATIONAL,
-    ),
-    "thinking.started": _Rule(
-        "life.thinking.started",
-        frozenset({"request_id"}),
-        PrivacyClass.USER_PRIVATE,
-        RetentionClass.SESSION,
-    ),
-    "thinking.completed": _Rule(
-        "life.thinking.completed",
-        frozenset({"request_id", "duration_ms", "success"}),
-        PrivacyClass.USER_PRIVATE,
-        RetentionClass.SESSION,
     ),
     "tool.started": _Rule(
         "life.tool.started",
@@ -122,53 +104,11 @@ _RULES: dict[str, _Rule] = {
         PrivacyClass.RESTRICTED_SYSTEM,
         RetentionClass.AUDIT,
     ),
-    "health.degraded": _Rule(
-        "life.health.degraded",
-        frozenset({"components", "reason_codes", "degradation_level"}),
-        PrivacyClass.LOCAL_INTERNAL,
-        RetentionClass.OPERATIONAL,
-    ),
-    "health.recovered": _Rule(
-        "life.health.recovered",
-        frozenset(),
-        PrivacyClass.LOCAL_INTERNAL,
-        RetentionClass.OPERATIONAL,
-    ),
     "life.recovery.required": _Rule(
         "life.recovery.required",
         frozenset({"reason_codes"}),
         PrivacyClass.LOCAL_INTERNAL,
         RetentionClass.CONTINUITY,
-    ),
-    "client.offline": _Rule(
-        "life.client.offline",
-        frozenset(),
-        PrivacyClass.PUBLIC_SURFACE,
-        RetentionClass.EPHEMERAL,
-    ),
-    "client.reconnected": _Rule(
-        "life.client.reconnected",
-        frozenset(),
-        PrivacyClass.PUBLIC_SURFACE,
-        RetentionClass.EPHEMERAL,
-    ),
-    "voice.listening": _Rule(
-        "life.voice.listening",
-        frozenset({"session_id", "request_id"}),
-        PrivacyClass.USER_PRIVATE,
-        RetentionClass.SESSION,
-    ),
-    "voice.speaking": _Rule(
-        "life.voice.speaking",
-        frozenset({"session_id", "request_id"}),
-        PrivacyClass.USER_PRIVATE,
-        RetentionClass.SESSION,
-    ),
-    "response.speaking": _Rule(
-        "life.response.speaking",
-        frozenset({"session_id", "request_id"}),
-        PrivacyClass.USER_PRIVATE,
-        RetentionClass.SESSION,
     ),
 }
 

@@ -1342,7 +1342,7 @@ git commit -m "feat(app): bridge life snapshots to existing surfaces"
 - Consumes: complete L0-A runtime and frontend bridge.
 - Produces: source-level release gates, operator recovery steps and D-drive acceptance checklist.
 
-- [ ] **Step 1: Write the failing release contract test**
+- [x] **Step 1: Write the failing release contract test**
 
 ```python
 def test_life_kernel_release_contract_is_present_and_read_only():
@@ -1368,24 +1368,29 @@ def test_life_data_never_targets_source_or_d_drive():
     assert "brain_data/rules" not in source
 ```
 
-- [ ] **Step 2: Run and fix the contract if it exposes an unplanned write path**
+- [x] **Step 2: Run and fix the contract if it exposes an unplanned write path**
 
 ```powershell
 & 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_release_contract.py -q
 ```
 
-- [ ] **Step 3: Document exact recovery operations**
+- [x] **Step 3: Document exact recovery operations**
 
 Add operations for viewing identity summary, identifying recovery mode, exporting diagnostic events, restoring the previous constitution, and confirming no temporary authority survived an unclean shutdown. Commands must point to the configured user-data root, never hard-code D drive.
 
-- [ ] **Step 4: Write the D-drive acceptance checklist**
+- [x] **Step 4: Write the D-drive acceptance checklist**
 
 The checklist must record package hash, source commit, identity ID before/after restart, instance ID before/after restart, model route before/after switch, abnormal shutdown result, corruption recovery result, Live/Code/Pet snapshot revisions and explicit PASS/FAIL evidence fields.
 
-- [ ] **Step 5: Run the complete automated gates**
+- [x] **Step 5: Run the complete automated gates**
 
 ```powershell
-& 'G:\Javis\venv\Scripts\python.exe' -m pytest tests/test_life_*.py tests/test_typed_events.py tests/test_unified_conversation_integration.py tests/test_p0_runtime.py -q
+$lifeTests = @(
+  Get-ChildItem -LiteralPath tests -Filter 'test_life_*.py' -File |
+    Sort-Object Name |
+    ForEach-Object FullName
+)
+& 'G:\Javis\venv\Scripts\python.exe' -m pytest @lifeTests tests/test_typed_events.py tests/test_unified_conversation_integration.py tests/test_p0_runtime.py -q
 Set-Location app
 pnpm.cmd test
 pnpm.cmd build
@@ -1393,7 +1398,7 @@ pnpm.cmd build
 
 Expected: every command exits 0. This does not mark D-drive scenarios passed.
 
-- [ ] **Step 6: Commit release contracts and operations**
+- [x] **Step 6: Commit release contracts and operations**
 
 ```powershell
 git add tests/test_life_release_contract.py docs/JAVIS_OPERATIONS.md docs/verification/JAVIS_L0A_D_DRIVE_ACCEPTANCE.md
@@ -1424,14 +1429,14 @@ git commit -m "test(life): lock recovery and release contracts"
 
 ## Final Verification
 
-- [ ] Run `git diff --check` and confirm no whitespace errors.
-- [ ] Run every Python test named in Task 12 Step 5 from the isolated worktree.
-- [ ] Run the complete App test suite and production build.
-- [ ] Search `core/life`, `app/src/life` and `tests/test_life_*.py` for unfinished placeholder markers and remove them.
-- [ ] Confirm `git status --short` contains only intended L0-A files before integration.
-- [ ] Review the event map against actual publishers; remove any mapping whose source event cannot be produced.
-- [ ] Confirm no API Key, token, raw audio, image or OCR fixture is present in the committed event database.
-- [ ] Confirm L0-B's 12-field contract matches `ExpressionIntent.to_dict()` exactly.
+- [x] Run `git diff --check` and confirm no whitespace errors.
+- [x] Run every Python test named in Task 12 Step 5 from the isolated worktree.
+- [x] Run the complete App test suite and production build.
+- [x] Search `core/life`, `app/src/life` and `tests/test_life_*.py` for unfinished placeholder markers and remove them.
+- [x] Confirm `git status --short` contains only intended L0-A files before integration.
+- [x] Review the event map against actual publishers; remove any mapping whose source event cannot be produced.
+- [x] Confirm no API Key, token, raw audio, image or OCR fixture is present in the committed event database.
+- [x] Confirm L0-B's 12-field contract matches `ExpressionIntent.to_dict()` exactly.
 - [ ] Build the installer only after the feature branch has passed review and been integrated into `G:\Javis`.
 - [ ] Execute the D-drive checklist on the exact built package; record failures honestly and return fixes to a worktree.
 

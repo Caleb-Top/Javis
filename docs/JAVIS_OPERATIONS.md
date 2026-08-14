@@ -213,6 +213,75 @@ App 完成运行数据外置后使用:
 - OCR/YOLO/VLM 不可用: 查看 `/api/runtime/status` 中 perception adapters，文字交流应继续可用。
 - PowerShell 中文日志乱码: 设置 `$env:PYTHONIOENCODING='utf-8'` 后重新运行诊断命令。
 
+## Life Kernel Recovery
+
+以下操作只使用实际配置的用户数据根。不要从源码目录推测数据位置，也不要在后端运行时直接修改身份或谱系文件。
+
+先在同一个 PowerShell 会话中建立公共变量。`JAVIS_DATA_ROOT` 必须与启动 Javis 时传给后端的值完全一致；变量为空时立即停止，不使用兼容回退目录：
+
+```powershell
+$SourceRoot = (& git rev-parse --show-toplevel).Trim()
+$Python = Join-Path $SourceRoot 'venv\Scripts\python.exe'
+$DataRoot = [Environment]::GetEnvironmentVariable('JAVIS_DATA_ROOT', 'Process')
+if ([string]::IsNullOrWhiteSpace($DataRoot)) {
+  throw 'JAVIS_DATA_ROOT is not configured in this operator session'
+}
+$DataRoot = (Resolve-Path -LiteralPath $DataRoot).Path
+$LifeApi = if ([string]::IsNullOrWhiteSpace($env:JAVIS_BACKEND_ORIGIN)) {
+  'http://127.0.0.1:8080'
+} else {
+  $env:JAVIS_BACKEND_ORIGIN.TrimEnd('/')
+}
+```
+
+查看只读身份摘要与当前生命快照：
+
+```powershell
+(Invoke-RestMethod "$LifeApi/api/life/identity").identity | Format-List
+(Invoke-RestMethod "$LifeApi/api/life/snapshot").snapshot | Format-List
+```
+
+识别恢复模式。`read_only_recovery=True` 表示身份链需要人工恢复；`previous_run_unclean=True` 表示本次启动检测到上一次异常退出：
+
+```powershell
+$RuntimeStatus = Invoke-RestMethod "$LifeApi/api/runtime/status"
+$LifeStatus = $RuntimeStatus.subsystem_status.life
+$LifeStatus | Select-Object state,lifecycle_state,read_only_recovery,previous_run_reason,previous_run_unclean,last_error | Format-List
+```
+
+导出经过 API 二次脱敏的诊断事件。导出文件仍留在配置的数据根内，不要直接复制正在写入的 SQLite 文件：
+
+```powershell
+$ExportRoot = Join-Path $DataRoot 'life\exports'
+New-Item -ItemType Directory -Path $ExportRoot -Force | Out-Null
+$Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$ExportPath = Join-Path $ExportRoot "life-events-$Stamp.json"
+Invoke-RestMethod "$LifeApi/api/life/events?limit=500" |
+  ConvertTo-Json -Depth 20 |
+  Set-Content -LiteralPath $ExportPath -Encoding UTF8
+Get-FileHash -Algorithm SHA256 -LiteralPath $ExportPath
+```
+
+恢复到上一份宪章必须是明确批准的离线操作。先正常关闭 App 和后端，确认相关进程已经退出，再备份完整身份目录。此命令通过 `IdentityConstitutionStore.rollback_to_previous` 创建新的不可变版本，不覆盖历史；当前版本无效或不存在上一版本时会失败关闭：
+
+```powershell
+$IdentityRoot = Join-Path $DataRoot 'life\identity'
+$BackupRoot = Join-Path $DataRoot ("life\recovery-backups\identity-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path (Split-Path -Parent $BackupRoot) -Force | Out-Null
+Copy-Item -LiteralPath $IdentityRoot -Destination $BackupRoot -Recurse
+$env:PYTHONPATH = $SourceRoot
+& $Python -c 'import os; from core.life.identity import IdentityConstitutionStore; store=IdentityConstitutionStore(os.environ["JAVIS_DATA_ROOT"]); restored=store.rollback_to_previous(approved_by="user:operations"); print(restored.to_dict())'
+```
+
+异常退出验收必须在强制终止后、重新启动前执行下面的只读评估。只有同时得到 `unclean_shutdown=True` 和 `temporary_authority_valid=False` 才能证明旧启动期的临时权限没有跨启动存活：
+
+```powershell
+$env:PYTHONPATH = $SourceRoot
+& $Python -c 'import json, os; from core.life.lineage import InstanceLineageStore; store=InstanceLineageStore(os.environ["JAVIS_DATA_ROOT"]); active=store.load_active(); result=store.assess_previous_run(active.instance_id); print(json.dumps(result.to_dict(), ensure_ascii=False)); assert result.unclean_shutdown and not result.temporary_authority_valid'
+```
+
+随后重新启动 Javis，并再次检查 `/api/runtime/status`、`/api/life/identity` 与 `/api/life/lineage`。不要手工编辑 `current.json`、`active.json`、检查点或不可变版本文件；恢复失败时保留备份和事件导出，停止写入并进入故障审查。
+
 ## Documentation
 
 - 当前架构: `docs/JAVIS_CURRENT_ARCHITECTURE.md`
