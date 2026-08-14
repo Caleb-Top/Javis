@@ -56,6 +56,22 @@ fn sidecar_restart(app: AppHandle, state: State<'_, AppState>) -> Result<String,
 }
 
 #[tauri::command]
+fn issue_runtime_capability(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    client_instance_id: String,
+    scopes: Vec<String>,
+    ttl_seconds: u16,
+) -> Result<String, String> {
+    if window.label() != "main" {
+        return Err("runtime capability issuance is limited to the main window".to_string());
+    }
+    state
+        .sidecar
+        .issue_runtime_capability(&client_instance_id, &scopes, ttl_seconds)
+}
+
+#[tauri::command]
 fn write_app_log(
     app: AppHandle,
     level: String,
@@ -228,6 +244,7 @@ fn main() {
             sidecar_start,
             sidecar_stop,
             sidecar_restart,
+            issue_runtime_capability,
             write_app_log,
             capture_screen_native,
             open_logs_directory,

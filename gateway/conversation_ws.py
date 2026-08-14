@@ -18,6 +18,7 @@ from core.conversation_protocol import (
     legacy_wire_events,
     normalize_client_message,
 )
+from core.runtime_access import websocket_access_remaining
 from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
 
@@ -33,15 +34,25 @@ class ConversationWebSocketGateway:
         local_action_resolver: Callable[[str, dict[str, Any]], Any] | None = None,
         command_handlers: dict[str, Callable[[ClientCommand, Any], Any]] | None = None,
         stall_harness: ConversationStallHarness | None = None,
+        authorize: Callable[[Any, str], Any] | None = None,
     ):
         self.runtime = runtime
         self.transcribe = transcribe
         self.local_action_resolver = local_action_resolver
         self.command_handlers = dict(command_handlers or {})
         self.stall_harness = stall_harness
+        self.authorize = authorize
 
     async def serve(self, ws) -> None:
-        await ws.accept()
+        if self.authorize is not None:
+            allowed = self.authorize(ws, "conversation")
+            if inspect.isawaitable(allowed):
+                allowed = await allowed
+            if not allowed:
+                return
+            await ws.accept(subprotocol="javis-runtime-v1")
+        else:
+            await ws.accept()
         subscription = None
         sender: asyncio.Task | None = None
         attached_session = ""
@@ -107,7 +118,19 @@ class ConversationWebSocketGateway:
 
         try:
             while True:
-                raw = await ws.receive_text()
+                remaining = websocket_access_remaining(ws)
+                if remaining is not None and remaining <= 0:
+                    await ws.close(code=4401, reason="capability_expired")
+                    break
+                try:
+                    raw = await (
+                        ws.receive_text()
+                        if remaining is None
+                        else asyncio.wait_for(ws.receive_text(), timeout=remaining)
+                    )
+                except asyncio.TimeoutError:
+                    await ws.close(code=4401, reason="capability_expired")
+                    break
                 try:
                     message = json.loads(raw)
                     command = normalize_client_message(message, default_session=attached_session)

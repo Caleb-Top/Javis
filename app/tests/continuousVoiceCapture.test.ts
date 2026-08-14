@@ -51,6 +51,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 200): Promise<void>
 
 test("continuous native voice stays open across turns and barges in before final submit", async () => {
   const socket = new FakeVoiceSocket();
+  let protocols: string[] | undefined;
   const order: string[] = [];
   const finals: string[] = [];
   const partials: string[] = [];
@@ -59,7 +60,11 @@ test("continuous native voice stays open across turns and barges in before final
     post: async () => ({ ok: true }),
   } as unknown as BackendClient;
   const capture = createVoiceCapture(client, {
-    openStream: () => socket as unknown as WebSocket,
+    openStream: (_url, requestedProtocols) => {
+      protocols = requestedProtocols;
+      return socket as unknown as WebSocket;
+    },
+    runtimeAccessToken: (scope) => `token-for-${scope}`,
     noiseProfile: () => "strong",
     onBargeIn: async () => { order.push("barge-in"); },
     onPartial: (text) => { partials.push(text); },
@@ -74,6 +79,10 @@ test("continuous native voice stays open across turns and barges in before final
   socket.emit({ type: "audio.stream.ready" });
   await started;
 
+  assert.deepEqual(protocols, [
+    "javis-runtime-v1",
+    "javis-capability.token-for-voice.capture",
+  ]);
   assert.equal((socket.sent[0].payload as Record<string, unknown>).session_id, "session-voice");
   assert.equal((socket.sent[0].payload as Record<string, unknown>).noise_profile, "strong");
   socket.emit({ type: "speech.start" });

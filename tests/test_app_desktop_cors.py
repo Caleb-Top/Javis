@@ -45,6 +45,36 @@ class AppDesktopCorsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("access-control-allow-origin", response.headers)
 
+    async def test_development_origin_requires_the_explicit_flag(self):
+        from utils.app_cors import install_desktop_cors
+
+        async def preflight(allow_development_origins):
+            app = FastAPI()
+            install_desktop_cors(
+                app,
+                allow_development_origins=allow_development_origins,
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                return await client.options(
+                    "/action",
+                    headers={
+                        "Origin": "http://localhost:5173",
+                        "Access-Control-Request-Method": "POST",
+                        "Access-Control-Request-Headers": "x-javis-runtime-capability",
+                    },
+                )
+
+        denied = await preflight(False)
+        allowed = await preflight(True)
+        self.assertNotIn("access-control-allow-origin", denied.headers)
+        self.assertEqual(
+            allowed.headers["access-control-allow-origin"],
+            "http://localhost:5173",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

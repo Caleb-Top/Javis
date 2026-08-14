@@ -6,6 +6,7 @@ import asyncio
 from collections import OrderedDict, deque
 import hashlib
 import hmac
+import inspect
 import math
 import secrets
 import threading
@@ -13,6 +14,11 @@ import time
 from typing import Any
 
 from fastapi import WebSocketDisconnect
+
+from core.runtime_access import (
+    websocket_access_context,
+    websocket_access_remaining,
+)
 
 
 MAX_DIAGNOSTIC_COUNTER = (1 << 63) - 1
@@ -323,17 +329,40 @@ async def serve_continuous_voice_stream(
     manager,
     *,
     diagnostics: VoiceGatewayDiagnostics | None = None,
+    authorize=None,
 ) -> None:
     metrics = diagnostics or _gateway_diagnostics
     metrics.handler_started()
     try:
-        await _serve_continuous_voice_stream(ws, manager, metrics)
+        if authorize is not None:
+            allowed = authorize(ws, "voice.capture")
+            if inspect.isawaitable(allowed):
+                allowed = await allowed
+            if not allowed:
+                return
+            await _serve_continuous_voice_stream(
+                ws,
+                manager,
+                metrics,
+                accept_subprotocol="javis-runtime-v1",
+            )
+        else:
+            await _serve_continuous_voice_stream(ws, manager, metrics)
     finally:
         metrics.handler_finished()
 
 
-async def _serve_continuous_voice_stream(ws, manager, metrics) -> None:
-    await ws.accept()
+async def _serve_continuous_voice_stream(
+    ws,
+    manager,
+    metrics,
+    *,
+    accept_subprotocol=None,
+) -> None:
+    if accept_subprotocol:
+        await ws.accept(subprotocol=accept_subprotocol)
+    else:
+        await ws.accept()
     closed = asyncio.Event()
     stream_acquired = False
     lease_was_acquired = False
@@ -400,6 +429,14 @@ async def _serve_continuous_voice_stream(ws, manager, metrics) -> None:
             release_task = metrics.create_task(stop_owned_stream(session_id))
         return release_task
 
+    async def close_expired_access() -> None:
+        closed.set()
+        try:
+            await ws.close(code=4401, reason="capability_expired")
+        except Exception as error:
+            if not _is_socket_closing(error):
+                raise
+
     async def release_stream(session_id: str) -> None:
         task = ensure_release(session_id)
         if task is None:
@@ -407,6 +444,11 @@ async def _serve_continuous_voice_stream(ws, manager, metrics) -> None:
         cancelled = await drain_task(task)
         if cancelled:
             raise asyncio.CancelledError
+
+    remaining = websocket_access_remaining(ws)
+    if remaining is not None and remaining <= 0:
+        await close_expired_access()
+        return
 
     try:
         first = await ws.receive_json()
@@ -450,6 +492,21 @@ async def _serve_continuous_voice_stream(ws, manager, metrics) -> None:
             )
         stream_acquired = True
         lease_was_acquired = True
+        remaining = websocket_access_remaining(ws)
+        if remaining is not None and remaining <= 0:
+            await release_stream(session_id)
+            await close_expired_access()
+            return
+        access_context = websocket_access_context(ws)
+        socket_scope = getattr(ws, "scope", None)
+        if access_context is not None and isinstance(socket_scope, dict):
+            socket_scope["javis.capture_lease"] = {
+                "session_id": session_id,
+                "owner_generation": expected_owner_generation,
+                "client_id_hash": access_context.get("client_id_hash", ""),
+                "nonce_digest": access_context.get("nonce_digest", ""),
+                "deadline_monotonic": access_context.get("deadline_monotonic", 0.0),
+            }
         if cancelled:
             await release_stream(session_id)
             raise asyncio.CancelledError
@@ -475,7 +532,9 @@ async def _serve_continuous_voice_stream(ws, manager, metrics) -> None:
                 return
             try:
                 payload = _payload(message)
-                _session_id(payload)
+                control_session_id = _session_id(payload)
+                if control_session_id != session_id:
+                    raise ValueError("audio stream command session does not own this lease")
                 command = str(message.get("type") or "")
                 if command == "audio.stream.stop":
                     explicit_stop = True
@@ -539,7 +598,18 @@ async def _serve_continuous_voice_stream(ws, manager, metrics) -> None:
 
     receiver = metrics.create_task(receive_controls())
     sender = metrics.create_task(send_events())
-    tasks = (receiver, sender)
+    access_expiry = None
+    remaining = websocket_access_remaining(ws)
+    if remaining is not None:
+        async def expire_access() -> None:
+            await asyncio.sleep(remaining)
+            if not closed.is_set():
+                await close_expired_access()
+
+        access_expiry = metrics.create_task(expire_access())
+    tasks = tuple(
+        task for task in (receiver, sender, access_expiry) if task is not None
+    )
     done = set()
     try:
         done, pending = await asyncio.wait(

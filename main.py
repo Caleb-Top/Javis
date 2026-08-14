@@ -40,6 +40,9 @@ class OwnedRuntimeShutdown:
             raise TypeError("shutdown callback must be callable")
         self._exit_callback = callback
 
+    def authorized_owner(self, peer_host: str, presented_token: str) -> bool:
+        return self._authorized(peer_host, presented_token)
+
     async def close_once(self) -> bool:
         async with self._lock:
             return await self._close_once_locked()
@@ -84,6 +87,12 @@ class OwnedRuntimeShutdown:
         )
 
 from core.runtime import create_runtime
+from core.runtime_access import (
+    DEVELOPMENT_ORIGINS,
+    RuntimeAccessAuthority,
+    create_http_authorizer,
+    create_websocket_authorizer,
+)
 from core.agent_run_recorder import AgentRunRecorder
 from gateway.conversation_stall_harness import ConversationStallHarness
 from gateway.conversation_ws import ConversationWebSocketGateway
@@ -196,6 +205,15 @@ owned_runtime_shutdown = OwnedRuntimeShutdown(
     configured_token=_SIDECAR_OWNERSHIP_TOKEN,
     close_runtime=_close_runtime_once,
 )
+_ALLOW_DEV_RUNTIME_ACCESS = (
+    _TEST_MODE and _env_flag("JAVIS_ALLOW_DEV_RUNTIME_ACCESS")
+)
+runtime_access_authority = RuntimeAccessAuthority(
+    str(runtime.life.status().get("boot_id") or "runtime-boot-unavailable"),
+    allow_development_origins=_ALLOW_DEV_RUNTIME_ACCESS,
+)
+authorize_runtime_http = create_http_authorizer(runtime_access_authority)
+authorize_runtime_websocket = create_websocket_authorizer(runtime_access_authority)
 
 def _register_always_on_tools():
     runtime.register_always_on_tools()
@@ -241,7 +259,10 @@ async def _app_lifespan(_app):
 
 
 app=FastAPI(title="JARVIS",version="2.0",lifespan=_app_lifespan)
-install_desktop_cors(app)
+install_desktop_cors(
+    app,
+    allow_development_origins=_ALLOW_DEV_RUNTIME_ACCESS,
+)
 app.include_router(create_life_router(runtime.life))
 
 @app.get("/")
@@ -268,6 +289,55 @@ async def api_runtime_shutdown(
         logger.error("Owned runtime shutdown failed: %s", exc)
         raise HTTPException(status_code=503, detail="shutdown unavailable") from exc
     return {"ok": True, "state": "shutdown_requested"}
+
+
+@app.post("/api/runtime/access")
+async def api_runtime_access(
+    request: Request,
+    data: dict = Body(default={}),
+    x_javis_sidecar_ownership: str = Header(default=""),
+):
+    peer_host = request.client.host if request.client is not None else ""
+    owned_issuer = owned_runtime_shutdown.authorized_owner(
+        peer_host,
+        x_javis_sidecar_ownership,
+    )
+    development_issuer = False
+    if _ALLOW_DEV_RUNTIME_ACCESS:
+        try:
+            normalized_host = str(peer_host or "").split("%", 1)[0]
+            loopback = ipaddress.ip_address(normalized_host).is_loopback
+        except ValueError:
+            loopback = False
+        origin = str(request.headers.get("origin", "") or "").strip().casefold()
+        development_issuer = loopback and origin in DEVELOPMENT_ORIGINS
+    if not owned_issuer and not development_issuer:
+        raise HTTPException(status_code=403, detail="forbidden")
+    try:
+        issued = runtime_access_authority.issue(
+            str(data.get("client_instance_id") or ""),
+            data.get("scopes") or (),
+            ttl_seconds=int(data.get("ttl_seconds", 60)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)[:160]) from exc
+    return {
+        "ok": True,
+        "token": issued.token,
+        "runtime_boot_id": issued.runtime_boot_id,
+        "client_instance_id": issued.client_instance_id,
+        "scopes": list(issued.scopes),
+        "issued_at_epoch": issued.issued_at_epoch,
+        "expires_at_epoch": issued.expires_at_epoch,
+    }
+
+
+def _require_runtime_http(request: Request, scope: str) -> None:
+    decision = authorize_runtime_http(request, scope)
+    if decision.allowed:
+        return
+    status_code = 401 if decision.close_code == 4401 else 403
+    raise HTTPException(status_code=status_code, detail=decision.reason_code)
 
 def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
     safe = Path(path or "").name
@@ -355,6 +425,7 @@ conversation_gateway = ConversationWebSocketGateway(
         "permission_change": _handle_ws_permission_change,
     },
     stall_harness=conversation_stall_harness,
+    authorize=authorize_runtime_websocket,
 )
 
 
@@ -365,7 +436,11 @@ async def ws(ws: WebSocket):
 
 @app.websocket("/ws_voice_stream")
 async def ws_voice_stream(ws: WebSocket):
-    await serve_continuous_voice_stream(ws, continuous_capture_manager)
+    await serve_continuous_voice_stream(
+        ws,
+        continuous_capture_manager,
+        authorize=authorize_runtime_websocket,
+    )
 
 
 from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,discover_remote_provider_models,_get_api_key
@@ -380,11 +455,13 @@ async def api_status():
     return s
 
 @app.get("/api/voice/diagnostics")
-async def api_voice_diagnostics():
+async def api_voice_diagnostics(request: Request):
+    _require_runtime_http(request, "diagnostics.read")
     return await voice_diagnostics_collector.collect()
 
 @app.post("/api/voice/playback/speak")
-async def api_voice_playback_speak(data: dict = Body(default={})):
+async def api_voice_playback_speak(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "playback")
     text = str(data.get("text", "") or "").strip()[:3000]
     if not text:
         return {"ok": False, "error": "text is required", "active": False}
@@ -418,11 +495,13 @@ async def api_voice_playback_speak(data: dict = Body(default={})):
     return {**result, "mime": mime}
 
 @app.post("/api/voice/playback/stop")
-async def api_voice_playback_stop():
+async def api_voice_playback_stop(request: Request):
+    _require_runtime_http(request, "playback")
     return await asyncio.to_thread(native_playback_manager.stop)
 
 @app.post("/api/voice/capture/start")
-async def api_voice_capture_start(data: dict = Body(default={})):
+async def api_voice_capture_start(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "voice.capture")
     try:
         return await asyncio.to_thread(
             start_capture,
@@ -438,11 +517,13 @@ async def api_voice_capture_start(data: dict = Body(default={})):
         }
 
 @app.post("/api/voice/capture/stop")
-async def api_voice_capture_stop():
+async def api_voice_capture_stop(request: Request):
+    _require_runtime_http(request, "voice.capture")
     return await asyncio.to_thread(stop_capture)
 
 @app.post("/api/voice/capture/probe")
-async def api_voice_capture_probe(data: dict = Body(default={})):
+async def api_voice_capture_probe(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "voice.capture")
     source = str(data.get("source", "microphone") or "microphone")
     try:
         return await asyncio.to_thread(
@@ -459,7 +540,8 @@ async def api_voice_capture_probe(data: dict = Body(default={})):
         }
 
 @app.post("/api/voice/stt/test")
-async def api_voice_stt_test(data: dict = Body(...)):
+async def api_voice_stt_test(request: Request, data: dict = Body(...)):
+    _require_runtime_http(request, "voice.capture")
     audio = str(data.get("audio", "") or "")
     if not audio:
         return {"ok": False, "error": "audio is required"}
@@ -479,7 +561,8 @@ async def api_voice_stt_test(data: dict = Body(...)):
     }
 
 @app.post("/api/voice/tts/test")
-async def api_voice_tts_test(data: dict = Body(default={})):
+async def api_voice_tts_test(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "playback")
     text = str(data.get("text", "") or "Javis 语音输出正常").strip()[:120]
     from voice.tts import synthesize
 

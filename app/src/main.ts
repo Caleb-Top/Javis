@@ -8,6 +8,11 @@ import { getStartupDesktopMode } from "./app/startupMode.ts";
 import { AppLogger } from "./app/AppLogger";
 import { readStringPreference, writeStringPreference } from "./app/AppPreferences.ts";
 import { createBackendClient, type ConnectionSnapshot } from "./bridge/backendClient";
+import { resolveBackendEndpoints } from "./bridge/backendEndpoints.ts";
+import {
+  createRuntimeAccessProvider,
+  type RuntimeAccessIssueRequest,
+} from "./bridge/runtimeAccess.ts";
 import { createSidecarClient, isTauriRuntime, type SidecarSnapshot } from "./bridge/sidecarClient";
 import { openCodeSurface, closeCodeSurface, mountCodeSurface } from "./code/CodeSurface";
 import {
@@ -123,6 +128,34 @@ let diagnosticsReturnMode: DesktopMode = "live";
 let voiceCapture!: ReturnType<typeof createVoiceCapture>;
 const voiceRequestIds = new Set<string>();
 const sidecar = createSidecarClient();
+
+function createRuntimeClientInstanceId(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `desktop-main-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function issueDevelopmentRuntimeCapability(
+  request: RuntimeAccessIssueRequest,
+): Promise<string> {
+  const endpoints = resolveBackendEndpoints();
+  const response = await fetch(`${endpoints.http}/api/runtime/access`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_instance_id: request.clientInstanceId,
+      scopes: request.scopes,
+      ttl_seconds: request.ttlSeconds,
+    }),
+  });
+  if (!response.ok) throw new Error(`Runtime access HTTP ${response.status}`);
+  return response.text();
+}
+
+const runtimeAccess = createRuntimeAccessProvider({
+  clientInstanceId: createRuntimeClientInstanceId(),
+  issue: isTauriRuntime() ? undefined : issueDevelopmentRuntimeCapability,
+});
 let backendConnection: ConnectionSnapshot = { http: false, websocket: false };
 type ObservableSidecarSnapshot = SidecarSnapshot & {
   ollama_startup?: "idle" | "starting" | "ready" | "failed" | "not-installed";
@@ -245,6 +278,7 @@ async function restartLocalRuntime(route: unknown): Promise<void> {
 
 const client = createBackendClient({
   sessionId: conversationId,
+  runtimeAccessToken: (scope) => runtimeAccess.tokenForScope(scope),
   afterSequence: () => conversationEvents.current().lastSequence,
   onConnection: (snapshot) => {
     backendConnection = snapshot;
@@ -446,6 +480,7 @@ const stopAudioPlayback = (): void => {
   document.dispatchEvent(new CustomEvent("javis:stop-audio"));
 };
 voiceCapture = createVoiceCapture(client, {
+  runtimeAccessToken: (scope) => runtimeAccess.tokenForScope(scope),
   noiseProfile: () => {
     const profile = readStringPreference("voice.noiseProfile", "standard");
     return profile === "off" || profile === "strong" ? profile : "standard";
@@ -478,6 +513,31 @@ voiceCapture = createVoiceCapture(client, {
   onError: (message) => {
     liveCaption.setText(message);
   }
+});
+let runtimeAccessRevision = 0;
+runtimeAccess.subscribe((snapshot) => {
+  if (!snapshot.ready) {
+    if (runtimeAccessRevision > 0) {
+      runtimeStateCoordinator.signal({
+        source: "sidecar",
+        state: "offline",
+        timestamp: Date.now(),
+        detail: "Runtime access expired",
+      });
+    }
+    return;
+  }
+  if (runtimeAccessRevision > 0 && snapshot.revision !== runtimeAccessRevision) {
+    client.refreshRuntimeAccess();
+    void voiceCapture.refreshRuntimeAccess().catch((error) => {
+      AppLogger.write(
+        "warn",
+        "runtime-access",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  }
+  runtimeAccessRevision = snapshot.revision;
 });
 diagnostics = createDiagnosticsPanel(client, sidecar, voiceCapture, {
   onClose: () => {
@@ -653,10 +713,30 @@ async function bootRuntime(): Promise<void> {
     composer?.setConnected(false);
     return;
   }
+  try {
+    await runtimeAccess.ensure();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    AppLogger.write("error", "runtime-access", message);
+    statusRail.setConnection(false);
+    composer?.setConnected(false);
+    runtimeStateCoordinator.signal({
+      source: "sidecar",
+      state: "offline",
+      timestamp: Date.now(),
+      detail: "Runtime authorization unavailable",
+    });
+    return;
+  }
   client.connect();
   await client.checkBackendHealth();
   await openModelSetupIfRequired(snapshot);
 }
+
+window.addEventListener("beforeunload", () => {
+  runtimeAccess.dispose();
+  client.dispose();
+});
 
 if (!previewOrbState && !isTauriRuntime()) {
   void bootRuntime();

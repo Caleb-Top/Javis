@@ -26,9 +26,15 @@ class FakeWebSocket:
         self.sent = []
         self.attached = asyncio.Event()
         self.terminal = asyncio.Event()
+        self.closed = []
+        self.scope = {}
 
-    async def accept(self):
+    async def accept(self, subprotocol=None):
         self.accepted = True
+
+    async def close(self, code, reason=""):
+        self.closed.append((code, reason))
+        self.terminal.set()
 
     async def receive_text(self):
         if self._messages:
@@ -152,7 +158,7 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.run_store.close()
         self.temp.cleanup()
 
-    def make_gateway(self, agent, *, stall_harness=None):
+    def make_gateway(self, agent, *, stall_harness=None, authorize=None):
         self.hub = ConversationHub(self.store, self.run_store)
         runtime = SimpleNamespace(
             agent=agent,
@@ -161,7 +167,44 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
             registry=SimpleNamespace(count=7),
             llm=SimpleNamespace(model="unit-model"),
         )
-        return ConversationWebSocketGateway(runtime, stall_harness=stall_harness)
+        return ConversationWebSocketGateway(
+            runtime,
+            stall_harness=stall_harness,
+            authorize=authorize,
+        )
+
+    async def test_runtime_access_is_checked_before_websocket_accept(self):
+        checks = []
+
+        async def deny(socket, scope):
+            checks.append((socket.accepted, scope))
+            return False
+
+        gateway = self.make_gateway(FakeAgent(), authorize=deny)
+        socket = FakeWebSocket([])
+
+        await gateway.serve(socket)
+
+        self.assertEqual(checks, [(False, "conversation")])
+        self.assertFalse(socket.accepted)
+        self.assertEqual(self.store.stats()["events"], 0)
+
+    async def test_runtime_access_expiry_closes_an_idle_authorized_socket(self):
+        async def allow(socket, scope):
+            socket.scope["javis.runtime_access"] = {
+                "scope": scope,
+                "deadline_monotonic": asyncio.get_running_loop().time() + 0.01,
+            }
+            return True
+
+        gateway = self.make_gateway(FakeAgent(), authorize=allow)
+        socket = FakeWebSocket([])
+
+        await gateway.serve(socket)
+
+        self.assertTrue(socket.accepted)
+        self.assertEqual(socket.closed, [(4401, "capability_expired")])
+        self.assertEqual(self.store.stats()["events"], 0)
 
     @staticmethod
     def canonical_message(request_id, text, *, session_id="stall-session"):

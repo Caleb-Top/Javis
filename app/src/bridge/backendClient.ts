@@ -1,5 +1,6 @@
 import { RequestQueue, createRequestId } from "./requestQueue.ts";
 import { resolveBackendEndpoints } from "./backendEndpoints.ts";
+import type { RuntimeAccessScope } from "./runtimeAccess.ts";
 import { runtimeStateCoordinator } from "../state/RuntimeStateCoordinator.ts";
 
 export type BackendClientOptions = {
@@ -9,6 +10,7 @@ export type BackendClientOptions = {
   onConnection?(snapshot: ConnectionSnapshot): void;
   onEvent?(event: BackendEvent): void;
   requestTimeouts?: Partial<RequestTimeouts>;
+  runtimeAccessToken?(scope: RuntimeAccessScope): string;
 };
 
 export type RequestTimeouts = {
@@ -70,6 +72,7 @@ export type ConnectionSnapshot = {
 export type BackendClient = {
   connect(): void;
   dispose(): void;
+  refreshRuntimeAccess(): void;
   send(text: string): string | null;
   sendVoice(audioBase64: string): string | null;
   cancel(reason?: string): boolean;
@@ -188,8 +191,27 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     options.onConnection?.({ ...connection });
   }
 
+  function runtimeScope(path: string): RuntimeAccessScope {
+    if (path.startsWith("/api/voice/playback/")) return "playback";
+    if (path === "/api/voice/diagnostics" || path.startsWith("/api/diagnostics/")) {
+      return "diagnostics.read";
+    }
+    if (path.startsWith("/api/life/")) return "life.read";
+    if (path.startsWith("/api/voice/")) return "voice.capture";
+    return "conversation";
+  }
+
+  function runtimeHeaders(path: string): Record<string, string> {
+    const token = options.runtimeAccessToken?.(runtimeScope(path)) ?? "";
+    return token ? { "X-Javis-Runtime-Capability": token } : {};
+  }
+
   async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-    const response = await fetch(`${endpoints.http}${path}`, { cache: "no-store", signal });
+    const response = await fetch(`${endpoints.http}${path}`, {
+      cache: "no-store",
+      headers: runtimeHeaders(path),
+      signal,
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json() as Promise<T>;
   }
@@ -197,7 +219,10 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
   async function post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${endpoints.http}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...runtimeHeaders(path),
+      },
       body: JSON.stringify(body),
       signal,
     });
@@ -448,7 +473,13 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     if (disposed) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
-    const socket = new WebSocket(`${endpoints.websocket}/ws`);
+    const token = options.runtimeAccessToken?.("conversation") ?? "";
+    const socket = token
+      ? new WebSocket(`${endpoints.websocket}/ws`, [
+        "javis-runtime-v1",
+        `javis-capability.${token}`,
+      ])
+      : new WebSocket(`${endpoints.websocket}/ws`);
     ws = socket;
     publishReliability({
       connectionPhase: reconnectAttempt > 0 ? "reconnecting" : "connecting",
@@ -677,9 +708,32 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     }
   }
 
+  function refreshRuntimeAccess(): void {
+    if (disposed) return;
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = 0;
+    reconnectAttempt = 0;
+    const socket = ws;
+    ws = null;
+    if (socket) {
+      socket.onopen = null;
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.onmessage = null;
+      try {
+        if (socket.readyState !== WebSocket.CLOSED) socket.close();
+      } catch {
+        // Reauthorization does not depend on the old close handshake.
+      }
+    }
+    publishConnection({ websocket: false });
+    connect();
+  }
+
   return {
     connect,
     dispose,
+    refreshRuntimeAccess,
     send,
     sendVoice,
     cancel,

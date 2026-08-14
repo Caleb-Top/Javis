@@ -130,6 +130,55 @@ def test_shutdown_endpoint_maps_authorization_and_availability(tmp_path, monkeyp
         )
     assert unavailable.value.status_code == 503
 
+
+def test_runtime_access_endpoint_requires_owned_loopback_process(
+    tmp_path,
+    monkeypatch,
+):
+    from core.runtime_access import RuntimeAccessAuthority
+
+    main = _load_main(tmp_path, monkeypatch)
+    controller = main.OwnedRuntimeShutdown(
+        configured_token="owned-token",
+        close_runtime=lambda: None,
+    )
+    monkeypatch.setattr(main, "owned_runtime_shutdown", controller)
+    monkeypatch.setattr(
+        main,
+        "runtime_access_authority",
+        RuntimeAccessAuthority("boot-test"),
+    )
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    payload = {
+        "client_instance_id": "desktop-main",
+        "scopes": ["conversation", "voice.capture"],
+        "ttl_seconds": 30,
+    }
+
+    with pytest.raises(HTTPException) as forbidden:
+        asyncio.run(
+            main.api_runtime_access(
+                request,
+                payload,
+                x_javis_sidecar_ownership="wrong",
+            )
+        )
+    assert forbidden.value.status_code == 403
+
+    issued = asyncio.run(
+        main.api_runtime_access(
+            request,
+            payload,
+            x_javis_sidecar_ownership="owned-token",
+        )
+    )
+    assert issued["ok"] is True
+    assert issued["runtime_boot_id"] == "boot-test"
+    assert issued["client_instance_id"] == "desktop-main"
+    assert issued["scopes"] == ["conversation", "voice.capture"]
+    assert len(issued["token"]) >= 43
+    assert "nonce" not in issued
+
     exited = []
     controller.set_exit_callback(lambda: exited.append(True))
     response = asyncio.run(
@@ -140,6 +189,62 @@ def test_shutdown_endpoint_maps_authorization_and_availability(tmp_path, monkeyp
     )
     assert response == {"ok": True, "state": "shutdown_requested"}
     assert exited == [True]
+
+
+def test_runtime_access_development_issuer_is_explicit_and_origin_bounded(
+    tmp_path,
+    monkeypatch,
+):
+    from core.runtime_access import RuntimeAccessAuthority
+
+    main = _load_main(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "_ALLOW_DEV_RUNTIME_ACCESS", True)
+    monkeypatch.setattr(
+        main,
+        "runtime_access_authority",
+        RuntimeAccessAuthority("boot-dev", allow_development_origins=True),
+    )
+    payload = {
+        "client_instance_id": "browser-preview",
+        "scopes": ["conversation"],
+        "ttl_seconds": 30,
+    }
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"origin": "http://localhost:5173"},
+    )
+
+    issued = asyncio.run(main.api_runtime_access(request, payload))
+    assert issued["ok"] is True
+
+    request.headers["origin"] = "http://localhost:5174"
+    with pytest.raises(HTTPException) as forbidden:
+        asyncio.run(main.api_runtime_access(request, payload))
+    assert forbidden.value.status_code == 403
+
+
+def test_native_capture_http_rejects_before_starting_microphone(
+    tmp_path,
+    monkeypatch,
+):
+    main = _load_main(tmp_path, monkeypatch)
+    started = []
+    monkeypatch.setattr(main, "start_capture", lambda *args: started.append(args))
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"origin": "http://tauri.localhost"},
+    )
+
+    with pytest.raises(HTTPException) as unauthorized:
+        asyncio.run(
+            main.api_voice_capture_start(
+                request,
+                {"source": "microphone"},
+            )
+        )
+
+    assert unauthorized.value.status_code == 401
+    assert started == []
 
 
 def test_sidecar_shutdown_is_loopback_only_and_uses_user_data_root():

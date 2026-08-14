@@ -1,5 +1,6 @@
 import type { BackendClient } from "../bridge/backendClient";
 import { resolveBackendEndpoints } from "../bridge/backendEndpoints.ts";
+import type { RuntimeAccessScope } from "../bridge/runtimeAccess.ts";
 import type { LiveState } from "./liveState";
 
 export type VoiceNoiseProfile = "off" | "standard" | "strong";
@@ -10,7 +11,8 @@ export type VoiceCaptureOptions = {
   onTranscript?(text: string): void;
   onEmptyTranscript?(message: string): void;
   onLevel?(level: number): void;
-  openStream?(url: string): WebSocket;
+  openStream?(url: string, protocols?: string[]): WebSocket;
+  runtimeAccessToken?(scope: RuntimeAccessScope): string;
   reconnectDelaysMs?: readonly number[];
   streamReadyTimeoutMs?: number;
   noiseProfile?(): VoiceNoiseProfile;
@@ -40,6 +42,7 @@ export type VoiceCapture = {
   isContinuous(): boolean;
   setNoiseProfile(profile: VoiceNoiseProfile): Promise<void>;
   resumeListeningState(): void;
+  refreshRuntimeAccess(): Promise<void>;
   probeMicrophone(): Promise<AudioProbeResult>;
   probeSystemAudio(): Promise<AudioProbeResult>;
   selfTest(source?: "microphone" | "system"): Promise<AudioProbeResult>;
@@ -188,8 +191,13 @@ export function createVoiceCapture(
     let socket: WebSocket;
     try {
       const endpoints = resolveBackendEndpoints();
-      socket = options.openStream?.(`${endpoints.websocket}/ws_voice_stream`)
-        ?? new WebSocket(`${endpoints.websocket}/ws_voice_stream`);
+      const url = `${endpoints.websocket}/ws_voice_stream`;
+      const token = options.runtimeAccessToken?.("voice.capture") ?? "";
+      const protocols = token
+        ? ["javis-runtime-v1", `javis-capability.${token}`]
+        : undefined;
+      socket = options.openStream?.(url, protocols)
+        ?? (protocols ? new WebSocket(url, protocols) : new WebSocket(url));
     } catch (cause) {
       const error = cause instanceof Error
         ? cause
@@ -342,6 +350,12 @@ export function createVoiceCapture(
     await startContinuous();
   }
 
+  async function refreshRuntimeAccess(): Promise<void> {
+    if (!wantsContinuous) return;
+    await pauseContinuous();
+    await startContinuous();
+  }
+
   async function probe(source: "microphone" | "system"): Promise<AudioProbeResult> {
     try {
       return await client.post<AudioProbeResult>("/api/voice/capture/probe", {
@@ -366,6 +380,7 @@ export function createVoiceCapture(
     pauseContinuous,
     isContinuous: () => continuous,
     setNoiseProfile,
+    refreshRuntimeAccess,
     resumeListeningState: () => {
       if (continuous) options.onState("listening");
     },

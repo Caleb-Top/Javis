@@ -18,9 +18,11 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   readonly url: string;
+  readonly protocols: string[];
 
-  constructor(url: string) {
+  constructor(url: string, protocols: string[] = []) {
     this.url = url;
+    this.protocols = protocols;
     FakeWebSocket.instances.push(this);
   }
 
@@ -52,6 +54,48 @@ class FakeWebSocket {
     this.onmessage?.({ data: JSON.stringify(payload) });
   }
 }
+
+test("backend client sends scoped runtime access on WebSocket and HTTP", async () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ input: string; headers: Headers }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({
+      input: String(input),
+      headers: new Headers(init?.headers),
+    });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  const client = createBackendClient({
+    sessionId: "authorized-session",
+    runtimeAccessToken: (scope) => `token-for-${scope}`,
+  });
+
+  try {
+    client.connect();
+    assert.deepEqual(FakeWebSocket.instances[0].protocols, [
+      "javis-runtime-v1",
+      "javis-capability.token-for-conversation",
+    ]);
+    await client.get("/api/voice/diagnostics");
+    await client.post("/api/voice/playback/stop", {});
+    assert.equal(
+      requests[0].headers.get("X-Javis-Runtime-Capability"),
+      "token-for-diagnostics.read",
+    );
+    assert.equal(
+      requests[1].headers.get("X-Javis-Runtime-Capability"),
+      "token-for-playback",
+    );
+  } finally {
+    client.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
 
 function installBrowserFakes(): void {
   Object.assign(globalThis, {

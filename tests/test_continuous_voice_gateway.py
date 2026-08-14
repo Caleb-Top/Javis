@@ -21,9 +21,14 @@ class FakeSocket:
         self.messages = list(messages)
         self.sent = []
         self.accepted = False
+        self.closed = []
+        self.scope = {}
 
-    async def accept(self):
+    async def accept(self, subprotocol=None):
         self.accepted = True
+
+    async def close(self, code, reason=""):
+        self.closed.append((code, reason))
 
     async def receive_json(self):
         if not self.messages:
@@ -352,6 +357,62 @@ class OverlappingGenerationManager:
 
 
 class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_access_is_checked_before_accept_or_capture_start(self):
+        checks = []
+
+        async def deny(socket, scope):
+            checks.append((socket.accepted, scope))
+            return False
+
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        manager = FakeManager()
+
+        await serve_continuous_voice_stream(socket, manager, authorize=deny)
+
+        self.assertEqual(checks, [(False, "voice.capture")])
+        self.assertFalse(socket.accepted)
+        self.assertEqual(manager.started, [])
+
+    async def test_expired_runtime_access_cannot_start_capture(self):
+        async def allow_expired(socket, scope):
+            socket.scope["javis.runtime_access"] = {
+                "scope": scope,
+                "deadline_monotonic": asyncio.get_running_loop().time() - 1,
+            }
+            return True
+
+        socket = FakeSocket(
+            [{
+                "type": "audio.stream.start",
+                "payload": {
+                    "session_id": "session-expired",
+                    "noise_profile": "standard",
+                },
+            }]
+        )
+        manager = FakeManager()
+
+        await serve_continuous_voice_stream(
+            socket,
+            manager,
+            authorize=allow_expired,
+        )
+
+        self.assertTrue(socket.accepted)
+        self.assertEqual(socket.closed, [(4401, "capability_expired")])
+        self.assertEqual(manager.started, [])
+        self.assertEqual(socket.sent, [])
+
     async def test_intentional_close_does_not_turn_a_later_start_into_reconnect(self):
         diagnostics = VoiceGatewayDiagnostics()
         diagnostics.note_connection("private-explicit-stop", 1)
