@@ -1,0 +1,45 @@
+"""Public immutable contract surface for the Javis life kernel."""
+
+from .contracts import (
+    ContinuityCheckpoint,
+    ExpressionBaseState,
+    ExpressionIntent,
+    GazeTarget,
+    HealthSummary,
+    IdentityConstitution,
+    IdentitySummary,
+    InstanceRecord,
+    InstanceSummary,
+    LifeCycleState,
+    LifeEvent,
+    LifeSnapshot,
+    PrivacyClass,
+    RetentionClass,
+    StartupAssessment,
+    VoiceActivity,
+    canonical_content_hash,
+    canonical_json_bytes,
+)
+from .service import LifeService
+
+__all__ = [
+    "LifeCycleState",
+    "PrivacyClass",
+    "RetentionClass",
+    "ExpressionBaseState",
+    "GazeTarget",
+    "VoiceActivity",
+    "IdentityConstitution",
+    "InstanceRecord",
+    "ContinuityCheckpoint",
+    "StartupAssessment",
+    "LifeEvent",
+    "IdentitySummary",
+    "InstanceSummary",
+    "HealthSummary",
+    "LifeSnapshot",
+    "ExpressionIntent",
+    "canonical_json_bytes",
+    "canonical_content_hash",
+    "LifeService",
+]

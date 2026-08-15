@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib, json, logging, time
 from typing import Optional
 from core.memory_kernel import get_core_memory_kernel
+from core.life.l1.contracts import InnerStateSnapshot
 
 logger = logging.getLogger("prompt_builder")
 
@@ -30,6 +31,89 @@ CANONICAL_STYLE_RULES = (
     "用户风格: 先结论后数据，短句优先，不读原始数据行，用自然口语回答。",
     "规则: 工具返回值只作为依据，不能复读原始日志或原始数据。",
 )
+
+_RUNTIME_STATE_HEADER = "JAVIS_RUNTIME_STATE_V1"
+
+
+def _coerce_inner_state_snapshot(value) -> InnerStateSnapshot:
+    if isinstance(value, InnerStateSnapshot):
+        return value
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        value = value.to_dict()
+    if isinstance(value, dict):
+        return InnerStateSnapshot.from_dict(value)
+    raise TypeError("inner state must be an InnerStateSnapshot or wire dict")
+
+
+def _runtime_attention_label(snapshot: InnerStateSnapshot) -> str:
+    mode = snapshot.attention.mode.value
+    target_kind = snapshot.attention.target_kind
+    if mode == "engaged" and target_kind == "request":
+        return "active_user_request"
+    if mode == "engaged" and target_kind == "tool":
+        return "active_tool_work"
+    return mode
+
+
+def _runtime_guidance(snapshot: InnerStateSnapshot) -> list[str]:
+    guidance: list[str] = []
+    mode = snapshot.attention.mode.value
+    homeostasis = snapshot.homeostasis
+    if mode == "listening":
+        guidance.append("listen_first")
+    if homeostasis.cognitive_load >= 0.25 or mode in {"engaged", "speaking"}:
+        guidance.append("be_concise")
+    if snapshot.degraded or homeostasis.caution >= 0.25 or mode in {
+        "awaiting_approval",
+        "blocked",
+        "recovering",
+    }:
+        guidance.append("state_uncertainty_explicitly")
+    if mode == "awaiting_approval":
+        guidance.append("await_user_approval")
+    if mode == "blocked":
+        guidance.append("ask_for_needed_input")
+    if mode == "recovering":
+        guidance.append("recover_safely")
+    if not guidance:
+        guidance.append("continue_normally")
+    return list(dict.fromkeys(guidance))
+
+
+def build_runtime_state_summary(inner_state) -> str:
+    snapshot = _coerce_inner_state_snapshot(inner_state)
+    summary = "\n".join(
+        [
+            _RUNTIME_STATE_HEADER,
+            f"phase={snapshot.phase}",
+            f"attention={_runtime_attention_label(snapshot)}",
+            f"caution={snapshot.homeostasis.caution:.2f}",
+            f"certainty={snapshot.homeostasis.certainty:.2f}",
+            f"blockedness={snapshot.homeostasis.blockedness:.2f}",
+            f"guidance={';'.join(_runtime_guidance(snapshot))}",
+        ]
+    )
+    encoded = summary.encode("utf-8")
+    if len(encoded) <= 512:
+        return summary
+    guidance = _runtime_guidance(snapshot)
+    while len(encoded) > 512 and len(guidance) > 1:
+        guidance.pop()
+        summary = "\n".join(
+            [
+                _RUNTIME_STATE_HEADER,
+                f"phase={snapshot.phase}",
+                f"attention={_runtime_attention_label(snapshot)}",
+                f"caution={snapshot.homeostasis.caution:.2f}",
+                f"certainty={snapshot.homeostasis.certainty:.2f}",
+                f"blockedness={snapshot.homeostasis.blockedness:.2f}",
+                f"guidance={';'.join(guidance)}",
+            ]
+        )
+        encoded = summary.encode("utf-8")
+    if len(encoded) > 512:
+        raise ValueError("runtime state summary exceeds 512 bytes")
+    return summary
 
 
 # ============================================================
@@ -334,13 +418,15 @@ class PhaseGuidanceBuilder:
 class PromptBuilder:
     """组装三层 Prompt，带分层缓存"""
 
-    def __init__(self, brain=None):
+    def __init__(self, brain=None, runtime_state_provider=None):
         self.brain = brain
+        self._runtime_state_provider = runtime_state_provider
 
         # 分层缓存
         self._layer1: str = LAYER1_BASE_IDENTITY  # 静态
         self._layer2: str = ""
         self._layer2_hash: str = ""  # brain 数据指纹
+        self._layer_runtime_state: str = ""
         self._layer3: str = ""
         self._layer3_phase: str = ""  # 上次构建时的 phase
 
@@ -384,6 +470,32 @@ class PromptBuilder:
         logger.debug(f"📍 Layer3 重建 phase={phase} ({len(self._layer3)} chars)")
         return self._layer3
 
+    def build_runtime_state(self, force: bool = False) -> str:
+        """只读运行态摘要（L1 可用时注入）"""
+        if self._runtime_state_provider is None:
+            self._layer_runtime_state = ""
+            return ""
+        try:
+            inner_state = self._runtime_state_provider()
+        except Exception as exc:
+            logger.warning("Runtime state provider failed: %s", exc)
+            self._layer_runtime_state = ""
+            return ""
+        if inner_state is None:
+            self._layer_runtime_state = ""
+            return ""
+        try:
+            summary = build_runtime_state_summary(inner_state)
+        except Exception as exc:
+            logger.warning("Runtime state summary unavailable: %s", exc)
+            self._layer_runtime_state = ""
+            return ""
+        if not force and summary == self._layer_runtime_state and self._layer_runtime_state:
+            return self._layer_runtime_state
+        self._layer_runtime_state = summary
+        logger.debug(f"🫀 Runtime state summary refreshed ({len(summary)} chars)")
+        return summary
+
     # ── 完整组装 ──
 
     def build(self, phase: str = "planning", step: int = 0,
@@ -398,16 +510,20 @@ class PromptBuilder:
         # 缓存判断: 非强制 + 同一步数窗口内
         if (not force_rebuild
                 and self._cached_full
-                and step - self._cached_step < self._rebuild_every_n_steps):
+                and step - self._cached_step < self._rebuild_every_n_steps
+                and self._runtime_state_provider is None):
             return self._cached_full
 
         layer1 = self.build_layer1()
         layer2 = self.build_layer2(force=force_rebuild)
+        runtime_state = self.build_runtime_state(force=force_rebuild)
         layer3 = self.build_layer3(phase, force=force_rebuild)
 
         parts = [layer1]
         if layer2:
             parts.append(layer2)
+        if runtime_state:
+            parts.append(runtime_state)
         parts.append(layer3)
 
         full = "\n".join(parts)
@@ -426,10 +542,17 @@ class PromptBuilder:
     def invalidate_cache(self):
         """使所有缓存失效（brain 数据大更新后调用）"""
         self._layer2_hash = ""
+        self._layer_runtime_state = ""
         self._layer3_phase = ""
         self._cached_full = ""
         self._cached_step = -1
         logger.debug("🗑 Prompt 缓存已清除")
+
+    def set_runtime_state_provider(self, provider) -> None:
+        if provider is not None and not callable(provider):
+            raise TypeError("runtime_state_provider must be callable or None")
+        self._runtime_state_provider = provider
+        self.invalidate_cache()
 
     # ── 内部方法 ──
 
@@ -464,11 +587,13 @@ class PromptBuilder:
             "build_count": self._build_count,
             "layer1_size": len(self._layer1),
             "layer2_size": len(self._layer2),
+            "runtime_state_size": len(self._layer_runtime_state),
             "layer3_size": len(self._layer3),
             "full_size": len(self._cached_full),
             "cached_step": self._cached_step,
             "current_phase": self._layer3_phase,
             "has_layer2": bool(self._layer2),
+            "has_runtime_state": bool(self._layer_runtime_state),
         }
 
 
@@ -486,5 +611,6 @@ __all__ = [
     "MemoryLayerBuilder",
     "PhaseGuidanceBuilder",
     "LAYER1_BASE_IDENTITY",
+    "build_runtime_state_summary",
     "build_dynamic_prompt",
 ]

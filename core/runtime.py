@@ -10,7 +10,9 @@ import importlib
 import json
 import logging
 import os
+import platform
 import pkgutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,8 @@ from core.conversation_store import ConversationStore
 from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
+from core.life.paths import resolve_data_root
+from core.life.service import LifeService
 from core.middleware import MiddlewarePipeline
 from core.skill_catalog import SkillCatalog, SkillGovernanceError
 from core.subsystem import SubsystemStatus
@@ -39,6 +43,7 @@ class JarvisRuntime:
     """Owns the core objects shared by API, WebSocket, and future subsystems."""
 
     root: Path
+    data_root: Path
     startup_side_effects: bool
     brain: Brain
     learner: Learner
@@ -53,6 +58,7 @@ class JarvisRuntime:
     agent_runs: AgentRunStore
     conversation_store: ConversationStore
     conversation_hub: ConversationHub
+    life: LifeService
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -413,8 +419,14 @@ def _start_background_services(brain: Brain) -> None:
         logger.warning("Escape 钩子未启动: %s", exc)
 
 
-def create_runtime(root: str | Path, startup_side_effects: bool = True) -> JarvisRuntime:
+def create_runtime(
+    root: str | Path,
+    startup_side_effects: bool = True,
+    *,
+    data_root: str | Path | None = None,
+) -> JarvisRuntime:
     root = Path(root).resolve()
+    resolved_data_root = resolve_data_root(root, explicit=data_root)
     if startup_side_effects:
         _run_tool_setup()
 
@@ -443,10 +455,16 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         middleware=middleware,
     )
     tool_catalog = ToolCatalog(registry)
-    skill_catalog = SkillCatalog(root / "data" / "skills" / "catalog.sqlite3", event_bus=event_bus)
-    agent_runs = AgentRunStore(root / "data" / "agent_runs" / "runs.sqlite3", event_bus=event_bus)
+    skill_catalog = SkillCatalog(
+        resolved_data_root / "skills" / "catalog.sqlite3",
+        event_bus=event_bus,
+    )
+    agent_runs = AgentRunStore(
+        resolved_data_root / "agent_runs" / "runs.sqlite3",
+        event_bus=event_bus,
+    )
     conversation_store = ConversationStore(
-        root / "data" / "conversations" / "conversations.sqlite3"
+        resolved_data_root / "conversations" / "conversations.sqlite3"
     )
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
@@ -463,10 +481,24 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         conversation_store,
         agent_runs,
         resolve_confirmation=agent.resolve_confirm,
+        event_bus=event_bus,
+    )
+    environment_fingerprint = "|".join(
+        (
+            os.name,
+            sys.platform,
+            platform.machine().casefold() or "unknown-machine",
+            str(root),
+        )
+    )
+    life = LifeService(
+        resolved_data_root,
+        environment_fingerprint=environment_fingerprint,
     )
 
     runtime = JarvisRuntime(
         root=root,
+        data_root=resolved_data_root,
         startup_side_effects=startup_side_effects,
         brain=brain,
         learner=learner,
@@ -481,6 +513,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         agent_runs=agent_runs,
         conversation_store=conversation_store,
         conversation_hub=conversation_hub,
+        life=life,
     )
     runtime.register_always_on_tools()
     _discover_external_skill_imports(runtime)
@@ -493,6 +526,7 @@ def create_runtime(root: str | Path, startup_side_effects: bool = True) -> Jarvi
         runtime.discover_skills()
         runtime.load_skill("全功能")
 
+    runtime.register_subsystem(life)
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     return runtime
 

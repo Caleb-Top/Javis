@@ -3,16 +3,52 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
 from core.agent_run_recorder import AgentRunRecorder
 from core.agent_runs import AgentRunStore
 from core.cancellation import CancellationToken, RequestCancelled
 from core.conversation_store import ConversationStore, ConversationStoreError
+from core.events import EventBus
+from core.life.l1.contracts import InputProvenance
+from core.life.l1.wake import DETERMINISTIC_LOCAL_LANE, EXCLUSIVE_LANE
 
 
 Runner = Callable[["ConversationRequest", CancellationToken], AsyncIterator[dict[str, Any]]]
+
+_SYSTEM_EVENT_TYPES = frozenset(
+    {"life.snapshot", "life.expression", "life.inner_state.changed"}
+)
+_RUNTIME_REQUEST_EVENTS = frozenset(
+    {
+        "request.accepted",
+        "request.cancellation_pending",
+        "request.completed",
+        "request.cancelled",
+        "request.failed",
+    }
+)
+_RUNTIME_ACTIVITY_EVENTS = frozenset(
+    {
+        "activity.understanding",
+        "activity.thinking",
+        "activity.tool_started",
+        "activity.tool_completed",
+        "activity.blocked",
+        "activity.error",
+    }
+)
+_RUNTIME_OBSERVATION_EVENTS = (
+    _RUNTIME_REQUEST_EVENTS
+    | _RUNTIME_ACTIVITY_EVENTS
+    | {
+        "approval.required",
+        "approval.resolved",
+        "interaction.interrupted",
+        "user.invoked",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +58,8 @@ class ConversationRequest:
     text: str
     interaction_mode: str = ""
     idempotency_key: str = ""
+    input_provenance: InputProvenance = field(default_factory=InputProvenance.unknown)
+    execution_lane: str = EXCLUSIVE_LANE
 
 
 @dataclass
@@ -66,9 +104,11 @@ class ConversationHub:
         run_store: AgentRunStore,
         *,
         resolve_confirmation: Callable[[bool], None] | None = None,
+        event_bus: EventBus | None = None,
     ):
         self.store = store
         self.run_store = run_store
+        self.event_bus = event_bus
         self._resolve_confirmation = resolve_confirmation
         self._lock = asyncio.Lock()
         self._execution_lock = asyncio.Lock()
@@ -91,26 +131,31 @@ class ConversationHub:
             self._subscribers.setdefault(session, set()).add(queue)
         return ConversationSubscription(self, session, queue, replay)
 
+    def subscribed_sessions(self) -> tuple[str, ...]:
+        """Return session identifiers without exposing subscriber queues."""
+
+        return tuple(sorted(self._subscribers))
+
+    async def publish_system_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if event_type not in _SYSTEM_EVENT_TYPES:
+            raise ConversationStoreError(
+                f"system conversation event is not registered: {event_type}"
+            )
+        if not isinstance(payload, dict):
+            raise ConversationStoreError("system event payload must be an object")
+        return await self._publish(session_id, "", event_type, payload)
+
     async def submit(
         self,
         request: ConversationRequest,
         runner: Runner,
     ) -> dict[str, Any]:
         normalized = self._validate_request(request)
-        claimed_request, created = self.store.claim_idempotency_key(
-            normalized.session_id,
-            normalized.idempotency_key,
-            normalized.request_id,
-        )
-        if not created:
-            return {"accepted": False, "request_id": claimed_request, "duplicate": True}
-
-        self.store.append_message(
-            normalized.session_id,
-            normalized.request_id,
-            "user",
-            normalized.text,
-        )
         loop = asyncio.get_running_loop()
         active = _ActiveRequest(
             request=normalized,
@@ -119,36 +164,66 @@ class ConversationHub:
         )
 
         async with self._lock:
-            if normalized.request_id in self._request_index:
-                raise ConversationStoreError(
-                    f"request_id is already active: {normalized.request_id}"
-                )
             previous = self._active.get(normalized.session_id)
-            if previous is not None:
-                cancelled = self._request_cancel_locked(previous, "replacement request")
-                if cancelled:
-                    await self._publish(
-                        previous.request.session_id,
-                        previous.request.request_id,
-                        "request.cancellation_pending",
-                        {"reason": "replacement request"},
-                    )
-            await self._publish(
+            should_cancel_previous = bool(
+                previous is not None and not previous.token.cancelled
+            )
+            preceding_events = (
+                ((
+                    previous.request.request_id,
+                    "request.cancellation_pending",
+                    {"reason": "replacement request"},
+                ),)
+                if should_cancel_previous and previous is not None
+                else ()
+            )
+            acceptance = self.store.accept_request(
                 normalized.session_id,
                 normalized.request_id,
-                "request.accepted",
+                normalized.idempotency_key,
+                normalized.text,
                 {
                     "text": normalized.text,
                     "interaction_mode": normalized.interaction_mode,
                     "replaces_request_id": previous.request.request_id if previous else "",
+                    "input_provenance": normalized.input_provenance.to_dict(),
+                    "execution_lane": normalized.execution_lane,
                 },
+                preceding_events=preceding_events,
             )
+            if not acceptance["accepted"]:
+                return {
+                    "accepted": False,
+                    "request_id": acceptance["request_id"],
+                    "duplicate": True,
+                    "event": acceptance["event"],
+                }
+            if should_cancel_previous and previous is not None:
+                self._request_cancel_locked(previous, "replacement request")
+            invoked_event = None
+            if normalized.execution_lane == DETERMINISTIC_LOCAL_LANE:
+                invoked_event = self.store.append_event(
+                    normalized.session_id,
+                    normalized.request_id,
+                    "user.invoked",
+                    {"execution_lane": normalized.execution_lane},
+                )
+            self._active[normalized.session_id] = active
+            self._request_index[normalized.request_id] = active
+            for event in acceptance["preceding_events"]:
+                self._broadcast_persisted(event)
+            self._broadcast_persisted(acceptance["event"])
+            if invoked_event is not None:
+                self._broadcast_persisted(invoked_event)
             active.task = asyncio.create_task(
                 self._run_after_previous(active, previous.task if previous else None, runner)
             )
-            self._active[normalized.session_id] = active
-            self._request_index[normalized.request_id] = active
-        return {"accepted": True, "request_id": normalized.request_id, "duplicate": False}
+        return {
+            "accepted": True,
+            "request_id": normalized.request_id,
+            "duplicate": False,
+            "event": acceptance["event"],
+        }
 
     async def cancel(
         self,
@@ -166,6 +241,15 @@ class ConversationHub:
             cancelled = self._request_cancel_locked(active, reason)
             if not cancelled:
                 return False
+            await self._publish(
+                active.request.session_id,
+                active.request.request_id,
+                "interaction.interrupted",
+                {
+                    "reason": str(reason or "cancelled")[:160],
+                    "execution_lane": active.request.execution_lane,
+                },
+            )
             await self._publish(
                 active.request.session_id,
                 active.request.request_id,
@@ -253,6 +337,9 @@ class ConversationHub:
         previous_task: asyncio.Task | None,
         runner: Runner,
     ) -> None:
+        if active.request.execution_lane == DETERMINISTIC_LOCAL_LANE:
+            await self._run_request(active, runner)
+            return
         if previous_task is not None:
             await asyncio.gather(previous_task, return_exceptions=True)
         async with self._execution_lock:
@@ -471,6 +558,12 @@ class ConversationHub:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         event = self.store.append_event(session_id, request_id, event_type, payload)
+        self._broadcast_persisted(event)
+        return event
+
+    def _broadcast_persisted(self, event: dict[str, Any]) -> None:
+        self._publish_runtime_observation(event)
+        session_id = str(event.get("session_id") or "")
         for queue in tuple(self._subscribers.get(session_id, ())):
             if queue.full():
                 try:
@@ -478,7 +571,69 @@ class ConversationHub:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(dict(event))
-        return event
+
+    def _publish_runtime_observation(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if self.event_bus is None or event_type not in _RUNTIME_OBSERVATION_EVENTS:
+            return
+        session_id = str(event.get("session_id") or "")
+        request_id = str(event.get("request_id") or "")
+        if not session_id or not request_id:
+            return
+        canonical_payload = event.get("payload")
+        if not isinstance(canonical_payload, dict):
+            canonical_payload = {}
+        active = self._request_index.get(request_id)
+        interaction_mode = (
+            active.request.interaction_mode
+            if active is not None
+            else str(canonical_payload.get("interaction_mode") or "")[:32]
+        )
+        execution_lane = (
+            active.request.execution_lane
+            if active is not None
+            else str(canonical_payload.get("execution_lane") or EXCLUSIVE_LANE)[:32]
+        )
+        observation: dict[str, Any] = {
+            "source_event_id": str(event.get("event_id") or ""),
+            "source_sequence": int(event.get("sequence") or 0),
+            "source_sequence_domain": f"conversation_store:{session_id}",
+            "session_id": session_id,
+            "request_id": request_id,
+            "correlation_id": request_id,
+            "interaction_mode": interaction_mode,
+            "execution_lane": execution_lane,
+        }
+        if event_type in {
+            "activity.tool_started",
+            "activity.tool_completed",
+            "approval.required",
+        }:
+            tool = str(canonical_payload.get("tool") or "").strip()[:128]
+            if tool:
+                observation["tool"] = tool
+        if event_type == "activity.tool_completed":
+            observation["success"] = bool(canonical_payload.get("success", False))
+        if event_type == "approval.required":
+            approval_id = str(canonical_payload.get("approval_id") or "").strip()[:256]
+            if approval_id:
+                observation["approval_id"] = approval_id
+        if event_type == "approval.resolved":
+            confirmed = canonical_payload.get("confirmed")
+            if type(confirmed) is bool:
+                observation["confirmed"] = confirmed
+        diagnostic_code = str(canonical_payload.get("code") or "").strip()[:80]
+        if diagnostic_code and all(
+            char.isalnum() or char in "._-" for char in diagnostic_code
+        ):
+            observation["code"] = diagnostic_code
+        self.event_bus.publish(
+            event_type,
+            observation,
+            source="conversation",
+            correlation_id=request_id,
+            causation_id=observation["source_event_id"],
+        )
 
     async def _detach(self, session_id: str, queue: asyncio.Queue) -> None:
         async with self._lock:
@@ -496,6 +651,8 @@ class ConversationHub:
         text = str(request.text or "").strip()
         interaction_mode = str(request.interaction_mode or "").strip()[:32]
         idempotency_key = str(request.idempotency_key or request_id).strip()
+        input_provenance = request.input_provenance
+        execution_lane = str(request.execution_lane or "").strip()
         for field, value in (
             ("session_id", session_id),
             ("request_id", request_id),
@@ -505,10 +662,16 @@ class ConversationHub:
                 raise ConversationStoreError(f"invalid {field}")
         if not text or len(text) > 100_000:
             raise ConversationStoreError("invalid conversation text")
+        if not isinstance(input_provenance, InputProvenance):
+            raise ConversationStoreError("invalid input provenance")
+        if execution_lane not in {EXCLUSIVE_LANE, DETERMINISTIC_LOCAL_LANE}:
+            raise ConversationStoreError("invalid execution lane")
         return ConversationRequest(
             session_id,
             request_id,
             text,
             interaction_mode,
             idempotency_key,
+            input_provenance,
+            execution_lane,
         )

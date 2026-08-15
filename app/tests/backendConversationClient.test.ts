@@ -18,9 +18,11 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   readonly url: string;
+  readonly protocols: string[];
 
-  constructor(url: string) {
+  constructor(url: string, protocols: string[] = []) {
     this.url = url;
+    this.protocols = protocols;
     FakeWebSocket.instances.push(this);
   }
 
@@ -53,6 +55,48 @@ class FakeWebSocket {
   }
 }
 
+test("backend client sends scoped runtime access on WebSocket and HTTP", async () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ input: string; headers: Headers }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    requests.push({
+      input: String(input),
+      headers: new Headers(init?.headers),
+    });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  const client = createBackendClient({
+    sessionId: "authorized-session",
+    runtimeAccessToken: (scope) => `token-for-${scope}`,
+  });
+
+  try {
+    client.connect();
+    assert.deepEqual(FakeWebSocket.instances[0].protocols, [
+      "javis-runtime-v1",
+      "javis-capability.token-for-conversation",
+    ]);
+    await client.get("/api/voice/diagnostics");
+    await client.post("/api/voice/playback/stop", {});
+    assert.equal(
+      requests[0].headers.get("X-Javis-Runtime-Capability"),
+      "token-for-diagnostics.read",
+    );
+    assert.equal(
+      requests[1].headers.get("X-Javis-Runtime-Capability"),
+      "token-for-playback",
+    );
+  } finally {
+    client.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 function installBrowserFakes(): void {
   Object.assign(globalThis, {
     WebSocket: FakeWebSocket,
@@ -79,6 +123,18 @@ function canonicalEvent(
     timestamp: "2026-08-08T12:00:00.000Z",
     type,
     payload,
+  };
+}
+
+function voiceProvenance(sessionId: string): Record<string, unknown> {
+  return {
+    runtime_boot_id: "boot-voice-1",
+    session_id: sessionId,
+    owner_generation: 4,
+    voice_sequence: 9,
+    voice_turn: 2,
+    nonce: "voice-nonce-00000001",
+    proof: "a".repeat(64),
   };
 }
 
@@ -112,7 +168,7 @@ test("the native client attaches and uses one canonical conversation", () => {
   assert.equal("recent_cards" in payload, false);
   assert.equal(client.sessionId(), "session-1");
   assert.equal(client.activeRequestId(), requestId);
-  client.cancel("test cleanup");
+  client.cancel(requestId as string, "test cleanup");
 });
 
 test("cancel targets the active request and prevents queued replay", () => {
@@ -124,7 +180,7 @@ test("cancel targets the active request and prevents queued replay", () => {
   socket.open();
   const requestId = client.send("a long task");
 
-  assert.equal(client.cancel("new voice input"), true);
+  assert.equal(client.cancel(requestId as string, "new voice input"), true);
   assert.deepEqual(socket.sent.at(-1), {
     type: "conversation.cancel",
     payload: {
@@ -313,9 +369,9 @@ test("reliability snapshots are redacted copies and publish request phase change
 
   const observationCount = observed.length;
   unsubscribe();
-  client.send("not observed after unsubscribe");
+  const unobservedRequestId = client.send("not observed after unsubscribe");
   assert.equal(observed.length, observationCount);
-  client.cancel("test cleanup");
+  client.cancel(unobservedRequestId as string, "test cleanup");
 });
 
 test("connection diagnostics count reconnect and recovery once and ignore retired sockets", () => {
@@ -469,8 +525,8 @@ test("explicit cancellation clears request watchdogs", async () => {
   const socket = FakeWebSocket.instances[0];
   socket.open();
 
-  client.send("cancel before timeout");
-  assert.equal(client.cancel("test cancellation"), true);
+  const requestId = client.send("cancel before timeout");
+  assert.equal(client.cancel(requestId as string, "test cancellation"), true);
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.equal(
@@ -619,6 +675,56 @@ test("replacement drops old progress and old failure cannot poison the new runti
     4,
   ));
   assert.equal(client.activeRequestId(), null);
+});
+
+test("verified continuous voice sends one strict provenance reference", () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const client = createBackendClient({ sessionId: "session-voice-provenance" });
+  client.connect();
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  const reference = voiceProvenance("session-voice-provenance");
+
+  const requestId = client.send("verified spoken request", reference as never);
+  const payload = socket.sent.at(-1)?.payload as Record<string, unknown>;
+
+  assert.equal(payload.request_id, requestId);
+  assert.deepEqual(payload.voice_provenance, reference);
+  assert.notEqual(payload.voice_provenance, reference);
+  assert.throws(
+    () => client.send(
+      "tampered spoken request",
+      { ...reference, modality: "voice" } as never,
+    ),
+    /voice provenance/i,
+  );
+  assert.equal(client.activeRequestId(), requestId);
+  client.cancel(requestId as string, "test cleanup");
+});
+
+test("late explicit cancellation cannot clear or target the replacement request", () => {
+  installBrowserFakes();
+  FakeWebSocket.instances = [];
+  const client = createBackendClient({ sessionId: "session-scoped-cancel" });
+  client.connect();
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  const oldRequestId = client.send("old request") as string;
+  const newRequestId = client.send("new request") as string;
+
+  assert.equal(client.cancel(oldRequestId, "delayed voice barge-in"), true);
+  assert.equal(client.activeRequestId(), newRequestId);
+  assert.deepEqual(socket.sent.at(-1), {
+    type: "conversation.cancel",
+    payload: {
+      session_id: "session-scoped-cancel",
+      request_id: oldRequestId,
+      reason: "delayed voice barge-in",
+      protocol_version: 2,
+    },
+  });
+  client.cancel(newRequestId, "test cleanup");
 });
 
 for (const terminalType of ["request.completed", "request.cancelled"] as const) {

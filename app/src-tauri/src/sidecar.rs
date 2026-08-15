@@ -1,18 +1,23 @@
 use crate::{app_log, bundled_ollama::BundledOllama};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::{
-    env,
+    collections::HashSet,
+    env, fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -22,11 +27,45 @@ const CREATE_NO_WINDOW: u32 = 0;
 pub const MAX_RESTART_ATTEMPTS: u8 = 3;
 const PORT: u16 = 8080;
 const STARTUP_POLLS: usize = 20;
+const MAX_RUNTIME_ACCESS_RESPONSE_BYTES: u64 = 64 * 1024;
+const RUNTIME_ACCESS_SCOPES: [&str; 5] = [
+    "conversation",
+    "diagnostics.read",
+    "life.read",
+    "playback",
+    "voice.capture",
+];
+
+#[path = "sidecar_shutdown.rs"]
+mod sidecar_shutdown;
+use sidecar_shutdown::{stop_owned_process, OwnedProcess, SHUTDOWN_POLLS};
 
 enum ProbeResult {
     Ready,
     PortConflict,
     Offline,
+}
+
+impl OwnedProcess for Child {
+    fn has_exited(&mut self) -> Result<bool, String> {
+        self.try_wait()
+            .map(|status| status.is_some())
+            .map_err(|error| format!("failed to poll owned Sidecar: {error}"))
+    }
+
+    fn force_kill(&mut self) -> Result<(), String> {
+        if self.has_exited()? {
+            return Ok(());
+        }
+        self.kill()
+            .map_err(|error| format!("failed to kill owned Sidecar: {error}"))
+    }
+
+    fn wait_for_exit(&mut self) -> Result<(), String> {
+        self.wait()
+            .map(|_| ())
+            .map_err(|error| format!("failed to wait for owned Sidecar: {error}"))
+    }
 }
 
 struct SidecarRuntime {
@@ -225,7 +264,14 @@ impl SidecarManager {
             return Err(format!("missing runtime entry: {}", entry.display()));
         }
         let (stdout, stderr) = app_log::runtime_log_files(app)?;
-        let token = ownership_token();
+        let token = ownership_token()?;
+        let data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("failed to resolve Javis data root: {error}"))?
+            .join("runtime-data");
+        fs::create_dir_all(&data_root)
+            .map_err(|error| format!("failed to create Javis data root: {error}"))?;
         let mut command = Command::new(&python);
         command
             .arg("-u")
@@ -233,7 +279,7 @@ impl SidecarManager {
             .current_dir(&root)
             .env("PORT", PORT.to_string())
             .env("JAVIS_SIDECAR_OWNERSHIP", &token)
-            .env("JAVIS_DATA_ROOT", &root)
+            .env("JAVIS_DATA_ROOT", &data_root)
             .env("JAVIS_BUNDLED_OLLAMA_URL", self.ollama.openai_base_url())
             .env("OLLAMA_MODELS", self.ollama.model_root())
             .stdout(Stdio::from(stdout))
@@ -276,27 +322,50 @@ impl SidecarManager {
     }
 
     pub fn stop_owned(&self) -> Result<String, String> {
-        let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
-        runtime.ollama_start_generation = runtime.ollama_start_generation.saturating_add(1);
-        runtime.ollama_startup = "idle".to_string();
-        runtime.ollama_error.clear();
-        if runtime.ownership_token.is_none() || runtime.owned_pid.is_none() {
-            runtime.attached_existing = false;
-            drop(runtime);
+        let owned = {
+            let mut runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+            runtime.ollama_start_generation = runtime.ollama_start_generation.saturating_add(1);
+            runtime.ollama_startup = "idle".to_string();
+            runtime.ollama_error.clear();
+            if runtime.ownership_token.is_none() || runtime.owned_pid.is_none() {
+                runtime.attached_existing = false;
+                None
+            } else {
+                let child = runtime.child.take();
+                let token = runtime.ownership_token.take();
+                let pid = runtime.owned_pid.take();
+                runtime.attached_existing = false;
+                match (child, token, pid) {
+                    (Some(child), Some(token), Some(pid)) => Some((child, token, pid)),
+                    _ => None,
+                }
+            }
+        };
+        let Some((mut child, token, pid)) = owned else {
             self.ollama.stop_owned()?;
             return Ok("no owned Sidecar process".to_string());
-        }
-        if let Some(child) = runtime.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        runtime.child = None;
-        runtime.owned_pid = None;
-        runtime.ownership_token = None;
-        runtime.attached_existing = false;
-        drop(runtime);
+        };
+        let stop_result = stop_owned_process(
+            &mut child,
+            &token,
+            |ownership| request_runtime_shutdown(PORT, ownership),
+            thread::sleep,
+            SHUTDOWN_POLLS,
+        );
+        let mode = match stop_result {
+            Ok(mode) => mode,
+            Err(error) => {
+                let mut runtime = self.runtime.lock().map_err(|lock_error| {
+                    format!("{error}; failed to restore Sidecar ownership: {lock_error}")
+                })?;
+                runtime.child = Some(child);
+                runtime.ownership_token = Some(token);
+                runtime.owned_pid = Some(pid);
+                return Err(error);
+            }
+        };
         self.ollama.stop_owned()?;
-        Ok("owned Sidecar stopped".to_string())
+        Ok(format!("owned Sidecar {pid} stopped via {mode:?}"))
     }
 
     pub fn restart(&self, app: &AppHandle) -> Result<String, String> {
@@ -309,6 +378,32 @@ impl SidecarManager {
         }
         self.stop_owned()?;
         self.start(app)
+    }
+
+    pub fn issue_runtime_capability(
+        &self,
+        client_instance_id: &str,
+        scopes: &[String],
+        ttl_seconds: u16,
+    ) -> Result<String, String> {
+        validate_runtime_access_request(client_instance_id, scopes, ttl_seconds)?;
+        let ownership_token = {
+            let runtime = self.runtime.lock().map_err(|error| error.to_string())?;
+            if runtime.attached_existing || runtime.owned_pid.is_none() {
+                return Err("runtime capability requires an owned Sidecar".to_string());
+            }
+            runtime
+                .ownership_token
+                .clone()
+                .ok_or_else(|| "runtime ownership token is unavailable".to_string())?
+        };
+        request_runtime_capability(
+            PORT,
+            &ownership_token,
+            client_instance_id,
+            scopes,
+            ttl_seconds,
+        )
     }
 }
 
@@ -337,6 +432,36 @@ fn probe_backend(port: u16) -> ProbeResult {
         ProbeResult::Ready
     } else {
         ProbeResult::PortConflict
+    }
+}
+
+fn request_runtime_shutdown(port: u16, token: &str) -> Result<(), String> {
+    if token.is_empty() || token.contains(['\r', '\n']) {
+        return Err("invalid Sidecar ownership token".to_string());
+    }
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(600))
+        .map_err(|error| format!("graceful shutdown connection failed: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("shutdown read timeout failed: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(800)))
+        .map_err(|error| format!("shutdown write timeout failed: {error}"))?;
+    let request = format!(
+        "POST /api/runtime/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Javis-Sidecar-Ownership: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("graceful shutdown request failed: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("graceful shutdown response failed: {error}"))?;
+    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err("graceful shutdown was rejected".to_string())
     }
 }
 
@@ -380,12 +505,113 @@ fn find_python(root: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("python"))
 }
 
-fn ownership_token() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("javis-app-{}-{nanos}", std::process::id())
+#[cfg(target_os = "windows")]
+fn ownership_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    let status = unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if !status.is_ok() {
+        return Err(format!(
+            "failed to generate Sidecar ownership token: NTSTATUS {}",
+            status.0
+        ));
+    }
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ownership_token() -> Result<String, String> {
+    Err("secure Sidecar ownership tokens require the Windows runtime".to_string())
+}
+
+fn validate_runtime_access_request(
+    client_instance_id: &str,
+    scopes: &[String],
+    ttl_seconds: u16,
+) -> Result<(), String> {
+    let valid_client_id = !client_instance_id.is_empty()
+        && client_instance_id.len() <= 128
+        && client_instance_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !valid_client_id {
+        return Err("invalid runtime access client instance id".to_string());
+    }
+    if scopes.is_empty() || scopes.len() > RUNTIME_ACCESS_SCOPES.len() {
+        return Err("runtime access requires bounded scopes".to_string());
+    }
+    let mut seen = HashSet::with_capacity(scopes.len());
+    for scope in scopes {
+        if !RUNTIME_ACCESS_SCOPES.contains(&scope.as_str()) {
+            return Err("unsupported runtime access scope".to_string());
+        }
+        if !seen.insert(scope.as_str()) {
+            return Err("duplicate runtime access scope".to_string());
+        }
+    }
+    if !(1..=300).contains(&ttl_seconds) {
+        return Err("runtime capability TTL must be between 1 and 300 seconds".to_string());
+    }
+    Ok(())
+}
+
+fn request_runtime_capability(
+    port: u16,
+    ownership_token: &str,
+    client_instance_id: &str,
+    scopes: &[String],
+    ttl_seconds: u16,
+) -> Result<String, String> {
+    if ownership_token.is_empty() || ownership_token.contains(['\r', '\n']) {
+        return Err("invalid Sidecar ownership token".to_string());
+    }
+    validate_runtime_access_request(client_instance_id, scopes, ttl_seconds)?;
+    let scope_json = scopes
+        .iter()
+        .map(|scope| format!("\"{scope}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(
+        "{{\"client_instance_id\":\"{}\",\"scopes\":[{}],\"ttl_seconds\":{}}}",
+        json_escape(client_instance_id),
+        scope_json,
+        ttl_seconds,
+    );
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(600))
+        .map_err(|error| format!("runtime capability connection failed: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("runtime capability read timeout failed: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(800)))
+        .map_err(|error| format!("runtime capability write timeout failed: {error}"))?;
+    let request = format!(
+        "POST /api/runtime/access HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Javis-Sidecar-Ownership: {ownership_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("runtime capability request failed: {error}"))?;
+    let mut response_bytes = Vec::new();
+    (&mut stream)
+        .take(MAX_RUNTIME_ACCESS_RESPONSE_BYTES + 1)
+        .read_to_end(&mut response_bytes)
+        .map_err(|error| format!("runtime capability response failed: {error}"))?;
+    if response_bytes.len() as u64 > MAX_RUNTIME_ACCESS_RESPONSE_BYTES {
+        return Err("runtime capability response exceeded its size limit".to_string());
+    }
+    let response = String::from_utf8(response_bytes)
+        .map_err(|_| "runtime capability response was not UTF-8".to_string())?;
+    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
+        return Err("runtime capability request was rejected".to_string());
+    }
+    let (_, response_body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "runtime capability response was malformed".to_string())?;
+    if response_body.is_empty() {
+        return Err("runtime capability response was empty".to_string());
+    }
+    Ok(response_body.to_string())
 }
 
 fn json_escape(value: &str) -> String {
@@ -393,4 +619,31 @@ fn json_escape(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_access_requests_are_strictly_bounded() {
+        let scopes = RUNTIME_ACCESS_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect::<Vec<_>>();
+        assert!(validate_runtime_access_request("desktop-main_1", &scopes, 300).is_ok());
+        assert!(validate_runtime_access_request("bad client", &scopes, 300).is_err());
+        assert!(validate_runtime_access_request("desktop", &["unknown".to_string()], 60).is_err());
+        assert!(validate_runtime_access_request("desktop", &[], 60).is_err());
+        assert!(validate_runtime_access_request("desktop", &scopes, 0).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ownership_tokens_have_256_bits_of_random_input() {
+        let first = ownership_token().expect("ownership token");
+        let second = ownership_token().expect("ownership token");
+        assert_eq!(first.len(), 43);
+        assert_ne!(first, second);
+    }
 }

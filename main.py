@@ -1,6 +1,7 @@
 ﻿"""JARVIS Web 版入口"""
-import os,sys,json,logging,asyncio
+import os,sys,json,logging,asyncio,hmac,inspect,ipaddress
 from contextlib import asynccontextmanager
+from typing import Any, Callable
 sys.excepthook=lambda t,v,tb:print(f"FATAL: {t.__name__}: {v}",file=sys.stderr,flush=True)
 from pathlib import Path
 ROOT=Path(__file__).parent;sys.path.insert(0,str(ROOT))
@@ -15,8 +16,83 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 _TEST_MODE = _env_flag("JAVIS_TEST_MODE")
 _STARTUP_SIDE_EFFECTS = not _TEST_MODE and not _env_flag("JAVIS_DISABLE_STARTUP_SIDE_EFFECTS")
+_SIDECAR_OWNERSHIP_TOKEN = os.environ.get("JAVIS_SIDECAR_OWNERSHIP", "")
+
+
+class OwnedRuntimeShutdown:
+    """Authorize one owned, loopback-only graceful runtime shutdown."""
+
+    def __init__(
+        self,
+        *,
+        configured_token: str,
+        close_runtime: Callable[[], Any],
+    ) -> None:
+        self._configured_token = str(configured_token or "")
+        self._close_runtime = close_runtime
+        self._exit_callback: Callable[[], Any] | None = None
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._exit_requested = False
+
+    def set_exit_callback(self, callback: Callable[[], Any]) -> None:
+        if not callable(callback):
+            raise TypeError("shutdown callback must be callable")
+        self._exit_callback = callback
+
+    def authorized_owner(self, peer_host: str, presented_token: str) -> bool:
+        return self._authorized(peer_host, presented_token)
+
+    async def close_once(self) -> bool:
+        async with self._lock:
+            return await self._close_once_locked()
+
+    async def request(self, peer_host: str, presented_token: str) -> bool:
+        if not self._authorized(peer_host, presented_token):
+            raise PermissionError("owned runtime shutdown is forbidden")
+        async with self._lock:
+            if self._exit_requested:
+                return False
+            callback = self._exit_callback
+            if callback is None:
+                raise RuntimeError("owned runtime shutdown callback is unavailable")
+            await self._close_once_locked()
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+            self._exit_requested = True
+            return True
+
+    async def _close_once_locked(self) -> bool:
+        if self._closed:
+            return False
+        result = self._close_runtime()
+        if inspect.isawaitable(result):
+            await result
+        self._closed = True
+        return True
+
+    def _authorized(self, peer_host: str, presented_token: str) -> bool:
+        if not self._configured_token:
+            return False
+        try:
+            host = str(peer_host or "").split("%", 1)[0]
+            if not ipaddress.ip_address(host).is_loopback:
+                return False
+        except ValueError:
+            return False
+        return hmac.compare_digest(
+            self._configured_token.encode("utf-8"),
+            str(presented_token or "").encode("utf-8"),
+        )
 
 from core.runtime import create_runtime
+from core.runtime_access import (
+    DEVELOPMENT_ORIGINS,
+    RuntimeAccessAuthority,
+    create_http_authorizer,
+    create_websocket_authorizer,
+)
 from core.agent_run_recorder import AgentRunRecorder
 from gateway.conversation_stall_harness import ConversationStallHarness
 from gateway.conversation_ws import ConversationWebSocketGateway
@@ -36,9 +112,11 @@ from voice.native_capture import (
 )
 from voice.continuous_capture import continuous_capture_manager
 from voice.native_playback import NativePlaybackManager
+from voice.playback_events import PlaybackLifecyclePublisher
 from voice.runtime_diagnostics import VoiceDiagnosticsCollector
 from voice.stt import get_diagnostics as get_stt_diagnostics, preload_model
 from voice.streaming_ws import get_gateway_diagnostics, serve_continuous_voice_stream
+from voice.turn_registry import VoiceTurnRegistry
 from voice.tts import get_diagnostics as get_tts_diagnostics
 from utils.local_surface_commands import match_local_surface_command
 
@@ -110,7 +188,14 @@ engine = runtime.engine
 agent = runtime.agent
 SKILL_LIST = runtime.skill_list
 CURRENT_SKILL = runtime.current_skill
-native_playback_manager = NativePlaybackManager(service=continuous_capture_manager.service)
+playback_lifecycle_publisher = PlaybackLifecyclePublisher(
+    runtime_boot_id=str(runtime.life.status().get("boot_id") or "runtime-boot-unavailable"),
+    duration_sink=runtime.life.observe_playback,
+)
+native_playback_manager = NativePlaybackManager(
+    service=continuous_capture_manager.service,
+    lifecycle=playback_lifecycle_publisher,
+)
 voice_diagnostics_collector = VoiceDiagnosticsCollector(
     capture_getter=get_capture_diagnostics,
     continuous_getter=continuous_capture_manager.status,
@@ -119,6 +204,26 @@ voice_diagnostics_collector = VoiceDiagnosticsCollector(
     stt_getter=get_stt_diagnostics,
     tts_getter=get_tts_diagnostics,
 )
+
+
+async def _close_runtime_once() -> None:
+    await runtime.aclose()
+
+
+owned_runtime_shutdown = OwnedRuntimeShutdown(
+    configured_token=_SIDECAR_OWNERSHIP_TOKEN,
+    close_runtime=_close_runtime_once,
+)
+_ALLOW_DEV_RUNTIME_ACCESS = (
+    _TEST_MODE and _env_flag("JAVIS_ALLOW_DEV_RUNTIME_ACCESS")
+)
+runtime_access_authority = RuntimeAccessAuthority(
+    str(runtime.life.status().get("boot_id") or "runtime-boot-unavailable"),
+    allow_development_origins=_ALLOW_DEV_RUNTIME_ACCESS,
+)
+voice_turn_registry = VoiceTurnRegistry(runtime_access_authority.runtime_boot_id)
+authorize_runtime_http = create_http_authorizer(runtime_access_authority)
+authorize_runtime_websocket = create_websocket_authorizer(runtime_access_authority)
 
 def _register_always_on_tools():
     runtime.register_always_on_tools()
@@ -134,19 +239,25 @@ def _discover():
     global SKILL_LIST
     SKILL_LIST = runtime.discover_skills()
     return SKILL_LIST
-from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body
+from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body,Header,HTTPException,Request
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
+from core.life.api import LifeSessionPublisher, create_life_router
 from utils.app_cors import install_desktop_cors
+
+
+life_session_publisher = LifeSessionPublisher(runtime.life, runtime.conversation_hub)
 
 
 @asynccontextmanager
 async def _app_lifespan(_app):
     warmup_task = None
+    life_session_publisher.start(asyncio.get_running_loop())
     if _STARTUP_SIDE_EFFECTS:
         warmup_task = asyncio.create_task(asyncio.to_thread(preload_model))
     try:
         yield
     finally:
+        await life_session_publisher.stop()
         await asyncio.to_thread(native_playback_manager.stop)
         await asyncio.to_thread(continuous_capture_manager.stop)
         if warmup_task is not None and warmup_task.done():
@@ -154,17 +265,89 @@ async def _app_lifespan(_app):
                 warmup_task.result()
             except Exception as error:
                 logger.warning("STT model warmup failed: %s", error)
-        await runtime.aclose()
+        await owned_runtime_shutdown.close_once()
 
 
 app=FastAPI(title="JARVIS",version="2.0",lifespan=_app_lifespan)
-install_desktop_cors(app)
+install_desktop_cors(
+    app,
+    allow_development_origins=_ALLOW_DEV_RUNTIME_ACCESS,
+)
+app.include_router(create_life_router(runtime.life))
 
 @app.get("/")
 async def root():return FileResponse(str(ROOT/"web"/"index.html"))
 
 @app.get("/favicon.ico")
 async def favicon():return FileResponse(str(ROOT/"web"/"favicon.ico"))
+
+
+@app.post("/api/runtime/shutdown")
+async def api_runtime_shutdown(
+    request: Request,
+    x_javis_sidecar_ownership: str = Header(default=""),
+):
+    peer_host = request.client.host if request.client is not None else ""
+    try:
+        await owned_runtime_shutdown.request(
+            peer_host,
+            x_javis_sidecar_ownership,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="forbidden") from exc
+    except Exception as exc:
+        logger.error("Owned runtime shutdown failed: %s", exc)
+        raise HTTPException(status_code=503, detail="shutdown unavailable") from exc
+    return {"ok": True, "state": "shutdown_requested"}
+
+
+@app.post("/api/runtime/access")
+async def api_runtime_access(
+    request: Request,
+    data: dict = Body(default={}),
+    x_javis_sidecar_ownership: str = Header(default=""),
+):
+    peer_host = request.client.host if request.client is not None else ""
+    owned_issuer = owned_runtime_shutdown.authorized_owner(
+        peer_host,
+        x_javis_sidecar_ownership,
+    )
+    development_issuer = False
+    if _ALLOW_DEV_RUNTIME_ACCESS:
+        try:
+            normalized_host = str(peer_host or "").split("%", 1)[0]
+            loopback = ipaddress.ip_address(normalized_host).is_loopback
+        except ValueError:
+            loopback = False
+        origin = str(request.headers.get("origin", "") or "").strip().casefold()
+        development_issuer = loopback and origin in DEVELOPMENT_ORIGINS
+    if not owned_issuer and not development_issuer:
+        raise HTTPException(status_code=403, detail="forbidden")
+    try:
+        issued = runtime_access_authority.issue(
+            str(data.get("client_instance_id") or ""),
+            data.get("scopes") or (),
+            ttl_seconds=int(data.get("ttl_seconds", 60)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)[:160]) from exc
+    return {
+        "ok": True,
+        "token": issued.token,
+        "runtime_boot_id": issued.runtime_boot_id,
+        "client_instance_id": issued.client_instance_id,
+        "scopes": list(issued.scopes),
+        "issued_at_epoch": issued.issued_at_epoch,
+        "expires_at_epoch": issued.expires_at_epoch,
+    }
+
+
+def _require_runtime_http(request: Request, scope: str) -> None:
+    decision = authorize_runtime_http(request, scope)
+    if decision.allowed:
+        return
+    status_code = 401 if decision.close_code == 4401 else 403
+    raise HTTPException(status_code=status_code, detail=decision.reason_code)
 
 def _save_uploaded_file_for_ws(path: str, content: str) -> Path:
     safe = Path(path or "").name
@@ -252,6 +435,8 @@ conversation_gateway = ConversationWebSocketGateway(
         "permission_change": _handle_ws_permission_change,
     },
     stall_harness=conversation_stall_harness,
+    authorize=authorize_runtime_websocket,
+    voice_turn_registry=voice_turn_registry,
 )
 
 
@@ -262,7 +447,13 @@ async def ws(ws: WebSocket):
 
 @app.websocket("/ws_voice_stream")
 async def ws_voice_stream(ws: WebSocket):
-    await serve_continuous_voice_stream(ws, continuous_capture_manager)
+    await serve_continuous_voice_stream(
+        ws,
+        continuous_capture_manager,
+        authorize=authorize_runtime_websocket,
+        voice_turn_registry=voice_turn_registry,
+        life_observer=runtime.life.observe_voice_event,
+    )
 
 
 from utils.config_api import get_status,set_api_key,set_provider,set_model_name,get_effort,set_effort,EFFORT_LEVELS,get_permission_level,set_permission_level,PERMISSION_LEVELS,get_path_settings,set_path_settings,get_model_connection_settings,set_model_connection_settings,discover_remote_provider_models,_get_api_key
@@ -277,14 +468,23 @@ async def api_status():
     return s
 
 @app.get("/api/voice/diagnostics")
-async def api_voice_diagnostics():
+async def api_voice_diagnostics(request: Request):
+    _require_runtime_http(request, "diagnostics.read")
     return await voice_diagnostics_collector.collect()
 
 @app.post("/api/voice/playback/speak")
-async def api_voice_playback_speak(data: dict = Body(default={})):
+async def api_voice_playback_speak(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "playback")
     text = str(data.get("text", "") or "").strip()[:3000]
     if not text:
         return {"ok": False, "error": "text is required", "active": False}
+    session_id=data.get("session_id")
+    request_id=data.get("request_id")
+    try:
+        NativePlaybackManager._validate_stop_id(session_id, "session_id")
+        NativePlaybackManager._validate_stop_id(request_id, "request_id")
+    except ValueError as error:
+        return {"ok": False, "error": str(error), "active": False}
     reservation = await asyncio.to_thread(native_playback_manager.reserve)
     from voice.tts import synthesize
 
@@ -309,17 +509,37 @@ async def api_voice_playback_speak(data: dict = Body(default={})):
             None,
             None,
             reservation,
+            session_id=session_id,
+            request_id=request_id,
         )
     except Exception as error:
         return {"ok": False, "error": str(error), "active": False}
     return {**result, "mime": mime}
 
 @app.post("/api/voice/playback/stop")
-async def api_voice_playback_stop():
-    return await asyncio.to_thread(native_playback_manager.stop)
+async def api_voice_playback_stop(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "playback")
+    playback_id=data.get("playback_id")
+    generation=data.get("generation")
+    session_id=data.get("session_id")
+    request_id=data.get("request_id")
+    identity = (playback_id, generation, session_id, request_id)
+    if not any(value is not None for value in identity):
+        return await asyncio.to_thread(native_playback_manager.stop)
+    try:
+        return await asyncio.to_thread(
+            native_playback_manager.stop,
+            playback_id=playback_id,
+            generation=generation,
+            session_id=session_id,
+            request_id=request_id,
+        )
+    except (TypeError, ValueError) as error:
+        return {"ok": False, "error": str(error), "active": False}
 
 @app.post("/api/voice/capture/start")
-async def api_voice_capture_start(data: dict = Body(default={})):
+async def api_voice_capture_start(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "voice.capture")
     try:
         return await asyncio.to_thread(
             start_capture,
@@ -335,11 +555,13 @@ async def api_voice_capture_start(data: dict = Body(default={})):
         }
 
 @app.post("/api/voice/capture/stop")
-async def api_voice_capture_stop():
+async def api_voice_capture_stop(request: Request):
+    _require_runtime_http(request, "voice.capture")
     return await asyncio.to_thread(stop_capture)
 
 @app.post("/api/voice/capture/probe")
-async def api_voice_capture_probe(data: dict = Body(default={})):
+async def api_voice_capture_probe(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "voice.capture")
     source = str(data.get("source", "microphone") or "microphone")
     try:
         raw_device_index = data.get("device_index")
@@ -363,7 +585,8 @@ async def api_voice_capture_probe(data: dict = Body(default={})):
         }
 
 @app.post("/api/voice/stt/test")
-async def api_voice_stt_test(data: dict = Body(...)):
+async def api_voice_stt_test(request: Request, data: dict = Body(...)):
+    _require_runtime_http(request, "voice.capture")
     audio = str(data.get("audio", "") or "")
     if not audio:
         return {"ok": False, "error": "audio is required"}
@@ -383,7 +606,8 @@ async def api_voice_stt_test(data: dict = Body(...)):
     }
 
 @app.post("/api/voice/tts/test")
-async def api_voice_tts_test(data: dict = Body(default={})):
+async def api_voice_tts_test(request: Request, data: dict = Body(default={})):
+    _require_runtime_http(request, "playback")
     text = str(data.get("text", "") or "Javis 语音输出正常").strip()[:120]
     from voice.tts import synthesize
 
@@ -1712,4 +1936,9 @@ if __name__=="__main__":
     from voice.tts import _trim_cache
     try:_trim_cache()
     except Exception:pass
-    uvicorn.run(app,host=h,port=p,log_level="info")
+    config = uvicorn.Config(app, host=h, port=p, log_level="info")
+    server = uvicorn.Server(config)
+    owned_runtime_shutdown.set_exit_callback(
+        lambda: setattr(server, "should_exit", True)
+    )
+    server.run()

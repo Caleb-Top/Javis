@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from contextlib import suppress
 from typing import Any, Callable
 
@@ -18,6 +19,13 @@ from core.conversation_protocol import (
     legacy_wire_events,
     normalize_client_message,
 )
+from core.life.l1.contracts import (
+    InputModality,
+    InputProvenance,
+    InputVerification,
+)
+from core.life.l1.wake import DETERMINISTIC_LOCAL_LANE, PresenceResponder
+from core.runtime_access import websocket_access_remaining
 from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
 
@@ -33,15 +41,29 @@ class ConversationWebSocketGateway:
         local_action_resolver: Callable[[str, dict[str, Any]], Any] | None = None,
         command_handlers: dict[str, Callable[[ClientCommand, Any], Any]] | None = None,
         stall_harness: ConversationStallHarness | None = None,
+        authorize: Callable[[Any, str], Any] | None = None,
+        voice_turn_registry=None,
+        presence_responder: PresenceResponder | None = None,
     ):
         self.runtime = runtime
         self.transcribe = transcribe
         self.local_action_resolver = local_action_resolver
         self.command_handlers = dict(command_handlers or {})
         self.stall_harness = stall_harness
+        self.authorize = authorize
+        self.voice_turn_registry = voice_turn_registry
+        self.presence_responder = presence_responder or PresenceResponder()
 
     async def serve(self, ws) -> None:
-        await ws.accept()
+        if self.authorize is not None:
+            allowed = self.authorize(ws, "conversation")
+            if inspect.isawaitable(allowed):
+                allowed = await allowed
+            if not allowed:
+                return
+            await ws.accept(subprotocol="javis-runtime-v1")
+        else:
+            await ws.accept()
         subscription = None
         sender: asyncio.Task | None = None
         attached_session = ""
@@ -107,7 +129,19 @@ class ConversationWebSocketGateway:
 
         try:
             while True:
-                raw = await ws.receive_text()
+                remaining = websocket_access_remaining(ws)
+                if remaining is not None and remaining <= 0:
+                    await ws.close(code=4401, reason="capability_expired")
+                    break
+                try:
+                    raw = await (
+                        ws.receive_text()
+                        if remaining is None
+                        else asyncio.wait_for(ws.receive_text(), timeout=remaining)
+                    )
+                except asyncio.TimeoutError:
+                    await ws.close(code=4401, reason="capability_expired")
+                    break
                 try:
                     message = json.loads(raw)
                     command = normalize_client_message(message, default_session=attached_session)
@@ -196,17 +230,99 @@ class ConversationWebSocketGateway:
         *,
         text: str | None = None,
         stall_mode: StallMode | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         user_text = str(text if text is not None else command.payload.get("text") or "").strip()
+        voice_reference = command.voice_provenance
+        reservation_active = False
+        if voice_reference is not None:
+            if self.voice_turn_registry is None:
+                raise ConversationProtocolError(
+                    "voice_provenance_unavailable",
+                    "verified voice provenance is unavailable",
+                )
+            prior = self.runtime.conversation_store.accepted_request(
+                command.session_id,
+                command.idempotency_key or command.request_id,
+                command.request_id,
+            )
+            if prior is not None:
+                return {
+                    "accepted": False,
+                    "request_id": prior["request_id"],
+                    "duplicate": True,
+                    "event": prior["event"],
+                }
+            try:
+                input_provenance = self.voice_turn_registry.reserve(
+                    voice_reference,
+                    transcript=user_text,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+                reservation_active = True
+            except ValueError as exc:
+                raise ConversationProtocolError(
+                    "invalid_voice_provenance", str(exc)[:200]
+                ) from exc
+        elif command.type == "voice" and text is not None:
+            input_provenance = InputProvenance(
+                InputModality.VOICE,
+                InputVerification.SERVER_TRANSCRIBED,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        else:
+            input_provenance = InputProvenance(
+                InputModality.TEXT,
+                InputVerification.CLIENT_CLAIMED,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        try:
+            presence_decision = self.presence_responder.decide(
+                user_text,
+                session_id=command.session_id,
+                request_id=command.request_id,
+                idempotency_key=command.idempotency_key or command.request_id,
+                input_provenance=input_provenance,
+                now_monotonic_ms=time.monotonic() * 1000.0,
+            )
+        except (TypeError, ValueError) as exc:
+            if reservation_active:
+                self.voice_turn_registry.rollback(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+            raise ConversationProtocolError(
+                "invalid_presence_invocation", str(exc)[:200]
+            ) from exc
+
         request = ConversationRequest(
             session_id=command.session_id,
             request_id=command.request_id,
             text=user_text,
             interaction_mode=str(command.payload.get("interaction_mode") or ""),
             idempotency_key=command.idempotency_key or command.request_id,
+            input_provenance=input_provenance,
+            execution_lane=presence_decision.execution_lane,
         )
 
         async def runner(active_request, token):
+            if active_request.execution_lane == DETERMINISTIC_LOCAL_LANE:
+                if presence_decision.should_respond:
+                    yield {
+                        "type": "text_delta",
+                        "text": presence_decision.response_text,
+                    }
+                yield {"type": "done", "success": True, "detail": "presence"}
+                return
             if stall_mode is not None:
                 if self.stall_harness is None:
                     raise RuntimeError("stall mode requires an injected harness")
@@ -239,7 +355,30 @@ class ConversationWebSocketGateway:
             ):
                 yield event
 
-        await self.runtime.conversation_hub.submit(request, runner)
+        try:
+            result = await self.runtime.conversation_hub.submit(request, runner)
+        except BaseException:
+            if reservation_active:
+                self.voice_turn_registry.rollback(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+            raise
+        if reservation_active:
+            if result["accepted"]:
+                self.voice_turn_registry.commit(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+            else:
+                self.voice_turn_registry.rollback(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+        return result
 
     async def _dispatch_local_action(self, ws, command: ClientCommand) -> bool:
         if self.local_action_resolver is None:

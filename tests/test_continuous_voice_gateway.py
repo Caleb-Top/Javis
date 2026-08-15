@@ -14,6 +14,7 @@ from voice.continuous_capture import (
     ContinuousVoiceService,
     NativeContinuousCaptureManager,
 )
+from voice.turn_registry import VoiceTurnRegistry
 
 
 class FakeSocket:
@@ -21,9 +22,14 @@ class FakeSocket:
         self.messages = list(messages)
         self.sent = []
         self.accepted = False
+        self.closed = []
+        self.scope = {}
 
-    async def accept(self):
+    async def accept(self, subprotocol=None):
         self.accepted = True
+
+    async def close(self, code, reason=""):
+        self.closed.append((code, reason))
 
     async def receive_json(self):
         if not self.messages:
@@ -352,6 +358,62 @@ class OverlappingGenerationManager:
 
 
 class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_access_is_checked_before_accept_or_capture_start(self):
+        checks = []
+
+        async def deny(socket, scope):
+            checks.append((socket.accepted, scope))
+            return False
+
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                }
+            ]
+        )
+        manager = FakeManager()
+
+        await serve_continuous_voice_stream(socket, manager, authorize=deny)
+
+        self.assertEqual(checks, [(False, "voice.capture")])
+        self.assertFalse(socket.accepted)
+        self.assertEqual(manager.started, [])
+
+    async def test_expired_runtime_access_cannot_start_capture(self):
+        async def allow_expired(socket, scope):
+            socket.scope["javis.runtime_access"] = {
+                "scope": scope,
+                "deadline_monotonic": asyncio.get_running_loop().time() - 1,
+            }
+            return True
+
+        socket = FakeSocket(
+            [{
+                "type": "audio.stream.start",
+                "payload": {
+                    "session_id": "session-expired",
+                    "noise_profile": "standard",
+                },
+            }]
+        )
+        manager = FakeManager()
+
+        await serve_continuous_voice_stream(
+            socket,
+            manager,
+            authorize=allow_expired,
+        )
+
+        self.assertTrue(socket.accepted)
+        self.assertEqual(socket.closed, [(4401, "capability_expired")])
+        self.assertEqual(manager.started, [])
+        self.assertEqual(socket.sent, [])
+
     async def test_intentional_close_does_not_turn_a_later_start_into_reconnect(self):
         diagnostics = VoiceGatewayDiagnostics()
         diagnostics.note_connection("private-explicit-stop", 1)
@@ -990,6 +1052,114 @@ class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertNotIn("pcm", repr(socket.sent).lower())
+
+    async def test_life_observer_receives_only_redacted_voice_lifecycle_metadata(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {"session_id": "session-1"},
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+        observed = []
+
+        def observe(event, *, session_id, owner_generation):
+            observed.append((event, session_id, owner_generation))
+
+        await serve_continuous_voice_stream(
+            socket,
+            FakeManager(),
+            life_observer=observe,
+        )
+
+        self.assertEqual(
+            [event[0]["type"] for event in observed],
+            ["audio.stream.ready", "audio.stream.stopped"],
+        )
+        self.assertTrue(all(item[1:] == ("session-1", 0) for item in observed))
+        self.assertTrue(
+            all(
+                set(event) <= {
+                    "type",
+                    "sequence",
+                    "owner_generation",
+                    "timestamp",
+                    "monotonic_offset_ms",
+                }
+                for event, _, _ in observed
+            )
+        )
+        self.assertNotIn("text", repr(observed).lower())
+
+    async def test_life_observer_failure_does_not_stop_audio_event_delivery(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {"session_id": "session-1"},
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+
+        def broken_observer(event, *, session_id, owner_generation):
+            raise RuntimeError("life unavailable")
+
+        await serve_continuous_voice_stream(
+            socket,
+            FakeManager(),
+            life_observer=broken_observer,
+        )
+
+        self.assertEqual(
+            [message["type"] for message in socket.sent],
+            [
+                "audio.stream.ready",
+                "speech.start",
+                "transcript.final",
+                "audio.stream.stopped",
+            ],
+        )
+
+    async def test_final_transcript_carries_backend_voice_provenance(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+        registry = VoiceTurnRegistry("boot-1")
+
+        await serve_continuous_voice_stream(
+            socket,
+            FakeManager(),
+            voice_turn_registry=registry,
+        )
+
+        final = next(item for item in socket.sent if item["type"] == "transcript.final")
+        reference = final["voice_provenance"]
+        self.assertEqual(reference["runtime_boot_id"], "boot-1")
+        self.assertEqual(reference["session_id"], "session-1")
+        self.assertEqual(reference["voice_sequence"], final["sequence"])
+        self.assertNotIn("text", reference)
+        self.assertEqual(registry.stats()["available"], 1)
 
     async def test_invalid_noise_profile_fails_closed(self):
         socket = FakeSocket(

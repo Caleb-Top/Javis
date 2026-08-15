@@ -17,6 +17,7 @@ from gateway.conversation_stall_harness import (
     ConversationStallHarness,
 )
 from gateway.conversation_ws import ConversationWebSocketGateway
+from voice.turn_registry import VoiceTurnRegistry
 
 
 class FakeWebSocket:
@@ -26,9 +27,15 @@ class FakeWebSocket:
         self.sent = []
         self.attached = asyncio.Event()
         self.terminal = asyncio.Event()
+        self.closed = []
+        self.scope = {}
 
-    async def accept(self):
+    async def accept(self, subprotocol=None):
         self.accepted = True
+
+    async def close(self, code, reason=""):
+        self.closed.append((code, reason))
+        self.terminal.set()
 
     async def receive_text(self):
         if self._messages:
@@ -152,7 +159,14 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.run_store.close()
         self.temp.cleanup()
 
-    def make_gateway(self, agent, *, stall_harness=None):
+    def make_gateway(
+        self,
+        agent,
+        *,
+        stall_harness=None,
+        authorize=None,
+        voice_turn_registry=None,
+    ):
         self.hub = ConversationHub(self.store, self.run_store)
         runtime = SimpleNamespace(
             agent=agent,
@@ -161,7 +175,45 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
             registry=SimpleNamespace(count=7),
             llm=SimpleNamespace(model="unit-model"),
         )
-        return ConversationWebSocketGateway(runtime, stall_harness=stall_harness)
+        return ConversationWebSocketGateway(
+            runtime,
+            stall_harness=stall_harness,
+            authorize=authorize,
+            voice_turn_registry=voice_turn_registry,
+        )
+
+    async def test_runtime_access_is_checked_before_websocket_accept(self):
+        checks = []
+
+        async def deny(socket, scope):
+            checks.append((socket.accepted, scope))
+            return False
+
+        gateway = self.make_gateway(FakeAgent(), authorize=deny)
+        socket = FakeWebSocket([])
+
+        await gateway.serve(socket)
+
+        self.assertEqual(checks, [(False, "conversation")])
+        self.assertFalse(socket.accepted)
+        self.assertEqual(self.store.stats()["events"], 0)
+
+    async def test_runtime_access_expiry_closes_an_idle_authorized_socket(self):
+        async def allow(socket, scope):
+            socket.scope["javis.runtime_access"] = {
+                "scope": scope,
+                "deadline_monotonic": asyncio.get_running_loop().time() + 0.01,
+            }
+            return True
+
+        gateway = self.make_gateway(FakeAgent(), authorize=allow)
+        socket = FakeWebSocket([])
+
+        await gateway.serve(socket)
+
+        self.assertTrue(socket.accepted)
+        self.assertEqual(socket.closed, [(4401, "capability_expired")])
+        self.assertEqual(self.store.stats()["events"], 0)
 
     @staticmethod
     def canonical_message(request_id, text, *, session_id="stall-session"):
@@ -235,6 +287,94 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sequences, sorted(sequences))
         self.assertEqual([item["role"] for item in history], ["user", "assistant"])
         self.assertEqual(history[-1]["content"], "reply:hello")
+
+    async def test_exact_invocation_bypasses_execution_lock_without_agent(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent)
+        ws = FakeWebSocket([
+            self.canonical_message("presence-r1", "Javis", session_id="presence-s1")
+        ])
+
+        await self.hub._execution_lock.acquire()
+        try:
+            await asyncio.wait_for(gateway.serve(ws), timeout=1)
+        finally:
+            self.hub._execution_lock.release()
+
+        events = self.store.events_after("presence-s1")
+        accepted = next(event for event in events if event["type"] == "request.accepted")
+        invoked = next(event for event in events if event["type"] == "user.invoked")
+        deltas = [
+            event["payload"]["text"]
+            for event in events
+            if event["type"] == "response.delta"
+        ]
+        self.assertEqual(agent.calls, 0)
+        self.assertEqual(deltas, ["\u6211\u5728"])
+        self.assertIn("user.invoked", [message.get("type") for message in ws.sent])
+        self.assertEqual(accepted["payload"]["execution_lane"], "deterministic_local")
+        self.assertEqual(invoked["payload"]["execution_lane"], "deterministic_local")
+
+    async def test_alias_inside_complete_request_uses_exclusive_agent_lane(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent)
+        ws = FakeWebSocket([
+            self.canonical_message(
+                "model-r1",
+                "Javis, help me",
+                session_id="presence-s1",
+            )
+        ])
+
+        await asyncio.wait_for(gateway.serve(ws), timeout=2)
+
+        accepted = next(
+            event
+            for event in self.store.events_after("presence-s1")
+            if event["type"] == "request.accepted"
+        )
+        self.assertEqual(agent.calls, 1)
+        self.assertEqual(accepted["payload"]["execution_lane"], "exclusive")
+
+    async def test_verified_voice_reference_is_consumed_by_atomic_acceptance(self):
+        registry = VoiceTurnRegistry("boot-1")
+        reference = registry.register(
+            session_id="s1",
+            owner_generation=4,
+            voice_sequence=9,
+            voice_turn=2,
+            transcript="hello from microphone",
+        )
+        gateway = self.make_gateway(
+            FakeAgent(),
+            voice_turn_registry=registry,
+        )
+        ws = FakeWebSocket([
+            {
+                "type": "conversation.message",
+                "payload": {
+                    "session_id": "s1",
+                    "request_id": "voice-r1",
+                    "idempotency_key": "voice-r1",
+                    "text": "hello from microphone",
+                    "interaction_mode": "live",
+                    "protocol_version": 2,
+                    "voice_provenance": reference,
+                },
+            }
+        ])
+
+        await asyncio.wait_for(gateway.serve(ws), timeout=3)
+
+        accepted = next(
+            event for event in self.store.events_after("s1")
+            if event["type"] == "request.accepted"
+        )
+        provenance = accepted["payload"]["input_provenance"]
+        self.assertEqual(provenance["modality"], "voice")
+        self.assertEqual(provenance["verification"], "server_verified")
+        self.assertEqual(provenance["voice_sequence"], 9)
+        self.assertEqual(registry.stats()["entries"], 0)
 
     async def test_two_canonical_subscribers_receive_same_session_events(self):
         gateway = self.make_gateway(FakeAgent())

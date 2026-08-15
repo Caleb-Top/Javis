@@ -8,6 +8,11 @@ import { getStartupDesktopMode } from "./app/startupMode.ts";
 import { AppLogger } from "./app/AppLogger";
 import { readStringPreference, writeStringPreference } from "./app/AppPreferences.ts";
 import { createBackendClient, type ConnectionSnapshot } from "./bridge/backendClient";
+import { resolveBackendEndpoints } from "./bridge/backendEndpoints.ts";
+import {
+  createRuntimeAccessProvider,
+  type RuntimeAccessIssueRequest,
+} from "./bridge/runtimeAccess.ts";
 import { createSidecarClient, isTauriRuntime, type SidecarSnapshot } from "./bridge/sidecarClient";
 import { openCodeSurface, closeCodeSurface, mountCodeSurface } from "./code/CodeSurface";
 import {
@@ -20,6 +25,7 @@ import { createCommandComposer } from "./live/CommandComposer";
 import { createLiveCaption } from "./live/LiveCaption";
 import { renderLiveStage } from "./live/LiveStage";
 import { createSurfaceStatus } from "./live/SurfaceStatus.ts";
+import { createLifeStateBridge } from "./life/LifeStateBridge.ts";
 import {
   isLocalSurfaceCommand,
   parseLocalSurfaceCommand,
@@ -107,6 +113,9 @@ const conversationEvents = new ConversationEventReducer(
   conversationId,
   Number.isFinite(storedConversationCursor) ? storedConversationCursor : 0,
 );
+const lifeStateBridge = createLifeStateBridge({
+  signal: (signal) => runtimeStateCoordinator.signal(signal),
+});
 const liveSurfaceStatus = createSurfaceStatus(
   document.querySelector<HTMLElement>(".live-surface-status")!,
 );
@@ -118,7 +127,44 @@ let diagnostics: ReturnType<typeof createDiagnosticsPanel>;
 let diagnosticsReturnMode: DesktopMode = "live";
 let voiceCapture!: ReturnType<typeof createVoiceCapture>;
 const voiceRequestIds = new Set<string>();
+type VoicePlaybackIdentity = Readonly<{
+  playbackId: string;
+  generation: number;
+  sessionId: string;
+  requestId: string;
+}>;
+let activeVoicePlayback: VoicePlaybackIdentity | null = null;
+let pendingVoicePlaybackRequestId: string | null = null;
+let voicePlaybackEpoch = 0;
 const sidecar = createSidecarClient();
+
+function createRuntimeClientInstanceId(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return `desktop-main-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function issueDevelopmentRuntimeCapability(
+  request: RuntimeAccessIssueRequest,
+): Promise<string> {
+  const endpoints = resolveBackendEndpoints();
+  const response = await fetch(`${endpoints.http}/api/runtime/access`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_instance_id: request.clientInstanceId,
+      scopes: request.scopes,
+      ttl_seconds: request.ttlSeconds,
+    }),
+  });
+  if (!response.ok) throw new Error(`Runtime access HTTP ${response.status}`);
+  return response.text();
+}
+
+const runtimeAccess = createRuntimeAccessProvider({
+  clientInstanceId: createRuntimeClientInstanceId(),
+  issue: isTauriRuntime() ? undefined : issueDevelopmentRuntimeCapability,
+});
 let backendConnection: ConnectionSnapshot = { http: false, websocket: false };
 type ObservableSidecarSnapshot = SidecarSnapshot & {
   ollama_startup?: "idle" | "starting" | "ready" | "failed" | "not-installed";
@@ -241,12 +287,14 @@ async function restartLocalRuntime(route: unknown): Promise<void> {
 
 const client = createBackendClient({
   sessionId: conversationId,
+  runtimeAccessToken: (scope) => runtimeAccess.tokenForScope(scope),
   afterSequence: () => conversationEvents.current().lastSequence,
   onConnection: (snapshot) => {
     backendConnection = snapshot;
     mergeConnectionDetails();
   },
   onEvent: (event) => {
+    lifeStateBridge.handle(event);
     let acceptedServerFailure = false;
     if (event.type === "request.failed" && event.local === true) {
       if (event.request_id) voiceRequestIds.delete(event.request_id);
@@ -288,23 +336,62 @@ const client = createBackendClient({
       ) {
         const voiceTurn = voiceRequestIds.delete(event.request_id);
         if (event.type === "request.completed" && voiceTurn && snapshot.response.trim()) {
+          const playbackRequestId = event.request_id;
+          const playbackEpoch = ++voicePlaybackEpoch;
+          pendingVoicePlaybackRequestId = playbackRequestId;
           void client.post<{
             ok: boolean;
             active: boolean;
             duration_ms?: number;
-          }>("/api/voice/playback/speak", { text: snapshot.response.trim() })
+            playback_id?: string;
+            generation?: number;
+          }>("/api/voice/playback/speak", {
+            text: snapshot.response.trim(),
+            session_id: conversationId,
+            request_id: playbackRequestId,
+          })
             .then((playback) => {
+              if (pendingVoicePlaybackRequestId === playbackRequestId) {
+                pendingVoicePlaybackRequestId = null;
+              }
               if (!playback.ok || !playback.active) return;
+              const playbackId = String(playback.playback_id || "");
+              const generation = Number(playback.generation);
+              if (!playbackId || !Number.isInteger(generation) || generation < 0) return;
+              const identity: VoicePlaybackIdentity = Object.freeze({
+                playbackId,
+                generation,
+                sessionId: conversationId,
+                requestId: playbackRequestId,
+              });
+              if (playbackEpoch !== voicePlaybackEpoch) {
+                void client.post("/api/voice/playback/stop", {
+                  playback_id: identity.playbackId,
+                  generation: identity.generation,
+                  session_id: identity.sessionId,
+                  request_id: identity.requestId,
+                }).catch(() => undefined);
+                return;
+              }
+              activeVoicePlayback = identity;
               runtimeStateCoordinator.signal({
                 source: "voice",
                 state: "speaking",
                 timestamp: Date.now(),
                 detail: "正在回答",
               });
-              window.setTimeout(() => voiceCapture.resumeListeningState(), playback.duration_ms ?? 0);
+              window.setTimeout(() => {
+                if (activeVoicePlayback !== identity) return;
+                activeVoicePlayback = null;
+                if (!client.activeRequestId()) voiceCapture.resumeListeningState();
+              }, playback.duration_ms ?? 0);
             })
             .catch((error) => {
+              if (pendingVoicePlaybackRequestId === playbackRequestId) {
+                pendingVoicePlaybackRequestId = null;
+              }
               liveCaption.setText(error instanceof Error ? error.message : "语音播报失败");
+              voiceCapture.resumeListeningState();
             });
         }
         queueMicrotask(() => voiceCapture.resumeListeningState());
@@ -449,6 +536,7 @@ const voiceStateDetail = (state: LiveState): string => {
   return "语音处理中";
 };
 voiceCapture = createVoiceCapture(client, {
+  runtimeAccessToken: (scope) => runtimeAccess.tokenForScope(scope),
   noiseProfile: () => {
     const profile = readStringPreference("voice.noiseProfile", "standard");
     return profile === "off" || profile === "strong" ? profile : "standard";
@@ -457,10 +545,28 @@ voiceCapture = createVoiceCapture(client, {
     const stored = readStringPreference("voice.inputDevice", "");
     return stored ? Number(stored) : undefined;
   },
-  onBargeIn: async () => {
+  onBargeIn: async ({ interruptedRequestId }) => {
+    const capturedPlayback = activeVoicePlayback;
+    const capturedPendingPlaybackRequestId = pendingVoicePlaybackRequestId;
+    voicePlaybackEpoch += 1;
+    if (activeVoicePlayback === capturedPlayback) activeVoicePlayback = null;
+    if (pendingVoicePlaybackRequestId === capturedPendingPlaybackRequestId) {
+      pendingVoicePlaybackRequestId = null;
+    }
     stopAudioPlayback();
-    await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
-    client.cancel("voice barge-in");
+    if (capturedPlayback) {
+      await client.post("/api/voice/playback/stop", {
+        playback_id: capturedPlayback.playbackId,
+        generation: capturedPlayback.generation,
+        session_id: capturedPlayback.sessionId,
+        request_id: capturedPlayback.requestId,
+      }).catch(() => undefined);
+    } else if (capturedPendingPlaybackRequestId) {
+      await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
+    }
+    if (interruptedRequestId) {
+      client.cancel(interruptedRequestId, "voice barge-in");
+    }
   },
   onPartial: (text) => {
     liveCaption.setText(text);
@@ -471,9 +577,9 @@ voiceCapture = createVoiceCapture(client, {
   onLevel: (level) => {
     liveOrb.setAudioLevel(level);
   },
-  onTranscript: (text) => {
+  onTranscript: ({ text, voiceProvenance }) => {
     liveCaption.setText(text);
-    const requestId = client.send(text);
+    const requestId = client.send(text, voiceProvenance);
     if (requestId) voiceRequestIds.add(requestId);
   },
   onAudio: (audioBase64) => client.sendVoice(audioBase64),
@@ -492,6 +598,31 @@ voiceCapture = createVoiceCapture(client, {
       detail: message,
     });
   }
+});
+let runtimeAccessRevision = 0;
+runtimeAccess.subscribe((snapshot) => {
+  if (!snapshot.ready) {
+    if (runtimeAccessRevision > 0) {
+      runtimeStateCoordinator.signal({
+        source: "sidecar",
+        state: "offline",
+        timestamp: Date.now(),
+        detail: "Runtime access expired",
+      });
+    }
+    return;
+  }
+  if (runtimeAccessRevision > 0 && snapshot.revision !== runtimeAccessRevision) {
+    client.refreshRuntimeAccess();
+    void voiceCapture.refreshRuntimeAccess().catch((error) => {
+      AppLogger.write(
+        "warn",
+        "runtime-access",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  }
+  runtimeAccessRevision = snapshot.revision;
 });
 diagnostics = createDiagnosticsPanel(client, sidecar, voiceCapture, {
   onClose: () => {
@@ -667,10 +798,30 @@ async function bootRuntime(): Promise<void> {
     composer?.setConnected(false);
     return;
   }
+  try {
+    await runtimeAccess.ensure();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    AppLogger.write("error", "runtime-access", message);
+    statusRail.setConnection(false);
+    composer?.setConnected(false);
+    runtimeStateCoordinator.signal({
+      source: "sidecar",
+      state: "offline",
+      timestamp: Date.now(),
+      detail: "Runtime authorization unavailable",
+    });
+    return;
+  }
   client.connect();
   await client.checkBackendHealth();
   await openModelSetupIfRequired(snapshot);
 }
+
+window.addEventListener("beforeunload", () => {
+  runtimeAccess.dispose();
+  client.dispose();
+});
 
 if (!previewOrbState && !isTauriRuntime()) {
   void bootRuntime();

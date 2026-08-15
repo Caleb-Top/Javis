@@ -222,9 +222,20 @@ class ConversationHubTests(unittest.IsolatedAsyncioTestCase):
         terminal = await self.hub.wait_for_terminal("request-1")
         run = self.run_store.list_runs(limit=1)[0]
         graph = self.run_store.get_run(run["id"], include_graph=True)
+        events = self.store.events_after("session-1")
 
         self.assertTrue(cancelled)
         self.assertEqual(terminal["type"], "request.cancelled")
+        interrupted = next(
+            event for event in events if event["type"] == "interaction.interrupted"
+        )
+        cancellation_pending = next(
+            event
+            for event in events
+            if event["type"] == "request.cancellation_pending"
+        )
+        self.assertEqual(interrupted["request_id"], "request-1")
+        self.assertLess(interrupted["sequence"], cancellation_pending["sequence"])
         self.assertEqual(graph["status"], "cancelled")
         self.assertTrue(all(task["status"] == "cancelled" for task in graph["tasks"]))
         self.assertTrue(
