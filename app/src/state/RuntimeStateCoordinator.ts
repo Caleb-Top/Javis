@@ -31,7 +31,13 @@ export class RuntimeStateCoordinator {
     if (signal.terminal && (!requestMatches || this.current.state === "listening")) {
       return this.snapshot();
     }
-    if (this.current.state === "error" && signal.state !== "error" && signal.state !== "idle" && signal.source !== "ui") {
+    if (
+      this.current.state === "error"
+      && signal.state !== "error"
+      && signal.state !== "idle"
+      && signal.source !== "ui"
+      && signal.source !== this.current.source
+    ) {
       return this.snapshot();
     }
 

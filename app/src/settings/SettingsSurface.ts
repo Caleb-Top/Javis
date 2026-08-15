@@ -20,9 +20,13 @@ import {
 } from "./settingsNavigation.ts";
 import {
   applyInstalledLocalProfile,
+  buildModelRoutingPayload,
+  enableSharedModelRoute,
+  getEditableModelRoute,
   getModelInstallControlAvailability,
   getModelInstallTargets,
   isActiveModelInstallState,
+  resolveHydratedModelRoute,
   type ModelInstallProgressState,
   type ModelRouteName,
 } from "./modelRouteDrafts.ts";
@@ -48,6 +52,29 @@ const PALETTES: Array<[OrbPaletteName, string]> = [
   ["indigo", "靛蓝"],
   ["graphite", "石墨"],
 ];
+
+const SETTINGS_RETURN_LABELS: Record<SettingsSourceMode, string> = {
+  live: "返回 Live",
+  code: "返回 Code",
+  pet: "返回桌宠",
+};
+
+const MODEL_CONFIG_CONTROL_SELECTOR = [
+  "[data-model-route]",
+  "[data-model-source]",
+  ".model-share-routes",
+  ".local-model-base-url",
+  ".local-model-name",
+  ".local-model-refresh",
+  ".remote-provider",
+  ".remote-model-name",
+  ".remote-model-custom-name",
+  ".remote-model-base-url",
+  ".remote-api-key",
+  ".remote-model-refresh",
+  ".model-save",
+  ".model-test-connections",
+].join(", ");
 
 export type PathSettingKey =
   | "model_dir"
@@ -209,7 +236,12 @@ export type SettingsSurfaceOptions = {
   onSaveModelSettings: (
     settings: Record<string, unknown>,
   ) => Promise<ModelConnectionSettingsResponse>;
-  onLoadVoiceDevices: () => Promise<{ input_devices: Array<{ index: number; name: string }> }>;
+  onLoadVoiceDevices: () => Promise<{ input_devices: Array<{
+    index: number;
+    name: string;
+    default_rate?: number;
+    host_api_name?: string;
+  }> }>;
   onRefreshLocalModels: (baseUrl: string) => Promise<LocalModelCatalogResponse>;
   onRefreshRemoteModels: (
     provider: string,
@@ -287,7 +319,7 @@ function shortcutSlotTemplate(index: number): string {
       <div class="settings-shortcut-footer">
         <small class="shortcut-help"></small>
         <output class="shortcut-status" data-status="empty">未设置</output>
-        <button class="settings-icon-button shortcut-clear" type="button" title="清除" aria-label="清除快捷项 ${number}">×</button>
+        <button class="settings-clear-button shortcut-clear" type="button" title="清空此快捷项" aria-label="清空快捷项 ${number}">清空</button>
       </div>
     </fieldset>`;
 }
@@ -320,6 +352,8 @@ export function createSettingsSurface(
   let modelRouteDrafts: ModelConnectionSettingsResponse["routes"] | null = null;
   let modelSettings: ModelConnectionSettingsResponse | null = null;
   const remoteModelCatalogs = new Map<string, RemoteProviderOption["models"]>();
+  let remoteModelRefreshEpoch = 0;
+  let modelSettingsRequestEpoch = 0;
   let modelInstallPlan: ModelInstallPlan | null = null;
   let modelInstallInProgress = false;
   let activeInstallJobId = "";
@@ -328,7 +362,10 @@ export function createSettingsSurface(
   options.root.innerHTML = `
     <section class="settings-surface" aria-label="Javis 设置">
       <header class="settings-header window-drag-region" data-tauri-drag-region>
-        <button class="settings-icon-button settings-close" type="button" aria-label="返回" title="返回">←</button>
+        <button class="settings-back-button settings-close" type="button" aria-label="返回 Live" title="返回 Live">
+          <span class="settings-back-icon" aria-hidden="true">←</span>
+          <span class="settings-back-label">返回</span>
+        </button>
         <div data-tauri-drag-region>
           <strong data-tauri-drag-region>Javis 设置</strong>
           <span data-tauri-drag-region>桌面智能体偏好</span>
@@ -409,7 +446,7 @@ export function createSettingsSurface(
                 <button type="button" role="tab" data-model-source="local">本地模型</button>
                 <button type="button" role="tab" data-model-source="remote">远端 API</button>
               </div>
-              <div class="settings-model-profile" data-model-profile="local">
+              <div class="settings-model-profile" data-model-profile="local" hidden>
                 <label class="settings-field">
                   <span>Ollama 地址</span>
                   <input class="local-model-base-url" type="url" maxlength="2048" placeholder="http://127.0.0.1:11435/v1">
@@ -635,6 +672,25 @@ export function createSettingsSurface(
     output.dataset.state = state;
   }
 
+  function setModelConfigBusy(isBusy: boolean): void {
+    options.root.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(
+      MODEL_CONFIG_CONTROL_SELECTOR,
+    ).forEach((control) => {
+      control.disabled = isBusy;
+    });
+    if (!isBusy && modelSettings && modelRouteDrafts) {
+      const shared = options.root.querySelector<HTMLInputElement>(".model-share-routes")?.checked === true;
+      options.root.querySelectorAll<HTMLButtonElement>("[data-model-route]").forEach((button) => {
+        const isCode = button.dataset.modelRoute === "code";
+        button.disabled = shared && isCode;
+      });
+    }
+  }
+
+  function invalidateRemoteModelRefresh(): void {
+    remoteModelRefreshEpoch += 1;
+  }
+
   function selectModelSource(source: ModelSource): void {
     activeModelSource = source;
     options.root.querySelectorAll<HTMLButtonElement>("[data-model-source]").forEach((button) => {
@@ -726,6 +782,12 @@ export function createSettingsSurface(
   }
 
   function renderModelSettings(settings: ModelConnectionSettingsResponse): void {
+    const alreadyHydrated = modelSettings !== null;
+    const entryRoute = sourceMode === "code" ? "code" : "live";
+    activeModelRoute = getEditableModelRoute(
+      resolveHydratedModelRoute(activeModelRoute, entryRoute, alreadyHydrated),
+      settings.share_live_code,
+    );
     modelSettings = settings;
     modelRouteDrafts = structuredClone(settings.routes);
     const providerSelect = options.root.querySelector<HTMLSelectElement>(".remote-provider")!;
@@ -736,7 +798,6 @@ export function createSettingsSurface(
       return option;
     }));
     options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked = settings.share_live_code;
-    activeModelRoute = sourceMode === "code" ? "code" : "live";
     renderModelRoute(activeModelRoute);
     options.root.querySelector<HTMLElement>(".settings-active-model")!.textContent =
       settings.share_live_code
@@ -744,9 +805,9 @@ export function createSettingsSurface(
         : "Live / Code 独立路由";
   }
 
-  function snapshotActiveModelRoute(): void {
+  function snapshotActiveModelRoute(mirrorShared = true): void {
     if (!modelRouteDrafts) return;
-    modelRouteDrafts[activeModelRoute] = {
+    const route = {
       source: activeModelSource,
       local: {
         model: options.root.querySelector<HTMLInputElement>(".local-model-name")!.value.trim(),
@@ -758,17 +819,30 @@ export function createSettingsSurface(
         base_url: options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value.trim(),
       },
     };
+    modelRouteDrafts[activeModelRoute] = route;
+    if (mirrorShared && options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked) {
+      modelRouteDrafts.live = structuredClone(route);
+      modelRouteDrafts.code = structuredClone(route);
+      activeModelRoute = "live";
+    }
   }
 
   function renderModelRoute(routeName: "live" | "code"): void {
     if (!modelSettings || !modelRouteDrafts) return;
-    activeModelRoute = routeName;
-    const route = modelRouteDrafts[routeName];
+    invalidateRemoteModelRefresh();
+    const shared = options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked;
+    activeModelRoute = getEditableModelRoute(routeName, shared);
+    const route = modelRouteDrafts[activeModelRoute];
     options.root.querySelectorAll<HTMLButtonElement>("[data-model-route]").forEach((button) => {
-      const selected = button.dataset.modelRoute === routeName;
+      const isCode = button.dataset.modelRoute === "code";
+      const selected = button.dataset.modelRoute === activeModelRoute;
+      button.disabled = shared && isCode;
+      button.title = shared && isCode ? "当前与 Live 共用同一配置" : "";
       button.dataset.active = String(selected);
       button.setAttribute("aria-selected", String(selected));
     });
+    const liveButton = options.root.querySelector<HTMLButtonElement>('[data-model-route="live"]')!;
+    liveButton.textContent = shared ? "Live + Code（共用）" : "Live";
     options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value = route.local.base_url;
     options.root.querySelector<HTMLInputElement>(".local-model-name")!.value = route.local.model;
     renderRemoteProvider(route.remote.provider);
@@ -1006,15 +1080,22 @@ export function createSettingsSurface(
 
   async function refreshRemoteModels(announce = true): Promise<void> {
     if (!modelSettings) return;
+    const requestedRoute = activeModelRoute;
     const providerId = options.root.querySelector<HTMLSelectElement>(".remote-provider")!.value;
     const provider = modelSettings.providers.find((candidate) => candidate.id === providerId);
     if (!provider) return;
+    const refreshEpoch = ++remoteModelRefreshEpoch;
     const selectedModel = getRemoteModelValue();
     const baseUrl = options.root.querySelector<HTMLInputElement>(".remote-model-base-url")!.value;
     const apiKey = options.root.querySelector<HTMLInputElement>(".remote-api-key")!.value.trim();
     if (announce) setModelStatus(`正在同步 ${provider.label} 的账户模型目录…`, "saving");
     try {
       const response = await options.onRefreshRemoteModels(provider.id, baseUrl, apiKey);
+      if (refreshEpoch !== remoteModelRefreshEpoch) return;
+      if (
+        activeModelRoute !== requestedRoute
+        || options.root.querySelector<HTMLSelectElement>(".remote-provider")!.value !== provider.id
+      ) return;
       if (response.models.length) remoteModelCatalogs.set(provider.id, response.models);
       renderRemoteModelOptions(provider, selectedModel);
       options.root.querySelector<HTMLElement>(".remote-model-catalog-summary")!.textContent = response.message;
@@ -1023,6 +1104,7 @@ export function createSettingsSurface(
       channel.querySelector("small")!.textContent = response.message;
       if (announce) setModelStatus(response.message, response.connected ? "saved" : "idle");
     } catch (error) {
+      if (refreshEpoch !== remoteModelRefreshEpoch) return;
       const message = error instanceof Error ? error.message : "无法同步供应商模型";
       options.root.querySelector<HTMLElement>(".remote-model-catalog-summary")!.textContent =
         `${message}；已保留内置兼容模型目录`;
@@ -1031,19 +1113,26 @@ export function createSettingsSurface(
   }
 
   async function loadModelSettings(): Promise<void> {
+    const requestEpoch = ++modelSettingsRequestEpoch;
+    invalidateRemoteModelRefresh();
+    setModelConfigBusy(true);
     setModelStatus("正在读取模型配置…", "saving");
     try {
       const response = await options.onLoadModelSettings();
+      if (requestEpoch !== modelSettingsRequestEpoch) return;
       if (!response.applied) throw new Error(response.error || "模型配置读取失败");
       renderModelSettings(response);
       setModelStatus("模型配置已就绪", "idle");
       void refreshLocalModels(false);
       void refreshRemoteModels(false);
     } catch (error) {
+      if (requestEpoch !== modelSettingsRequestEpoch) return;
       setModelStatus(
         error instanceof Error ? error.message : "无法读取模型配置",
         "error",
       );
+    } finally {
+      if (requestEpoch === modelSettingsRequestEpoch) setModelConfigBusy(false);
     }
   }
 
@@ -1062,32 +1151,38 @@ export function createSettingsSurface(
         ...remote,
       } as ModelConnectionSettingsResponse["routes"]["live"]["remote"];
     }
-    return {
-      source: activeModelSource,
-      local: {
-        model: options.root.querySelector<HTMLInputElement>(".local-model-name")!.value.trim(),
-        base_url: options.root.querySelector<HTMLInputElement>(".local-model-base-url")!.value.trim(),
-      },
-      remote,
-      share_live_code: options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked,
-      routes: modelRouteDrafts,
-    };
+    return buildModelRoutingPayload(
+      modelRouteDrafts!,
+      activeModelRoute,
+      options.root.querySelector<HTMLInputElement>(".model-share-routes")!.checked,
+    );
   }
 
   async function saveModelSettings(): Promise<boolean> {
+    if (!modelSettings || !modelRouteDrafts) {
+      setModelStatus("妯″瀷閰嶇疆灏氭湭鍔犺浇", "error");
+      return false;
+    }
+    const requestEpoch = ++modelSettingsRequestEpoch;
+    invalidateRemoteModelRefresh();
+    setModelConfigBusy(true);
     setModelStatus("正在应用模型配置…", "saving");
     try {
       const response = await options.onSaveModelSettings(collectModelSettings());
+      if (requestEpoch !== modelSettingsRequestEpoch) return false;
       if (!response.applied) throw new Error(response.error || "模型配置保存失败");
       renderModelSettings(response);
       setModelStatus("Live 与 Code 模型路由已保存并立即生效", "saved");
       return true;
     } catch (error) {
+      if (requestEpoch !== modelSettingsRequestEpoch) return false;
       setModelStatus(
         error instanceof Error ? error.message : "模型配置保存失败",
         "error",
       );
       return false;
+    } finally {
+      if (requestEpoch === modelSettingsRequestEpoch) setModelConfigBusy(false);
     }
   }
 
@@ -1177,6 +1272,9 @@ export function createSettingsSurface(
     const output = slot.querySelector<HTMLOutputElement>(".shortcut-status")!;
     output.dataset.status = status;
     output.value = STATUS_LABELS[status];
+    const clearButton = slot.querySelector<HTMLButtonElement>(".shortcut-clear")!;
+    clearButton.disabled = status === "empty";
+    clearButton.title = status === "empty" ? "此快捷项尚未设置" : "清空此快捷项";
   }
 
   function collectPreferences(): PetPreferences {
@@ -1206,6 +1304,8 @@ export function createSettingsSurface(
     activeSection = section;
     options.root.querySelectorAll<HTMLElement>("[data-settings-section]").forEach((item) => {
       item.dataset.active = String(item.dataset.settingsSection === section);
+      if (item.dataset.settingsSection === section) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
     });
     options.root.querySelectorAll<HTMLElement>("[data-settings-pane]").forEach((item) => {
       item.dataset.active = String(item.dataset.settingsPane === section);
@@ -1220,11 +1320,18 @@ export function createSettingsSurface(
       for (const device of input_devices || []) {
         const option = document.createElement("option");
         option.value = String(device.index);
-        option.textContent = device.name || `设备 ${device.index}`;
+        const details = [
+          device.host_api_name?.replace(/^Windows\s+/i, ""),
+          device.default_rate ? `${Math.round(device.default_rate / 1000)} kHz` : "",
+        ].filter(Boolean);
+        option.textContent = `${device.name || `设备 ${device.index}`}${details.length ? ` · ${details.join(" · ")}` : ""}`;
         select.append(option);
       }
       if (stored && [...select.options].some((option) => option.value === stored)) {
         select.value = stored;
+      } else if (stored && input_devices?.length) {
+        writeStringPreference("voice.inputDevice", "");
+        document.dispatchEvent(new CustomEvent("javis:voice-device-changed", { detail: "" }));
       }
     }).catch(() => {
       select.innerHTML = '<option value="">默认麦克风</option>';
@@ -1322,6 +1429,12 @@ export function createSettingsSurface(
   });
   options.root.querySelector<HTMLInputElement>(".model-share-routes")!.addEventListener("change", (event) => {
     const shared = (event.currentTarget as HTMLInputElement).checked;
+    snapshotActiveModelRoute(false);
+    if (shared && modelRouteDrafts) {
+      modelRouteDrafts = enableSharedModelRoute(modelRouteDrafts);
+      activeModelRoute = "live";
+    }
+    renderModelRoute(activeModelRoute);
     setModelStatus(shared ? "保存后 Code 将使用 Live 的同一配置" : "保存后 Live 与 Code 可独立配置", "idle");
   });
   options.root.querySelector<HTMLSelectElement>(".remote-provider")!.addEventListener("change", (event) => {
@@ -1481,6 +1594,12 @@ export function createSettingsSurface(
   return {
     open(nextSourceMode, section) {
       sourceMode = getSettingsReturnMode(nextSourceMode);
+      activeModelRoute = sourceMode === "code" ? "code" : "live";
+      const returnLabel = SETTINGS_RETURN_LABELS[sourceMode];
+      const backButton = options.root.querySelector<HTMLButtonElement>(".settings-close")!;
+      backButton.setAttribute("aria-label", returnLabel);
+      backButton.title = returnLabel;
+      backButton.querySelector<HTMLElement>(".settings-back-label")!.textContent = returnLabel;
       if (section) activeSection = section;
       sync();
       void loadPathSettings();

@@ -463,3 +463,116 @@ test("selected microphone device index is included in the continuous stream star
   await capture.pauseContinuous();
   assert.equal(capture.isContinuous(), false);
 });
+
+test("selected microphone device index is also used by the microphone plus STT probe", async () => {
+  const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const client = {
+    sessionId: () => "session-probe-device",
+    post: async (path: string, body: Record<string, unknown>) => {
+      posts.push({ path, body });
+      return { ok: true, source: "microphone", status: "ready", message: "ok" };
+    },
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    deviceIndex: () => 17,
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: () => undefined,
+  });
+
+  await capture.probeMicrophone();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, "/api/voice/capture/probe");
+  assert.equal(posts[0].body.device_index, 17);
+  assert.ok(Number(posts[0].body.duration) >= 4);
+});
+
+test("microphone diagnostics releases continuous capture before probing and then resumes it", async () => {
+  const sockets: FakeVoiceSocket[] = [];
+  const order: string[] = [];
+  const client = {
+    sessionId: () => "session-diagnostic-probe",
+    post: async () => {
+      order.push("probe");
+      return {
+        ok: true,
+        source: "microphone",
+        status: "ready",
+        message: "ok",
+        signalDetected: true,
+      };
+    },
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => {
+      const socket = new FakeVoiceSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: () => undefined,
+  });
+
+  const initial = capture.startContinuous();
+  sockets[0].open();
+  sockets[0].emit({ type: "audio.stream.ready" });
+  await initial;
+
+  const diagnostic = capture.probeMicrophone();
+  await waitFor(() => sockets[0].sent.some((message) => message.type === "audio.stream.stop"));
+  assert.deepEqual(order, []);
+  sockets[0].emit({ type: "audio.stream.stopped" });
+  await waitFor(() => order.includes("probe"));
+  await waitFor(() => sockets.length === 2);
+  sockets[1].open();
+  sockets[1].emit({ type: "audio.stream.ready" });
+
+  const result = await diagnostic;
+  assert.equal(result.ok, true);
+  assert.equal(capture.isContinuous(), true);
+  await capture.pauseContinuous();
+});
+
+test("changing the selected microphone restarts an active stream with the new device", async () => {
+  const sockets: FakeVoiceSocket[] = [];
+  let selectedDevice = 1;
+  const client = {
+    sessionId: () => "session-device-change",
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => {
+      const socket = new FakeVoiceSocket();
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    deviceIndex: () => selectedDevice,
+    onBargeIn: () => undefined,
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: () => undefined,
+  });
+
+  const initial = capture.startContinuous();
+  sockets[0].open();
+  sockets[0].emit({ type: "audio.stream.ready" });
+  await initial;
+
+  selectedDevice = 17;
+  const restarted = capture.applyInputDeviceChange();
+  await waitFor(() => sockets[0].sent.some((message) => message.type === "audio.stream.stop"));
+  assert.equal(sockets.length, 1);
+  sockets[0].emit({ type: "audio.stream.stopped" });
+  await waitFor(() => sockets.length === 2);
+  sockets[1].open();
+  sockets[1].emit({ type: "audio.stream.ready" });
+  await restarted;
+
+  assert.equal((sockets[0].sent[0].payload as Record<string, unknown>).device_index, 1);
+  assert.equal((sockets[1].sent[0].payload as Record<string, unknown>).device_index, 17);
+  await capture.pauseContinuous();
+});

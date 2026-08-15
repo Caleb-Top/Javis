@@ -29,7 +29,11 @@
     if (!isEmbedded(locationLike)) return false;
     const targetOrigin = parentOrigin(locationLike);
     if (!targetOrigin || !parentWindow || typeof parentWindow.postMessage !== "function") return false;
-    parentWindow.postMessage({ type: MESSAGE_TYPE, section: SETTINGS_SECTION }, targetOrigin);
+    parentWindow.postMessage({
+      type: MESSAGE_TYPE,
+      section: SETTINGS_SECTION,
+      route: "code",
+    }, targetOrigin);
     return true;
   }
 

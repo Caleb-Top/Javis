@@ -1,5 +1,47 @@
 export type ModelRouteName = "live" | "code";
 
+export function getEditableModelRoute(
+  requestedRoute: ModelRouteName,
+  shareLiveCode: boolean,
+): ModelRouteName {
+  return shareLiveCode ? "live" : requestedRoute;
+}
+
+export function resolveHydratedModelRoute(
+  currentRoute: ModelRouteName,
+  entryRoute: ModelRouteName,
+  alreadyHydrated: boolean,
+): ModelRouteName {
+  return alreadyHydrated ? currentRoute : entryRoute;
+}
+
+export function buildModelRoutingPayload<
+  Routes extends Record<ModelRouteName, unknown>,
+>(
+  routes: Routes,
+  activeRoute: ModelRouteName,
+  shareLiveCode: boolean,
+): {
+  active_route: ModelRouteName;
+  share_live_code: boolean;
+  routes: Routes;
+} {
+  return {
+    active_route: activeRoute,
+    share_live_code: shareLiveCode,
+    routes,
+  };
+}
+
+export function enableSharedModelRoute<
+  Routes extends Record<ModelRouteName, unknown>,
+>(routes: Routes): Routes {
+  return {
+    ...routes,
+    code: structuredClone(routes.live),
+  } as Routes;
+}
+
 export type ModelInstallProgressState =
   | "idle"
   | "planned"

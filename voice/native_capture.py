@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+from array import array
 import io
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -38,6 +40,53 @@ def frames_to_wav_base64(
         stream.setframerate(rate)
         stream.writeframes(b"".join(frames))
     return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def wav_signal_metrics(payload: bytes) -> dict[str, int | float | bool]:
+    """Return privacy-safe level metadata for a PCM16 WAV capture."""
+    empty = {
+        "rms": 0.0,
+        "peak": 0.0,
+        "duration_ms": 0,
+        "sample_rate": 0,
+        "channels": 0,
+        "signal_detected": False,
+    }
+    try:
+        with wave.open(io.BytesIO(payload), "rb") as stream:
+            channels = int(stream.getnchannels())
+            sample_width = int(stream.getsampwidth())
+            sample_rate = int(stream.getframerate())
+            frame_count = int(stream.getnframes())
+            frames = stream.readframes(frame_count)
+        if sample_width != 2 or sample_rate <= 0 or not frames:
+            return empty
+        samples = array("h")
+        samples.frombytes(frames)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        if not samples:
+            return empty
+        full_scale = 32768.0
+        peak = min(1.0, max(abs(value) for value in samples) / full_scale)
+        rms = min(
+            1.0,
+            math.sqrt(sum(float(value) * float(value) for value in samples) / len(samples))
+            / full_scale,
+        )
+        duration_ms = max(0, round(frame_count * 1000 / sample_rate))
+        return {
+            "rms": round(rms, 6),
+            "peak": round(peak, 6),
+            "duration_ms": duration_ms,
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "signal_detected": bool(
+                duration_ms >= 250 and peak >= 0.006 and rms >= 0.001
+            ),
+        }
+    except (EOFError, OSError, ValueError, wave.Error):
+        return empty
 
 
 @dataclass
@@ -249,15 +298,28 @@ class NativeCaptureManager:
                     "backend": state.backend,
                 }
             payload = state.output_path.read_bytes()
+            signal = wav_signal_metrics(payload)
+            signal_detected = bool(signal["signal_detected"])
             return {
                 "ok": True,
                 "recording": False,
                 "source": state.source,
                 "status": "ready",
-                "message": f"已采集 {max(1, round(len(payload) / 1024))} KB {_source_label(state.source)}",
+                "message": (
+                    f"已采集 {max(1, round(len(payload) / 1024))} KB {_source_label(state.source)}"
+                    if signal_detected
+                    else f"{_source_label(state.source)}已连接，但没有检测到有效声音"
+                ),
                 "mimeType": "audio/wav",
                 "bytes": len(payload),
                 "trackLabel": state.track_label,
+                "deviceIndex": status.get("deviceIndex"),
+                "rate": signal["sample_rate"] or status.get("rate"),
+                "channels": signal["channels"] or status.get("channels"),
+                "durationMs": signal["duration_ms"],
+                "rms": signal["rms"],
+                "peak": signal["peak"],
+                "signalDetected": signal_detected,
                 "backend": state.backend,
                 "crashIsolated": True,
                 "audioBase64": base64.b64encode(payload).decode("ascii"),
@@ -270,9 +332,15 @@ class NativeCaptureManager:
         for path in paths:
             path.unlink(missing_ok=True)
 
-    def probe(self, source: str = "microphone", duration: float = 1.2) -> dict[str, Any]:
+    def probe(
+        self,
+        source: str = "microphone",
+        duration: float = 1.2,
+        *,
+        device_index: int | None = None,
+    ) -> dict[str, Any]:
         duration = max(0.25, min(float(duration), 5.0))
-        self.start(source)
+        self.start(source, device_index=device_index)
         time.sleep(duration)
         return self.stop()
 
@@ -348,8 +416,12 @@ def stop_capture() -> dict[str, Any]:
     return capture_manager.stop()
 
 
-def probe_capture(source: str = "microphone", duration: float = 1.2) -> dict[str, Any]:
-    return capture_manager.probe(source, duration)
+def probe_capture(
+    source: str = "microphone",
+    duration: float = 1.2,
+    device_index: int | None = None,
+) -> dict[str, Any]:
+    return capture_manager.probe(source, duration, device_index=device_index)
 
 
 def get_diagnostics() -> dict[str, Any]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+import re
 import sys
 import time
 import wave
@@ -18,6 +19,37 @@ import pyaudio
 
 CHUNK_FRAMES = 1024
 STREAM_RATE = 48_000
+
+_MOJIBAKE_MARKERS = frozenset(
+    "鑰満鏃轰粩鐨凪鍙绔璁澶闊椹鍔绋搴鍣寮缁绯"
+)
+_WINDOWS_RESOURCE_NAME = re.compile(
+    r"^(.*?)\s*\(@System32\\.*?;\((.*?)\)\)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _mojibake_score(value: str) -> int:
+    return value.count("\ufffd") * 8 + sum(
+        character in _MOJIBAKE_MARKERS for character in value
+    )
+
+
+def normalize_device_name(value: object) -> str:
+    """Repair the two Windows/PortAudio encodings and hide resource paths."""
+    name = str(value or "").strip()
+    try:
+        repaired = name.encode("cp936").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        repaired = name
+    if repaired and _mojibake_score(repaired) < _mojibake_score(name):
+        name = repaired
+
+    resource = _WINDOWS_RESOURCE_NAME.match(name)
+    if resource:
+        prefix, endpoint = (part.strip() for part in resource.groups())
+        name = f"{prefix} ({endpoint})" if prefix else endpoint
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def _devices(audio: pyaudio.PyAudio) -> list[dict]:
@@ -29,13 +61,22 @@ def _devices(audio: pyaudio.PyAudio) -> list[dict]:
             continue
         if int(info.get("maxInputChannels", 0) or 0) <= 0:
             continue
+        raw_host_api = info.get("hostApi", -1)
+        host_api = int(raw_host_api) if raw_host_api is not None else -1
+        try:
+            host_api_name = normalize_device_name(
+                audio.get_host_api_info_by_index(host_api).get("name", "")
+            )
+        except Exception:
+            host_api_name = ""
         rows.append(
             {
                 "index": index,
-                "name": str(info.get("name", "") or ""),
+                "name": normalize_device_name(info.get("name", "")),
                 "max_input_channels": int(info.get("maxInputChannels", 0) or 0),
                 "default_rate": int(float(info.get("defaultSampleRate", 16_000) or 16_000)),
-                "host_api": int(info.get("hostApi", -1) or -1),
+                "host_api": host_api,
+                "host_api_name": host_api_name,
             }
         )
     return rows
@@ -66,7 +107,9 @@ def _write_status(path: Path, payload: dict) -> None:
 def list_devices() -> int:
     audio = pyaudio.PyAudio()
     try:
-        print(json.dumps({"ok": True, "input_devices": _devices(audio)}, ensure_ascii=False))
+        # ASCII-only transport survives embedded Python's CP936 stdout while
+        # json.loads restores the original Unicode device labels in the parent.
+        print(json.dumps({"ok": True, "input_devices": _devices(audio)}, ensure_ascii=True))
         return 0
     finally:
         audio.terminate()

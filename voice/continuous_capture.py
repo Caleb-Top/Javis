@@ -498,6 +498,7 @@ class NativeContinuousCaptureManager:
         self._stop_path: Path | None = None
         self._status_path: Path | None = None
         self._metadata: dict = {}
+        self._requested_device_index: int | None = None
         self._session_id = ""
         self._owner_generation = 0
         self._owner_identity = ""
@@ -549,71 +550,93 @@ class NativeContinuousCaptureManager:
         session = str(session_id or "").strip()
         if not session:
             raise ValueError("continuous voice session_id is required")
-        with self._lifecycle_condition:
-            while self._stopping:
-                self._lifecycle_condition.wait()
-            if self._process is not None and self._process.poll() is None:
-                if self._session_id != session:
-                    raise RuntimeError("microphone stream belongs to another conversation")
-                self._rotate_owner_locked(session, noise_profile)
-                return {"ok": True, "running": True, **self.status()}
-            if not WORKER.is_file():
-                raise RuntimeError("native microphone worker is missing")
-            stop_path, status_path = self._paths()
-            command = [
-                sys.executable,
-                str(WORKER),
-                "stream",
-                str(stop_path),
-                str(status_path),
-                "48000",
-            ]
-            if device_index is not None:
-                command.append(str(int(device_index)))
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=self._creation_flags(),
-            )
-            deadline = time.monotonic() + 8.0
-            metadata = {}
-            while time.monotonic() < deadline:
-                metadata = self._read_status(status_path)
-                if metadata:
-                    break
-                if process.poll() is not None:
-                    error = process.stderr.read().strip() if process.stderr else ""
-                    raise RuntimeError(error or "native microphone stream exited")
-                time.sleep(0.04)
-            if not metadata.get("ok"):
-                process.kill()
-                raise RuntimeError(str(metadata.get("error") or "native microphone stream timeout"))
-            self._process = process
-            self._stop_path = stop_path
-            self._status_path = status_path
-            self._metadata = metadata
-            self._session_id = session
-            self._rotate_owner_locked(session, noise_profile)
-            self._processor = threading.Thread(
-                target=self._process_frames,
-                args=(process,),
-                name="javis-continuous-audio-processor",
-                daemon=True,
-            )
-            self._processor.start()
-            self._reader = threading.Thread(
-                target=self._read_worker,
-                args=(process,),
-                name="javis-continuous-audio",
-                daemon=True,
-            )
-            self._reader.start()
-            return {"ok": True, "running": True, **self.status()}
+        requested_device_index = (
+            None if device_index is None else int(device_index)
+        )
+        while True:
+            restart_generation: int | None = None
+            with self._lifecycle_condition:
+                while self._stopping:
+                    self._lifecycle_condition.wait()
+                if self._process is not None and self._process.poll() is None:
+                    if self._session_id != session:
+                        raise RuntimeError("microphone stream belongs to another conversation")
+                    if self._requested_device_index == requested_device_index:
+                        self._rotate_owner_locked(session, noise_profile)
+                        return {"ok": True, "running": True, **self.status()}
+                    restart_generation = self._owner_generation
+                else:
+                    if not WORKER.is_file():
+                        raise RuntimeError("native microphone worker is missing")
+                    stop_path, status_path = self._paths()
+                    command = [
+                        sys.executable,
+                        str(WORKER),
+                        "stream",
+                        str(stop_path),
+                        str(status_path),
+                        "48000",
+                    ]
+                    if requested_device_index is not None:
+                        command.append(str(requested_device_index))
+                    process = subprocess.Popen(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                        creationflags=self._creation_flags(),
+                    )
+                    deadline = time.monotonic() + 8.0
+                    metadata = {}
+                    while time.monotonic() < deadline:
+                        metadata = self._read_status(status_path)
+                        if metadata:
+                            break
+                        if process.poll() is not None:
+                            error = process.stderr.read().strip() if process.stderr else ""
+                            raise RuntimeError(error or "native microphone stream exited")
+                        time.sleep(0.04)
+                    if not metadata.get("ok"):
+                        process.kill()
+                        raise RuntimeError(str(metadata.get("error") or "native microphone stream timeout"))
+                    self._process = process
+                    self._stop_path = stop_path
+                    self._status_path = status_path
+                    self._metadata = metadata
+                    self._requested_device_index = requested_device_index
+                    self._session_id = session
+                    self._rotate_owner_locked(session, noise_profile)
+                    self._processor = threading.Thread(
+                        target=self._process_frames,
+                        args=(process,),
+                        name="javis-continuous-audio-processor",
+                        daemon=True,
+                    )
+                    self._processor.start()
+                    self._reader = threading.Thread(
+                        target=self._read_worker,
+                        args=(process,),
+                        name="javis-continuous-audio",
+                        daemon=True,
+                    )
+                    self._reader.start()
+                    return {"ok": True, "running": True, **self.status()}
+
+            assert restart_generation is not None
+            try:
+                self.stop(
+                    session_id=session,
+                    owner_generation=restart_generation,
+                )
+            except RuntimeError as error:
+                if str(error) not in {
+                    "microphone stream belongs to another conversation",
+                    "microphone stream belongs to another owner generation",
+                }:
+                    raise
 
     def _rotate_owner_locked(self, session: str, noise_profile: str) -> None:
         """Issue a fresh lease while the lifecycle lock is held."""
@@ -779,6 +802,7 @@ class NativeContinuousCaptureManager:
             if process is None:
                 self._session_id = ""
                 self._owner_identity = ""
+                self._requested_device_index = None
                 return {"ok": True, "running": False, **self.status()}
             self._stopping = True
             self._process = None
@@ -788,6 +812,7 @@ class NativeContinuousCaptureManager:
             self._status_path = None
             self._session_id = ""
             self._owner_identity = ""
+            self._requested_device_index = None
         cleanup_error: BaseException | None = None
 
         def record_cleanup_error(error: BaseException) -> None:
@@ -889,6 +914,7 @@ class NativeContinuousCaptureManager:
             self._process,
             self._frame_queue,
             self._stopping,
+            self._requested_device_index,
         )
 
     def _manager_status_locked(self) -> tuple[dict, tuple]:

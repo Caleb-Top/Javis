@@ -1140,6 +1140,63 @@ class CaptureQueueTests(unittest.TestCase):
             first_ready[0]["sequence"],
         )
 
+    def test_same_session_device_change_restarts_the_native_worker(self):
+        service = ContinuousVoiceService(transcribe=lambda *_: "")
+        manager = NativeContinuousCaptureManager(service=service)
+        first_process = MagicMock()
+        first_process.poll.return_value = None
+        second_process = MagicMock()
+        second_process.poll.return_value = None
+        threads = [MagicMock() for _ in range(4)]
+
+        with (
+            patch("voice.continuous_capture.WORKER") as worker,
+            patch(
+                "voice.continuous_capture.subprocess.Popen",
+                side_effect=[first_process, second_process],
+            ) as popen,
+            patch(
+                "voice.continuous_capture.threading.Thread",
+                side_effect=threads,
+            ),
+            patch.object(
+                manager,
+                "_paths",
+                side_effect=[
+                    (MagicMock(), MagicMock()),
+                    (MagicMock(), MagicMock()),
+                ],
+            ),
+            patch.object(
+                manager,
+                "_read_status",
+                side_effect=[
+                    {"ok": True, "rate": 48_000, "deviceIndex": 1},
+                    {"ok": True, "rate": 16_000, "deviceIndex": 17},
+                ],
+            ),
+        ):
+            worker.is_file.return_value = True
+            first = manager.start(
+                session_id="same-private-owner",
+                device_index=1,
+            )
+            second = manager.start(
+                session_id="same-private-owner",
+                device_index=17,
+            )
+            manager.stop(
+                session_id="same-private-owner",
+                owner_generation=second["owner_generation"],
+            )
+
+        self.assertEqual(first["deviceIndex"], 1)
+        self.assertEqual(second["deviceIndex"], 17)
+        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(popen.call_args_list[0].args[0][-1], "1")
+        self.assertEqual(popen.call_args_list[1].args[0][-1], "17")
+        first_process.wait.assert_called()
+
     def test_capture_reader_queue_is_bounded_and_reports_dropped_frames(self):
         class Service:
             def __init__(self):

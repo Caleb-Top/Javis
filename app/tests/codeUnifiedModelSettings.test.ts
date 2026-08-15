@@ -60,7 +60,7 @@ test("embedded Code targets the native parent origin when opening model settings
   assert.equal(sent[0].targetOrigin, "http://tauri.localhost");
   assert.deepEqual(
     JSON.parse(JSON.stringify(sent[0].message)),
-    { type: "javis.open-model-settings", section: "storage" },
+    { type: "javis.open-model-settings", section: "storage", route: "code" },
   );
 });
 
@@ -87,7 +87,7 @@ test("native parent accepts the settings request only from its backend iframe", 
   const valid = {
     origin: "http://127.0.0.1:8080",
     source: frameWindow,
-    data: { type: "javis.open-model-settings", section: "storage" },
+    data: { type: "javis.open-model-settings", section: "storage", route: "code" },
   };
 
   assert.equal(

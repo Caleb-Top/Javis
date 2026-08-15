@@ -83,6 +83,7 @@ export function formatSurfaceStatus(
     "已待命",
     "正在待命",
     "我在听",
+    "正在理解",
     "正在思考",
     "正在回答",
     "正在执行",

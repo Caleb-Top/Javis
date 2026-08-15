@@ -344,15 +344,85 @@ AVAILABLE_MODELS = {
     "local": [],
 }
 
+
+def _sync_legacy_live_route(model: dict, provider: str, model_name: str = "") -> None:
+    """Keep legacy provider/model mutations aligned with the effective Live route."""
+    route = _route_from_model(model, "live")
+    if provider == "local":
+        local = model.setdefault("local", {})
+        if not isinstance(local, dict):
+            local = {}
+            model["local"] = local
+        selected_model = str(
+            model_name
+            or local.get("name")
+            or route.get("local", {}).get("model")
+            or ""
+        ).strip()
+        local["name"] = selected_model
+        local["api_key"] = "ollama"
+        route["source"] = "local"
+        route["local"] = {
+            "model": selected_model,
+            "base_url": _effective_local_base_url(
+                route.get("local", {}).get("base_url") or local.get("base_url")
+            ),
+        }
+    else:
+        profile = model.setdefault(provider, {})
+        if not isinstance(profile, dict):
+            profile = {}
+            model[provider] = profile
+        available = AVAILABLE_MODELS.get(provider, [])
+        selected_model = str(
+            model_name
+            or profile.get("name")
+            or (available[0][0] if available else "")
+        ).strip()
+        profile["name"] = selected_model
+        current_remote = route.get("remote", {})
+        same_provider = current_remote.get("provider") == provider
+        route["source"] = "remote"
+        route["remote"] = {
+            "provider": provider,
+            "model": selected_model,
+            "base_url": str(
+                (current_remote.get("base_url") if same_provider else "")
+                or profile.get("base_url")
+                or DEFAULT_REMOTE_BASE_URLS[provider]
+            ),
+        }
+        model["remote_provider"] = provider
+
+    routes = model.setdefault("routes", {})
+    if not isinstance(routes, dict):
+        routes = {}
+        model["routes"] = routes
+    routes["live"] = route
+    if bool(model.get("share_live_code", True)):
+        routes["code"] = copy.deepcopy(route)
+
+
 def set_provider(provider):
+    provider = str(provider or "local").strip().lower()
+    if provider not in {"local", *CLOUD_PROVIDERS}:
+        raise ValueError(f"不支持的模型提供商：{provider}")
     cfg=load_config(); mdl=cfg.setdefault("model",{}); mdl["provider"]=provider
     if provider=="local":
-        lc=mdl.setdefault("local",{}); lc["name"]=lc.get("name") or ""; lc["api_key"]="ollama"; mdl["name"]=lc["name"]
+        lc=mdl.setdefault("local",{}); lc["name"]=lc.get("name") or ""; lc["api_key"]="ollama"
+        _sync_legacy_live_route(mdl, provider)
+        mdl["name"]=mdl["local"]["name"]
     else:
         models=AVAILABLE_MODELS.get(provider,[])
-        if models:
-            mdl["name"]=models[0][0]; pc=mdl.setdefault(provider,{})
-            if isinstance(pc,dict): pc["name"]=models[0][0]
+        pc=mdl.setdefault(provider,{})
+        if not isinstance(pc,dict):
+            pc={}
+            mdl[provider]=pc
+        selected_model=str(pc.get("name") or (models[0][0] if models else "")).strip()
+        if selected_model:
+            pc["name"]=selected_model
+            mdl["name"]=selected_model
+        _sync_legacy_live_route(mdl, provider, selected_model)
     save_config(cfg); logger.info(f"切换: {provider}"); return mdl
 
 def set_api_key(provider, api_key):
@@ -366,9 +436,15 @@ def set_api_key(provider, api_key):
     return cfg["model"]
 
 def set_model_name(provider, model_name):
-    cfg=load_config(); mdl=cfg.get("model",{}); mdl["name"]=model_name
-    if provider in mdl and isinstance(mdl[provider],dict): mdl[provider]["name"]=model_name
-    else: mdl[provider]=model_name if not isinstance(mdl.get(provider),dict) else {**mdl[provider],"name":model_name}
+    provider = str(provider or "local").strip().lower()
+    if provider not in {"local", *CLOUD_PROVIDERS}:
+        raise ValueError(f"不支持的模型提供商：{provider}")
+    model_name = str(model_name or "").strip()
+    cfg=load_config(); mdl=cfg.get("model",{}); mdl["provider"]=provider; mdl["name"]=model_name
+    profile=mdl.setdefault(provider,{})
+    if not isinstance(profile,dict): profile={}; mdl[provider]=profile
+    profile["name"]=model_name
+    _sync_legacy_live_route(mdl, provider, model_name)
     save_config(cfg); return mdl
 
 
@@ -920,6 +996,34 @@ def set_model_connection_settings(values: dict) -> dict:
                 routes["code"] = copy.deepcopy(routes.get("live") or _route_from_model(model, "live"))
 
             live_route = routes.get("live") or _route_from_model(model, "live")
+            live_local = live_route.get("local", {}) if isinstance(live_route.get("local"), dict) else {}
+            legacy_local = model.setdefault("local", {})
+            if not isinstance(legacy_local, dict):
+                legacy_local = {}
+                model["local"] = legacy_local
+            legacy_local["name"] = str(live_local.get("model") or legacy_local.get("name") or "")
+            legacy_local["base_url"] = _effective_local_base_url(
+                live_local.get("base_url") or legacy_local.get("base_url")
+            )
+            legacy_local["api_key"] = "ollama"
+
+            live_remote = live_route.get("remote", {}) if isinstance(live_route.get("remote"), dict) else {}
+            live_remote_provider = str(
+                live_remote.get("provider") or model.get("remote_provider") or remote_provider
+            ).strip().lower()
+            if live_remote_provider in CLOUD_PROVIDERS:
+                legacy_remote = model.setdefault(live_remote_provider, {})
+                if not isinstance(legacy_remote, dict):
+                    legacy_remote = {}
+                    model[live_remote_provider] = legacy_remote
+                legacy_remote["name"] = str(live_remote.get("model") or legacy_remote.get("name") or "")
+                legacy_remote["base_url"] = str(
+                    live_remote.get("base_url")
+                    or legacy_remote.get("base_url")
+                    or DEFAULT_REMOTE_BASE_URLS[live_remote_provider]
+                )
+                model["remote_provider"] = live_remote_provider
+
             if live_route["source"] == "local":
                 model["provider"] = "local"
                 model["name"] = live_route["local"]["model"]

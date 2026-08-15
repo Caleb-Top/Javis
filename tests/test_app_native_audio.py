@@ -1,5 +1,7 @@
 import base64
 import io
+import math
+import struct
 import unittest
 import wave
 from pathlib import Path
@@ -85,6 +87,63 @@ class NativeAudioContractTests(unittest.TestCase):
             self.assertEqual(stream.getsampwidth(), 2)
             self.assertEqual(stream.getframerate(), 16_000)
             self.assertGreater(stream.getnframes(), 0)
+
+    def test_portaudio_device_names_are_repaired_and_safe_across_windows_stdout(self):
+        from voice.native_capture_worker import normalize_device_name
+
+        self.assertEqual(
+            normalize_device_name("鑰虫満 (HUAWEI FreeBuds 5)"),
+            "耳机 (HUAWEI FreeBuds 5)",
+        )
+        self.assertEqual(
+            normalize_device_name(
+                "耳机式麦克风 (@System32\\drivers\\bthhfenum.sys,#2;%1 Hands-Free%0\r\n;(阿根廷雄鹰))"
+            ),
+            "耳机式麦克风 (阿根廷雄鹰)",
+        )
+        worker = self.read("voice/native_capture_worker.py")
+        self.assertIn("ensure_ascii=True", worker)
+        self.assertNotIn('int(info.get("hostApi", -1) or -1)', worker)
+
+    def test_microphone_probe_forwards_the_selected_device(self):
+        from voice.native_capture import NativeCaptureManager
+
+        manager = NativeCaptureManager()
+        expected = {"ok": True, "source": "microphone"}
+        with (
+            patch.object(manager, "start") as start,
+            patch.object(manager, "stop", return_value=expected),
+            patch("voice.native_capture.time.sleep"),
+        ):
+            result = manager.probe("microphone", 4.0, device_index=17)
+
+        self.assertEqual(result, expected)
+        start.assert_called_once_with("microphone", device_index=17)
+
+    def test_wav_signal_metrics_distinguish_silence_from_spoken_level_audio(self):
+        from voice.native_capture import wav_signal_metrics
+
+        def wav_payload(amplitude: int) -> bytes:
+            output = io.BytesIO()
+            samples = [
+                int(amplitude * math.sin(2 * math.pi * 220 * index / 16_000))
+                for index in range(16_000)
+            ]
+            with wave.open(output, "wb") as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(2)
+                stream.setframerate(16_000)
+                stream.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+            return output.getvalue()
+
+        silent = wav_signal_metrics(wav_payload(0))
+        spoken = wav_signal_metrics(wav_payload(4_000))
+
+        self.assertFalse(silent["signal_detected"])
+        self.assertEqual(silent["rms"], 0.0)
+        self.assertTrue(spoken["signal_detected"])
+        self.assertGreater(spoken["peak"], 0.1)
+        self.assertEqual(spoken["duration_ms"], 1000)
 
     def test_system_capture_uses_the_isolated_wasapi_helper(self):
         from voice.native_capture import NativeCaptureManager

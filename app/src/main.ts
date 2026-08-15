@@ -440,6 +440,14 @@ const stopAudioPlayback = (): void => {
   window.speechSynthesis?.cancel();
   document.dispatchEvent(new CustomEvent("javis:stop-audio"));
 };
+const voiceStateDetail = (state: LiveState): string => {
+  if (state === "listening") return "我在听";
+  if (state === "thinking") return "正在理解";
+  if (state === "speaking") return "正在回答";
+  if (state === "idle") return "已暂停聆听";
+  if (state === "error") return "语音连接需要检查";
+  return "语音处理中";
+};
 voiceCapture = createVoiceCapture(client, {
   noiseProfile: () => {
     const profile = readStringPreference("voice.noiseProfile", "standard");
@@ -469,9 +477,20 @@ voiceCapture = createVoiceCapture(client, {
     if (requestId) voiceRequestIds.add(requestId);
   },
   onAudio: (audioBase64) => client.sendVoice(audioBase64),
-  onState: (state) => runtimeStateCoordinator.signal({ source: "voice", state, timestamp: Date.now(), detail: state === "listening" ? "我在听" : "正在理解" }),
+  onState: (state) => runtimeStateCoordinator.signal({
+    source: "voice",
+    state,
+    timestamp: Date.now(),
+    detail: voiceStateDetail(state),
+  }),
   onError: (message) => {
     liveCaption.setText(message);
+    runtimeStateCoordinator.signal({
+      source: "voice",
+      state: "error",
+      timestamp: Date.now(),
+      detail: message,
+    });
   }
 });
 diagnostics = createDiagnosticsPanel(client, sidecar, voiceCapture, {
@@ -735,6 +754,9 @@ document.addEventListener("javis:voice-profile-changed", (event) => {
   if (profile === "off" || profile === "standard" || profile === "strong") {
     void voiceCapture.setNoiseProfile(profile);
   }
+});
+document.addEventListener("javis:voice-device-changed", () => {
+  void voiceCapture.applyInputDeviceChange().catch(() => undefined);
 });
 const firstRunRequired = firstRun.showOnFirstRun();
 void setDesktopMode(getStartupDesktopMode(firstRunRequired));

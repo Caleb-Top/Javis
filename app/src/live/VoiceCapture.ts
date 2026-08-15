@@ -28,6 +28,13 @@ export type AudioProbeResult = {
   mimeType?: string;
   bytes?: number;
   trackLabel?: string;
+  deviceIndex?: number;
+  rate?: number;
+  channels?: number;
+  durationMs?: number;
+  rms?: number;
+  peak?: number;
+  signalDetected?: boolean;
   audioBase64?: string;
 };
 
@@ -39,6 +46,7 @@ export type VoiceCapture = {
   pauseContinuous(): Promise<void>;
   isContinuous(): boolean;
   setNoiseProfile(profile: VoiceNoiseProfile): Promise<void>;
+  applyInputDeviceChange(): Promise<void>;
   resumeListeningState(): void;
   probeMicrophone(): Promise<AudioProbeResult>;
   probeSystemAudio(): Promise<AudioProbeResult>;
@@ -47,6 +55,7 @@ export type VoiceCapture = {
 
 const DEFAULT_RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000] as const;
 const DEFAULT_STREAM_READY_TIMEOUT_MS = 10000;
+const STREAM_RELEASE_TIMEOUT_MS = 1500;
 
 export function createVoiceCapture(
   client: BackendClient,
@@ -62,6 +71,7 @@ export function createVoiceCapture(
   let streamReadyTimer: number | null = null;
   let reconnectAttempt = 0;
   let socketGeneration = 0;
+  let inputDeviceChangeTask: Promise<void> = Promise.resolve();
   let noiseProfile: VoiceNoiseProfile = options.noiseProfile?.() ?? "standard";
   const configuredReconnectDelays = (options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS)
     .filter((delay) => Number.isFinite(delay) && delay >= 0);
@@ -291,7 +301,7 @@ export function createVoiceCapture(
     return ready;
   }
 
-  async function pauseContinuous(): Promise<void> {
+  async function pauseContinuous(waitForRelease = false): Promise<void> {
     wantsContinuous = false;
     continuous = false;
     reconnectAttempt = 0;
@@ -301,6 +311,30 @@ export function createVoiceCapture(
     const socket = streamSocket;
     streamSocket = null;
     settleStart(new Error("native audio stream start cancelled"));
+    let releasePromise: Promise<void> | null = null;
+    if (socket && waitForRelease && socket.readyState === 1) {
+      releasePromise = new Promise<void>((resolve) => {
+        let settled = false;
+        let timer: ReturnType<typeof globalThis.setTimeout> | null = null;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          if (timer !== null) globalThis.clearTimeout(timer);
+          resolve();
+        };
+        timer = globalThis.setTimeout(finish, STREAM_RELEASE_TIMEOUT_MS);
+        socket.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data) as Record<string, unknown>;
+            if (String(message.type || "") === "audio.stream.stopped") finish();
+          } catch {
+            // Ignore unrelated or malformed events while waiting for release.
+          }
+        };
+        socket.onerror = finish;
+        socket.onclose = finish;
+      });
+    }
     if (socket && socket.readyState === 1) {
       try {
         socket.send(JSON.stringify({
@@ -311,6 +345,7 @@ export function createVoiceCapture(
         // The user-requested stop still owns the lifecycle if the socket vanished.
       }
     }
+    if (releasePromise) await releasePromise;
     if (socket) {
       socket.onopen = null;
       socket.onclose = null;
@@ -342,12 +377,40 @@ export function createVoiceCapture(
     await startContinuous();
   }
 
+  function applyInputDeviceChange(): Promise<void> {
+    inputDeviceChangeTask = inputDeviceChangeTask.catch(() => undefined).then(async () => {
+      if (!wantsContinuous) return;
+      await pauseContinuous(true);
+      await startContinuous();
+    });
+    return inputDeviceChangeTask;
+  }
+
+  async function probeMicrophoneWithStreamPause(): Promise<AudioProbeResult> {
+    const shouldResume = wantsContinuous;
+    if (shouldResume) await pauseContinuous(true);
+    const result = await probe("microphone");
+    if (shouldResume) {
+      try {
+        await startContinuous();
+      } catch {
+        // The normal stream callbacks already surface a reconnect failure.
+      }
+    }
+    return result;
+  }
+
   async function probe(source: "microphone" | "system"): Promise<AudioProbeResult> {
     try {
-      return await client.post<AudioProbeResult>("/api/voice/capture/probe", {
+      const payload: Record<string, unknown> = {
         source,
-        duration: source === "microphone" ? 2.4 : 1.2,
-      });
+        duration: source === "microphone" ? 4.5 : 1.2,
+      };
+      const deviceIndex = source === "microphone" ? options.deviceIndex?.() : undefined;
+      if (deviceIndex !== undefined && deviceIndex !== null && deviceIndex !== "") {
+        payload.device_index = Number(deviceIndex);
+      }
+      return await client.post<AudioProbeResult>("/api/voice/capture/probe", payload);
     } catch (error) {
       return {
         ok: false,
@@ -366,10 +429,11 @@ export function createVoiceCapture(
     pauseContinuous,
     isContinuous: () => continuous,
     setNoiseProfile,
+    applyInputDeviceChange,
     resumeListeningState: () => {
       if (continuous) options.onState("listening");
     },
-    probeMicrophone: () => probe("microphone"),
+    probeMicrophone: probeMicrophoneWithStreamPause,
     probeSystemAudio: () => probe("system"),
     selfTest: (source = "microphone") => probe(source),
   };

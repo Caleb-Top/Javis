@@ -33,3 +33,8 @@ test("closing diagnostics notifies the shell so it can restore the previous mode
   assert.match(diagnosticsSource, /type DiagnosticsPanelOptions/);
   assert.match(diagnosticsSource, /options\.onClose\?\.\(\)/);
 });
+
+test("microphone diagnostics passes only when the backend measured real signal", () => {
+  assert.match(diagnosticsSource, /result\.signalDetected\s*===\s*true/);
+  assert.doesNotMatch(diagnosticsSource, /result\.signalDetected\s*!==\s*false/);
+});

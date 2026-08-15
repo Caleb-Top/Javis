@@ -342,10 +342,17 @@ async def api_voice_capture_stop():
 async def api_voice_capture_probe(data: dict = Body(default={})):
     source = str(data.get("source", "microphone") or "microphone")
     try:
+        raw_device_index = data.get("device_index")
+        device_index = (
+            None
+            if raw_device_index is None or raw_device_index == ""
+            else int(raw_device_index)
+        )
         return await asyncio.to_thread(
             probe_capture,
             source,
             float(data.get("duration", 1.2) or 1.2),
+            device_index,
         )
     except Exception as error:
         return {

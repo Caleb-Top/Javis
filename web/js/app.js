@@ -1389,7 +1389,7 @@ async function showSettings() {
   document.getElementById('settings-modal').style.display = 'flex';
 }
 function hideSettings() { document.getElementById('settings-modal').style.display = 'none'; }
-function onProviderChange() { document.getElementById('apikey-group').style.display = document.getElementById('cfg-provider').value === 'local' ? 'none' : 'flex'; fetchStatus(); }
+function onProviderChange() { document.getElementById('apikey-group').style.display = document.getElementById('cfg-provider').value === 'local' ? 'none' : 'flex'; }
 async function saveApiKey() {
   if (requestUnifiedModelSettingsIfEmbedded()) return;
   let p = document.getElementById('cfg-provider').value; let k = document.getElementById('cfg-apikey').value.trim();
@@ -1404,9 +1404,14 @@ function initProviderListener() {
   if (globalThis.JavisAppEmbedBridge && globalThis.JavisAppEmbedBridge.isEmbedded(window.location)) return;
   document.getElementById('cfg-provider').addEventListener('change', async function(){
     let p = document.getElementById('cfg-provider').value;
-    let d = await legacyModelConfigRequest('/api/config/provider', { provider: p });
-    document.getElementById('settings-msg').textContent = d.applied ? '已切换' : '失败';
-    onProviderChange(); fetchStatus();
+    onProviderChange();
+    try {
+      let d = await legacyModelConfigRequest('/api/config/provider', { provider: p });
+      document.getElementById('settings-msg').textContent = d.applied ? '已切换' : '失败';
+      if (d.applied) await fetchStatus();
+    } catch(e) {
+      document.getElementById('settings-msg').textContent = '❌ ' + e.message;
+    }
   });
 }
 

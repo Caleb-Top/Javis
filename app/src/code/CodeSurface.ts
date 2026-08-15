@@ -34,9 +34,10 @@ export function isTrustedEmbeddedCodeSettingsMessage(
 ): boolean {
   if (event.source !== expectedSource || event.origin !== expectedOrigin) return false;
   if (!event.data || typeof event.data !== "object") return false;
-  const data = event.data as { type?: unknown; section?: unknown };
+  const data = event.data as { type?: unknown; section?: unknown; route?: unknown };
   return data.type === OPEN_MODEL_SETTINGS_MESSAGE
-    && data.section === MODEL_SETTINGS_SECTION;
+    && data.section === MODEL_SETTINGS_SECTION
+    && data.route === "code";
 }
 
 function handleEmbeddedCodeMessage(event: MessageEvent): void {
@@ -47,7 +48,9 @@ function handleEmbeddedCodeMessage(event: MessageEvent): void {
     legacyFrame.contentWindow,
     backendOrigin,
   )) return;
-  document.dispatchEvent(new CustomEvent("javis:open-model-settings"));
+  document.dispatchEvent(new CustomEvent("javis:open-model-settings", {
+    detail: { route: "code" },
+  }));
 }
 
 export function bindEmbeddedCodeMessageListener(target: Window): void {

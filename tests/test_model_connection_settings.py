@@ -362,6 +362,200 @@ class ModelConnectionSettingsTests(unittest.TestCase):
                 self.assertEqual(config_api.get_model_route("live"), live_route)
                 self.assertEqual(config_api.get_model_route("code"), split_code)
 
+    def test_legacy_provider_selection_updates_live_route_and_shared_code_route(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "local",
+                local_model="live-local",
+                local_url="http://127.0.0.1:11435/v1",
+                remote_provider="openai",
+                remote_model="live-cloud",
+                remote_url="https://api.openai.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                config_api.set_model_connection_settings({
+                    "share_live_code": True,
+                    "routes": {"live": live_route},
+                })
+
+                config_api.set_provider("deepseek")
+                live = config_api.get_model_route("live")
+                code = config_api.get_model_route("code")
+
+            self.assertEqual(live["source"], "remote")
+            self.assertEqual(live["remote"]["provider"], "deepseek")
+            self.assertEqual(code, live)
+
+    def test_legacy_provider_selection_updates_only_live_when_routes_are_independent(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "local",
+                local_model="live-local",
+                local_url="http://127.0.0.1:11435/v1",
+                remote_provider="deepseek",
+                remote_model="live-cloud",
+                remote_url="https://api.deepseek.com/v1",
+            )
+            code_route = self._route(
+                "remote",
+                local_model="code-local",
+                local_url="http://127.0.0.1:22435/v1",
+                remote_provider="openai",
+                remote_model="code-cloud",
+                remote_url="https://api.openai.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                config_api.set_model_connection_settings({
+                    "share_live_code": False,
+                    "routes": {"live": live_route, "code": code_route},
+                })
+
+                config_api.set_provider("deepseek")
+                live = config_api.get_model_route("live")
+                code = config_api.get_model_route("code")
+
+            self.assertEqual(live["source"], "remote")
+            self.assertEqual(live["remote"]["provider"], "deepseek")
+            self.assertEqual(code, code_route)
+
+    def test_legacy_local_provider_selection_updates_the_effective_shared_route(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "remote",
+                local_model="installed-local",
+                local_url="http://127.0.0.1:11435/v1",
+                remote_provider="deepseek",
+                remote_model="live-cloud",
+                remote_url="https://api.deepseek.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                config_api.set_model_connection_settings({
+                    "share_live_code": True,
+                    "routes": {"live": live_route},
+                })
+
+                config_api.set_provider("local")
+                live = config_api.get_model_route("live")
+                code = config_api.get_model_route("code")
+
+            self.assertEqual(live["source"], "local")
+            self.assertEqual(live["local"]["model"], "installed-local")
+            self.assertEqual(code, live)
+
+    def test_legacy_model_selection_updates_the_effective_live_route(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "remote",
+                local_model="live-local",
+                local_url="http://127.0.0.1:11435/v1",
+                remote_provider="deepseek",
+                remote_model="old-cloud-model",
+                remote_url="https://api.deepseek.com/v1",
+            )
+            code_route = self._route(
+                "remote",
+                local_model="code-local",
+                local_url="http://127.0.0.1:22435/v1",
+                remote_provider="openai",
+                remote_model="code-cloud",
+                remote_url="https://api.openai.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                config_api.set_model_connection_settings({
+                    "share_live_code": False,
+                    "routes": {"live": live_route, "code": code_route},
+                })
+
+                config_api.set_model_name("deepseek", "new-cloud-model")
+                live = config_api.get_model_route("live")
+                code = config_api.get_model_route("code")
+
+            self.assertEqual(live["source"], "remote")
+            self.assertEqual(live["remote"]["provider"], "deepseek")
+            self.assertEqual(live["remote"]["model"], "new-cloud-model")
+            self.assertEqual(code, code_route)
+
+    def test_legacy_model_selection_keeps_shared_code_route_in_sync(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "remote",
+                local_model="live-local",
+                local_url="http://127.0.0.1:11435/v1",
+                remote_provider="deepseek",
+                remote_model="old-cloud-model",
+                remote_url="https://api.deepseek.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                config_api.set_model_connection_settings({
+                    "share_live_code": True,
+                    "routes": {"live": live_route},
+                })
+
+                config_api.set_model_name("deepseek", "new-cloud-model")
+                live = config_api.get_model_route("live")
+                code = config_api.get_model_route("code")
+
+            self.assertEqual(live["remote"]["model"], "new-cloud-model")
+            self.assertEqual(code, live)
+
+    def test_route_save_mirrors_the_complete_live_profile_for_legacy_consumers(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = Path(root) / "config.yaml"
+            live_route = self._route(
+                "remote",
+                local_model="live-local-custom",
+                local_url="http://127.0.0.1:31435/v1",
+                remote_provider="openai",
+                remote_model="account-custom-model",
+                remote_url="https://gateway.example.test/openai/v1",
+            )
+            code_route = self._route(
+                "local",
+                local_model="code-local",
+                local_url="http://127.0.0.1:22435/v1",
+                remote_provider="deepseek",
+                remote_model="code-cloud",
+                remote_url="https://api.deepseek.com/v1",
+            )
+            with patch.object(config_api, "CONFIG_PATH", config_path):
+                saved = config_api.set_model_connection_settings({
+                    "share_live_code": False,
+                    "routes": {"live": live_route, "code": code_route},
+                })
+                persisted = config_api.load_config()["model"]
+                legacy_view = config_api.get_model_connection_settings()
+
+                self.assertEqual(persisted["local"]["name"], "live-local-custom")
+                self.assertEqual(persisted["local"]["base_url"], "http://127.0.0.1:31435/v1")
+                self.assertEqual(persisted["openai"]["name"], "account-custom-model")
+                self.assertEqual(
+                    persisted["openai"]["base_url"],
+                    "https://gateway.example.test/openai/v1",
+                )
+                self.assertEqual(persisted["provider"], "openai")
+                self.assertEqual(persisted["remote_provider"], "openai")
+                self.assertEqual(persisted["name"], "account-custom-model")
+                self.assertEqual(legacy_view["local"]["model"], "live-local-custom")
+                self.assertEqual(
+                    legacy_view["remote_profiles"]["openai"]["model"],
+                    "account-custom-model",
+                )
+                self.assertEqual(
+                    legacy_view["remote_profiles"]["openai"]["base_url"],
+                    "https://gateway.example.test/openai/v1",
+                )
+
+                config_api.set_provider("openai")
+                after_legacy_selection = config_api.get_model_route("live")
+
+            self.assertTrue(saved["applied"])
+            self.assertEqual(after_legacy_selection, live_route)
+
     def test_settings_round_trip_keeps_local_and_remote_profiles(self):
         with tempfile.TemporaryDirectory() as root:
             config_path = Path(root) / "config.yaml"

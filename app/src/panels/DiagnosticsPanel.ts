@@ -236,14 +236,32 @@ export function createDiagnosticsPanel(
   }
 
   async function testMicrophoneAndStt(): Promise<void> {
-    setAudioBusy(true, "正在录音，请清楚地说“你好 Javis”…");
+    setAudioBusy(true, "正在用设置中选定的麦克风录音约 5 秒，请清楚地说“你好 Javis”…");
     setAudioStatus("microphone", "测试中");
     setAudioStatus("stt", "等待录音");
     const result = await voiceCapture.probeMicrophone();
-    setAudioStatus("microphone", result.ok ? "通过" : result.message, result.ok);
+    const signalDetected = result.signalDetected === true;
+    const microphonePassed = result.ok && signalDetected;
+    setAudioStatus(
+      "microphone",
+      microphonePassed
+        ? `通过 · ${result.trackLabel || "选定设备"}`
+        : result.ok
+          ? "已连接 · 未检测到有效声音"
+          : result.message,
+      microphonePassed,
+    );
     if (!result.ok || !result.audioBase64) {
       setAudioStatus("stt", "未执行");
       setAudioBusy(false, result.message);
+      return;
+    }
+    if (!signalDetected) {
+      setAudioStatus("stt", "未执行");
+      setAudioBusy(
+        false,
+        `当前设备${result.trackLabel ? `“${result.trackLabel}”` : ""}没有检测到声音；请确认耳机麦克风未静音，或返回设置改选输入设备。`,
+      );
       return;
     }
     if (voiceCapabilities.stt?.available === false) {

@@ -816,7 +816,7 @@ body[data-desktop-mode="code"] .code-surface,
 .settings-header {
   min-width: 0;
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 10px 18px;
@@ -824,6 +824,29 @@ body[data-desktop-mode="code"] .code-surface,
   background: rgba(255, 255, 255, .58);
   cursor: grab;
 }
+
+.settings-back-button {
+  min-width: 84px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px 0 11px;
+  border: 1px solid rgba(117, 132, 153, .22);
+  border-radius: 12px;
+  color: var(--shell-text);
+  background: rgba(255, 255, 255, .78);
+  box-shadow: 0 3px 12px rgba(53, 77, 110, .06);
+  cursor: pointer;
+}
+.settings-back-button:hover {
+  border-color: rgba(37, 99, 235, .34);
+  color: #174fae;
+  background: #fff;
+}
+.settings-back-icon { font-size: 18px; line-height: 1; }
+.settings-back-label { font-size: 12px; font-weight: 650; white-space: nowrap; }
 
 .settings-header:active { cursor: grabbing; }
 .settings-header > div { min-width: 0; pointer-events: none; }
@@ -969,6 +992,10 @@ body[data-desktop-mode="code"] .code-surface,
   color: #1f4f8c;
   background: rgba(255, 255, 255, .94);
   box-shadow: 0 3px 10px rgba(52, 73, 102, .09);
+}
+.model-route-segment button:disabled {
+  color: rgba(91, 105, 126, .52);
+  cursor: not-allowed;
 }
 .model-route-share,
 .model-installer-consent {
@@ -1268,7 +1295,16 @@ body[data-desktop-mode="code"] .code-surface,
   padding: 16px;
 }
 .settings-shortcut-card legend { padding: 0 7px; color: var(--shell-muted); font-size: 11px; }
-.settings-shortcut-grid { display: grid; grid-template-columns: minmax(0, 1fr) 180px; gap: 12px; }
+.settings-shortcut-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, .38fr);
+  align-items: start;
+  gap: 12px;
+}
+.settings-shortcut-card .shortcut-kind {
+  grid-column: auto;
+  grid-row: auto;
+}
 .shortcut-control { margin-top: 13px; }
 .shortcut-control[data-control="none"] {
   min-height: 42px;
@@ -1302,7 +1338,7 @@ body[data-desktop-mode="code"] .code-surface,
 .settings-shortcut-footer {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 36px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   margin-top: 13px;
@@ -1319,7 +1355,26 @@ body[data-desktop-mode="code"] .code-surface,
 .shortcut-status[data-status="invalid"],
 .shortcut-status[data-status="missing-target"] { color: #b5473f; background: rgba(181, 71, 63, .1); }
 .shortcut-status[data-status="incomplete"] { color: #97600f; background: rgba(151, 96, 15, .1); }
-.settings-shortcut-footer .settings-icon-button { width: 32px; height: 32px; }
+.settings-clear-button {
+  min-width: 56px;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(117, 132, 153, .2);
+  border-radius: 10px;
+  color: var(--shell-muted);
+  background: rgba(250, 252, 254, .88);
+  cursor: pointer;
+}
+.settings-clear-button:hover:not(:disabled) {
+  color: #a33b35;
+  border-color: rgba(181, 71, 63, .24);
+  background: rgba(255, 245, 244, .94);
+}
+.settings-clear-button:disabled { opacity: .42; cursor: default; }
+.settings-shortcut-footer .shortcut-clear {
+  grid-column: auto;
+  grid-row: auto;
+}
 
 .settings-theme-preview {
   min-height: 70px;
@@ -1398,7 +1453,13 @@ body[data-desktop-mode="code"] .code-surface,
 @media (max-width: 640px) {
   .settings-shortcut-grid { grid-template-columns: 1fr; }
   .settings-shortcut-footer { grid-template-columns: minmax(0, 1fr) auto; }
-  .settings-shortcut-footer .settings-icon-button { grid-column: 2; }
+  .settings-shortcut-footer .shortcut-help { grid-column: 1 / -1; }
+  .settings-shortcut-footer .shortcut-status {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: end;
+  }
+  .settings-shortcut-footer .shortcut-clear { grid-column: 2; grid-row: 2; }
 }
 
 .code-surface {
@@ -1960,9 +2021,9 @@ body[data-desktop-mode="code"] .code-surface,
 }
 .pet-scale-input { width: 100%; accent-color: var(--cyan); }
 .pet-skin-select,
-.shortcut-kind,
-.shortcut-label,
-.shortcut-value {
+.pet-shortcut-slot .shortcut-kind,
+.pet-shortcut-slot .shortcut-label,
+.pet-shortcut-slot .shortcut-value {
   min-width: 0;
   height: 36px;
   border: 1px solid var(--line);
@@ -1971,9 +2032,9 @@ body[data-desktop-mode="code"] .code-surface,
   background: var(--panel-strong);
 }
 .pet-skin-select,
-.shortcut-kind { padding: 0 9px; }
-.shortcut-label,
-.shortcut-value { padding: 0 10px; }
+.pet-shortcut-slot .shortcut-kind { padding: 0 9px; }
+.pet-shortcut-slot .shortcut-label,
+.pet-shortcut-slot .shortcut-value { padding: 0 10px; }
 .pet-shortcut-slot {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(110px, .8fr) 36px;
@@ -1990,10 +2051,10 @@ body[data-desktop-mode="code"] .code-surface,
   color: var(--muted);
   font-size: 10px;
 }
-.shortcut-label { grid-column: 1; grid-row: 2; }
-.shortcut-kind { grid-column: 2; grid-row: 2; }
-.shortcut-clear { grid-column: 3; grid-row: 2; width: 36px; height: 36px; }
-.shortcut-value { grid-column: 1 / -1; grid-row: 3; }
+.pet-shortcut-slot .shortcut-label { grid-column: 1; grid-row: 2; }
+.pet-shortcut-slot .shortcut-kind { grid-column: 2; grid-row: 2; }
+.pet-shortcut-slot .shortcut-clear { grid-column: 3; grid-row: 2; width: 36px; height: 36px; }
+.pet-shortcut-slot .shortcut-value { grid-column: 1 / -1; grid-row: 3; }
 .settings-secondary-actions { display: flex; gap: 8px; margin-top: 16px; }
 
 body[data-desktop-mode="pet"] { min-width: 0; min-height: 0; background: transparent; }

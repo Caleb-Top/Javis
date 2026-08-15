@@ -3,9 +3,13 @@ import test from "node:test";
 
 import {
   applyInstalledLocalProfile,
+  enableSharedModelRoute,
+  buildModelRoutingPayload,
+  getEditableModelRoute,
   getModelInstallControlAvailability,
   getModelInstallTargets,
   isActiveModelInstallState,
+  resolveHydratedModelRoute,
 } from "../src/settings/modelRouteDrafts.ts";
 
 const routes = {
@@ -135,4 +139,39 @@ test("installer controls follow the active job state and server capabilities", (
     }),
     { pause: false, resume: false, cancel: false },
   );
+});
+
+test("shared mode has one canonical editable route instead of discarding Code edits", () => {
+  assert.equal(getEditableModelRoute("live", true), "live");
+  assert.equal(getEditableModelRoute("code", true), "live");
+  assert.equal(getEditableModelRoute("code", false), "code");
+});
+
+test("save hydration preserves the route currently being edited", () => {
+  assert.equal(resolveHydratedModelRoute("code", "live", true), "code");
+  assert.equal(resolveHydratedModelRoute("code", "live", false), "live");
+});
+
+test("route-aware payload never sends legacy top-level profiles", () => {
+  const payload = buildModelRoutingPayload(routes, "code", false);
+
+  assert.equal(payload.active_route, "code");
+  assert.equal(payload.share_live_code, false);
+  assert.deepEqual(payload.routes, routes);
+  assert.equal("source" in payload, false);
+  assert.equal("local" in payload, false);
+  assert.equal("remote" in payload, false);
+});
+
+test("enabling shared routing keeps Live canonical instead of replacing it with Code", () => {
+  const routes = {
+    live: { source: "local", local: { model: "live-local", base_url: "http://live" } },
+    code: { source: "remote", local: { model: "code-local", base_url: "http://code" } },
+  };
+
+  const shared = enableSharedModelRoute(routes);
+
+  assert.deepEqual(shared.live, routes.live);
+  assert.deepEqual(shared.code, routes.live);
+  assert.notEqual(shared.code, shared.live);
 });

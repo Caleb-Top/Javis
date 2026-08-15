@@ -60,3 +60,20 @@ test("fallback activity stays concise and never reads as completed", () => {
     "\u601d\u8003\u4e2d \u00b7 \u6b63\u5728\u5c1d\u8bd5\u66ff\u4ee3\u65b9\u6848",
   );
 });
+
+test("voice failures never combine an error label with the thinking detail", () => {
+  assert.equal(
+    runtimeStateTypes.formatSurfaceStatus({
+      state: "error",
+      detail: "正在理解",
+    }),
+    "需要检查",
+  );
+  assert.equal(
+    runtimeStateTypes.formatSurfaceStatus({
+      state: "error",
+      detail: "麦克风设备不可用",
+    }),
+    "需要检查 · 麦克风设备不可用",
+  );
+});

@@ -95,3 +95,36 @@ test("actionable model failures open the same unified model settings surface", (
   assert.match(mainSource, /if \(acceptedServerFailure\)[\s\S]*restartLocalRuntime/);
   assert.match(backendClientSource, /payload\.error \|\| payload\.detail/);
 });
+
+test("late provider catalog responses cannot overwrite the current provider", () => {
+  assert.match(settingsSource, /let remoteModelRefreshEpoch\s*=\s*0/);
+  assert.match(
+    settingsSource,
+    /const refreshEpoch\s*=\s*\+\+remoteModelRefreshEpoch[\s\S]*?await options\.onRefreshRemoteModels[\s\S]*?if \(refreshEpoch !== remoteModelRefreshEpoch\) return/,
+  );
+});
+
+test("model settings lock editing while hydration or save is unresolved", () => {
+  assert.match(settingsSource, /const MODEL_CONFIG_CONTROL_SELECTOR/);
+  assert.match(
+    settingsSource,
+    /async function loadModelSettings[\s\S]*?setModelConfigBusy\(true\)[\s\S]*?await options\.onLoadModelSettings/,
+  );
+  assert.match(
+    settingsSource,
+    /async function saveModelSettings[\s\S]*?if \(!modelSettings \|\| !modelRouteDrafts\)[\s\S]*?setModelConfigBusy\(true\)[\s\S]*?await options\.onSaveModelSettings/,
+  );
+});
+
+test("stale model hydration and catalog responses are rejected", () => {
+  assert.match(settingsSource, /let modelSettingsRequestEpoch\s*=\s*0/);
+  assert.match(
+    settingsSource,
+    /const requestEpoch\s*=\s*\+\+modelSettingsRequestEpoch[\s\S]*?await options\.onLoadModelSettings[\s\S]*?requestEpoch !== modelSettingsRequestEpoch/,
+  );
+  assert.match(settingsSource, /function invalidateRemoteModelRefresh/);
+  assert.match(
+    settingsSource,
+    /refreshEpoch !== remoteModelRefreshEpoch[\s\S]*?activeModelRoute !== requestedRoute[\s\S]*?\.remote-provider[\s\S]*?provider\.id/,
+  );
+});
