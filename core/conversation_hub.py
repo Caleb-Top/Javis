@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
 from core.agent_run_recorder import AgentRunRecorder
@@ -11,6 +11,7 @@ from core.agent_runs import AgentRunStore
 from core.cancellation import CancellationToken, RequestCancelled
 from core.conversation_store import ConversationStore, ConversationStoreError
 from core.events import EventBus
+from core.life.l1.contracts import InputProvenance
 
 
 Runner = Callable[["ConversationRequest", CancellationToken], AsyncIterator[dict[str, Any]]]
@@ -47,6 +48,7 @@ class ConversationRequest:
     text: str
     interaction_mode: str = ""
     idempotency_key: str = ""
+    input_provenance: InputProvenance = field(default_factory=InputProvenance.unknown)
 
 
 @dataclass
@@ -143,20 +145,6 @@ class ConversationHub:
         runner: Runner,
     ) -> dict[str, Any]:
         normalized = self._validate_request(request)
-        claimed_request, created = self.store.claim_idempotency_key(
-            normalized.session_id,
-            normalized.idempotency_key,
-            normalized.request_id,
-        )
-        if not created:
-            return {"accepted": False, "request_id": claimed_request, "duplicate": True}
-
-        self.store.append_message(
-            normalized.session_id,
-            normalized.request_id,
-            "user",
-            normalized.text,
-        )
         loop = asyncio.get_running_loop()
         active = _ActiveRequest(
             request=normalized,
@@ -165,36 +153,55 @@ class ConversationHub:
         )
 
         async with self._lock:
-            if normalized.request_id in self._request_index:
-                raise ConversationStoreError(
-                    f"request_id is already active: {normalized.request_id}"
-                )
             previous = self._active.get(normalized.session_id)
-            if previous is not None:
-                cancelled = self._request_cancel_locked(previous, "replacement request")
-                if cancelled:
-                    await self._publish(
-                        previous.request.session_id,
-                        previous.request.request_id,
-                        "request.cancellation_pending",
-                        {"reason": "replacement request"},
-                    )
-            await self._publish(
+            should_cancel_previous = bool(
+                previous is not None and not previous.token.cancelled
+            )
+            preceding_events = (
+                ((
+                    previous.request.request_id,
+                    "request.cancellation_pending",
+                    {"reason": "replacement request"},
+                ),)
+                if should_cancel_previous and previous is not None
+                else ()
+            )
+            acceptance = self.store.accept_request(
                 normalized.session_id,
                 normalized.request_id,
-                "request.accepted",
+                normalized.idempotency_key,
+                normalized.text,
                 {
                     "text": normalized.text,
                     "interaction_mode": normalized.interaction_mode,
                     "replaces_request_id": previous.request.request_id if previous else "",
+                    "input_provenance": normalized.input_provenance.to_dict(),
                 },
+                preceding_events=preceding_events,
             )
+            if not acceptance["accepted"]:
+                return {
+                    "accepted": False,
+                    "request_id": acceptance["request_id"],
+                    "duplicate": True,
+                    "event": acceptance["event"],
+                }
+            if should_cancel_previous and previous is not None:
+                self._request_cancel_locked(previous, "replacement request")
+            for event in acceptance["preceding_events"]:
+                self._broadcast_persisted(event)
+            self._broadcast_persisted(acceptance["event"])
             active.task = asyncio.create_task(
                 self._run_after_previous(active, previous.task if previous else None, runner)
             )
             self._active[normalized.session_id] = active
             self._request_index[normalized.request_id] = active
-        return {"accepted": True, "request_id": normalized.request_id, "duplicate": False}
+        return {
+            "accepted": True,
+            "request_id": normalized.request_id,
+            "duplicate": False,
+            "event": acceptance["event"],
+        }
 
     async def cancel(
         self,
@@ -517,7 +524,12 @@ class ConversationHub:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         event = self.store.append_event(session_id, request_id, event_type, payload)
+        self._broadcast_persisted(event)
+        return event
+
+    def _broadcast_persisted(self, event: dict[str, Any]) -> None:
         self._publish_runtime_observation(event)
+        session_id = str(event.get("session_id") or "")
         for queue in tuple(self._subscribers.get(session_id, ())):
             if queue.full():
                 try:
@@ -525,7 +537,6 @@ class ConversationHub:
                 except asyncio.QueueEmpty:
                     pass
             queue.put_nowait(dict(event))
-        return event
 
     def _publish_runtime_observation(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
@@ -596,6 +607,7 @@ class ConversationHub:
         text = str(request.text or "").strip()
         interaction_mode = str(request.interaction_mode or "").strip()[:32]
         idempotency_key = str(request.idempotency_key or request_id).strip()
+        input_provenance = request.input_provenance
         for field, value in (
             ("session_id", session_id),
             ("request_id", request_id),
@@ -605,10 +617,13 @@ class ConversationHub:
                 raise ConversationStoreError(f"invalid {field}")
         if not text or len(text) > 100_000:
             raise ConversationStoreError("invalid conversation text")
+        if not isinstance(input_provenance, InputProvenance):
+            raise ConversationStoreError("invalid input provenance")
         return ConversationRequest(
             session_id,
             request_id,
             text,
             interaction_mode,
             idempotency_key,
+            input_provenance,
         )

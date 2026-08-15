@@ -18,6 +18,11 @@ from core.conversation_protocol import (
     legacy_wire_events,
     normalize_client_message,
 )
+from core.life.l1.contracts import (
+    InputModality,
+    InputProvenance,
+    InputVerification,
+)
 from core.runtime_access import websocket_access_remaining
 from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
@@ -35,6 +40,7 @@ class ConversationWebSocketGateway:
         command_handlers: dict[str, Callable[[ClientCommand, Any], Any]] | None = None,
         stall_harness: ConversationStallHarness | None = None,
         authorize: Callable[[Any, str], Any] | None = None,
+        voice_turn_registry=None,
     ):
         self.runtime = runtime
         self.transcribe = transcribe
@@ -42,6 +48,7 @@ class ConversationWebSocketGateway:
         self.command_handlers = dict(command_handlers or {})
         self.stall_harness = stall_harness
         self.authorize = authorize
+        self.voice_turn_registry = voice_turn_registry
 
     async def serve(self, ws) -> None:
         if self.authorize is not None:
@@ -219,14 +226,67 @@ class ConversationWebSocketGateway:
         *,
         text: str | None = None,
         stall_mode: StallMode | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         user_text = str(text if text is not None else command.payload.get("text") or "").strip()
+        voice_reference = command.voice_provenance
+        reservation_active = False
+        if voice_reference is not None:
+            if self.voice_turn_registry is None:
+                raise ConversationProtocolError(
+                    "voice_provenance_unavailable",
+                    "verified voice provenance is unavailable",
+                )
+            prior = self.runtime.conversation_store.accepted_request(
+                command.session_id,
+                command.idempotency_key or command.request_id,
+                command.request_id,
+            )
+            if prior is not None:
+                return {
+                    "accepted": False,
+                    "request_id": prior["request_id"],
+                    "duplicate": True,
+                    "event": prior["event"],
+                }
+            try:
+                input_provenance = self.voice_turn_registry.reserve(
+                    voice_reference,
+                    transcript=user_text,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+                reservation_active = True
+            except ValueError as exc:
+                raise ConversationProtocolError(
+                    "invalid_voice_provenance", str(exc)[:200]
+                ) from exc
+        elif command.type == "voice" and text is not None:
+            input_provenance = InputProvenance(
+                InputModality.VOICE,
+                InputVerification.SERVER_TRANSCRIBED,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        else:
+            input_provenance = InputProvenance(
+                InputModality.TEXT,
+                InputVerification.CLIENT_CLAIMED,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         request = ConversationRequest(
             session_id=command.session_id,
             request_id=command.request_id,
             text=user_text,
             interaction_mode=str(command.payload.get("interaction_mode") or ""),
             idempotency_key=command.idempotency_key or command.request_id,
+            input_provenance=input_provenance,
         )
 
         async def runner(active_request, token):
@@ -262,7 +322,30 @@ class ConversationWebSocketGateway:
             ):
                 yield event
 
-        await self.runtime.conversation_hub.submit(request, runner)
+        try:
+            result = await self.runtime.conversation_hub.submit(request, runner)
+        except BaseException:
+            if reservation_active:
+                self.voice_turn_registry.rollback(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+            raise
+        if reservation_active:
+            if result["accepted"]:
+                self.voice_turn_registry.commit(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+            else:
+                self.voice_turn_registry.rollback(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+        return result
 
     async def _dispatch_local_action(self, ws, command: ClientCommand) -> bool:
         if self.local_action_resolver is None:

@@ -115,6 +115,7 @@ from voice.native_playback import NativePlaybackManager
 from voice.runtime_diagnostics import VoiceDiagnosticsCollector
 from voice.stt import get_diagnostics as get_stt_diagnostics, preload_model
 from voice.streaming_ws import get_gateway_diagnostics, serve_continuous_voice_stream
+from voice.turn_registry import VoiceTurnRegistry
 from voice.tts import get_diagnostics as get_tts_diagnostics
 from utils.local_surface_commands import match_local_surface_command
 
@@ -212,6 +213,7 @@ runtime_access_authority = RuntimeAccessAuthority(
     str(runtime.life.status().get("boot_id") or "runtime-boot-unavailable"),
     allow_development_origins=_ALLOW_DEV_RUNTIME_ACCESS,
 )
+voice_turn_registry = VoiceTurnRegistry(runtime_access_authority.runtime_boot_id)
 authorize_runtime_http = create_http_authorizer(runtime_access_authority)
 authorize_runtime_websocket = create_websocket_authorizer(runtime_access_authority)
 
@@ -426,6 +428,7 @@ conversation_gateway = ConversationWebSocketGateway(
     },
     stall_harness=conversation_stall_harness,
     authorize=authorize_runtime_websocket,
+    voice_turn_registry=voice_turn_registry,
 )
 
 
@@ -440,6 +443,7 @@ async def ws_voice_stream(ws: WebSocket):
         ws,
         continuous_capture_manager,
         authorize=authorize_runtime_websocket,
+        voice_turn_registry=voice_turn_registry,
     )
 
 

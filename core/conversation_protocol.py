@@ -45,6 +45,7 @@ class ClientCommand:
     request_id: str
     idempotency_key: str
     payload: dict[str, Any]
+    voice_provenance: dict[str, Any] | None = None
     after_sequence: int = 0
     protocol_version: int = 1
     legacy: bool = False
@@ -106,6 +107,15 @@ def normalize_client_message(
         if len(text) > 100_000:
             raise ConversationProtocolError("invalid_text", "message text is too long")
 
+    voice_provenance = None
+    if "voice_provenance" in payload:
+        if command_type != "conversation.message" or protocol_version != 2:
+            raise ConversationProtocolError(
+                "invalid_voice_provenance",
+                "voice provenance is only supported by protocol v2 messages",
+            )
+        voice_provenance = _voice_provenance(payload.get("voice_provenance"))
+
     idempotency_key = str(payload.get("idempotency_key") or request_id or "").strip()
     if idempotency_key:
         idempotency_key = _identifier(idempotency_key, "idempotency_key")
@@ -121,6 +131,7 @@ def normalize_client_message(
         request_id=request_id,
         idempotency_key=idempotency_key,
         payload=dict(payload),
+        voice_provenance=voice_provenance,
         after_sequence=after_sequence,
         protocol_version=protocol_version,
         legacy=legacy or protocol_version == 1,
@@ -199,4 +210,55 @@ def _bounded_int(value: Any, code: str, *, minimum: int, maximum: int) -> int:
         raise ConversationProtocolError(code, "value must be an integer") from exc
     if normalized < minimum or normalized > maximum:
         raise ConversationProtocolError(code, "integer is out of range")
+    return normalized
+
+
+def _voice_provenance(value: Any) -> dict[str, Any]:
+    fields = {
+        "runtime_boot_id",
+        "session_id",
+        "owner_generation",
+        "voice_sequence",
+        "voice_turn",
+        "nonce",
+        "proof",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ConversationProtocolError(
+            "invalid_voice_provenance", "voice provenance has an invalid schema"
+        )
+    normalized = {
+        "runtime_boot_id": _identifier(value.get("runtime_boot_id"), "runtime_boot_id"),
+        "session_id": _identifier(value.get("session_id"), "session_id"),
+        "owner_generation": _bounded_int(
+            value.get("owner_generation"),
+            "invalid_voice_provenance",
+            minimum=0,
+            maximum=2_147_483_647,
+        ),
+        "voice_sequence": _bounded_int(
+            value.get("voice_sequence"),
+            "invalid_voice_provenance",
+            minimum=0,
+            maximum=2_147_483_647,
+        ),
+        "voice_turn": _bounded_int(
+            value.get("voice_turn"),
+            "invalid_voice_provenance",
+            minimum=0,
+            maximum=2_147_483_647,
+        ),
+        "nonce": str(value.get("nonce") or "").strip(),
+        "proof": str(value.get("proof") or "").strip().lower(),
+    }
+    if (
+        len(normalized["nonce"]) < 16
+        or len(normalized["nonce"]) > 128
+        or any(c in normalized["nonce"] for c in "\r\n\x00")
+        or len(normalized["proof"]) != 64
+        or any(c not in "0123456789abcdef" for c in normalized["proof"])
+    ):
+        raise ConversationProtocolError(
+            "invalid_voice_provenance", "voice provenance has invalid proof material"
+        )
     return normalized

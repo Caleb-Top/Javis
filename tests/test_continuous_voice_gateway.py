@@ -14,6 +14,7 @@ from voice.continuous_capture import (
     ContinuousVoiceService,
     NativeContinuousCaptureManager,
 )
+from voice.turn_registry import VoiceTurnRegistry
 
 
 class FakeSocket:
@@ -1051,6 +1052,38 @@ class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertNotIn("pcm", repr(socket.sent).lower())
+
+    async def test_final_transcript_carries_backend_voice_provenance(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {
+                        "session_id": "session-1",
+                        "noise_profile": "standard",
+                    },
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+        registry = VoiceTurnRegistry("boot-1")
+
+        await serve_continuous_voice_stream(
+            socket,
+            FakeManager(),
+            voice_turn_registry=registry,
+        )
+
+        final = next(item for item in socket.sent if item["type"] == "transcript.final")
+        reference = final["voice_provenance"]
+        self.assertEqual(reference["runtime_boot_id"], "boot-1")
+        self.assertEqual(reference["session_id"], "session-1")
+        self.assertEqual(reference["voice_sequence"], final["sequence"])
+        self.assertNotIn("text", reference)
+        self.assertEqual(registry.stats()["available"], 1)
 
     async def test_invalid_noise_profile_fails_closed(self):
         socket = FakeSocket(

@@ -52,6 +52,41 @@ class ConversationProtocolTests(unittest.TestCase):
 
         self.assertEqual(captured.exception.code, "unknown_command")
 
+    def test_v2_message_accepts_only_a_strict_voice_provenance_reference(self):
+        reference = {
+            "runtime_boot_id": "boot-1",
+            "session_id": "s1",
+            "owner_generation": 2,
+            "voice_sequence": 7,
+            "voice_turn": 3,
+            "nonce": "n" * 32,
+            "proof": "a" * 64,
+        }
+        command = normalize_client_message({
+            "type": "conversation.message",
+            "payload": {
+                "protocol_version": 2,
+                "session_id": "s1",
+                "request_id": "r1",
+                "text": "hello",
+                "voice_provenance": reference,
+            },
+        })
+
+        self.assertEqual(command.voice_provenance, reference)
+        with self.assertRaises(ConversationProtocolError) as captured:
+            normalize_client_message({
+                "type": "conversation.message",
+                "payload": {
+                    "protocol_version": 2,
+                    "session_id": "s1",
+                    "request_id": "r2",
+                    "text": "hello",
+                    "voice_provenance": dict(reference, modality="voice"),
+                },
+            })
+        self.assertEqual(captured.exception.code, "invalid_voice_provenance")
+
     def test_activity_event_has_legacy_thinking_projection(self):
         projected = legacy_wire_events({
             "type": "activity.planning",

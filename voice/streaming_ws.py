@@ -330,6 +330,7 @@ async def serve_continuous_voice_stream(
     *,
     diagnostics: VoiceGatewayDiagnostics | None = None,
     authorize=None,
+    voice_turn_registry=None,
 ) -> None:
     metrics = diagnostics or _gateway_diagnostics
     metrics.handler_started()
@@ -345,9 +346,15 @@ async def serve_continuous_voice_stream(
                 manager,
                 metrics,
                 accept_subprotocol="javis-runtime-v1",
+                voice_turn_registry=voice_turn_registry,
             )
         else:
-            await _serve_continuous_voice_stream(ws, manager, metrics)
+            await _serve_continuous_voice_stream(
+                ws,
+                manager,
+                metrics,
+                voice_turn_registry=voice_turn_registry,
+            )
     finally:
         metrics.handler_finished()
 
@@ -358,6 +365,7 @@ async def _serve_continuous_voice_stream(
     metrics,
     *,
     accept_subprotocol=None,
+    voice_turn_registry=None,
 ) -> None:
     if accept_subprotocol:
         await ws.accept(subprotocol=accept_subprotocol)
@@ -572,8 +580,21 @@ async def _serve_continuous_voice_stream(
                 record_failure("event_pump_failure", recoverable=True)
                 raise
             for event in events:
+                outbound = event
+                if event.get("type") == "transcript.final" and voice_turn_registry is not None:
+                    outbound = dict(event)
+                    try:
+                        outbound["voice_provenance"] = voice_turn_registry.register(
+                            session_id=session_id,
+                            owner_generation=expected_owner_generation,
+                            voice_sequence=int(event.get("sequence") or 0),
+                            voice_turn=int(event.get("turn") or 0),
+                            transcript=str(event.get("text") or ""),
+                        )
+                    except ValueError:
+                        outbound["voice_provenance_status"] = "unavailable"
                 try:
-                    await send_json(event)
+                    await send_json(outbound)
                 except Exception as error:
                     if _is_socket_closing(error):
                         record_failure("socket_disconnect", recoverable=True)

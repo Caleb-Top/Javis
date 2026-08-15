@@ -175,6 +175,165 @@ class ConversationStore:
             ).fetchone()
         return _message_dict(row)
 
+    def accept_request(
+        self,
+        session_id: str,
+        request_id: str,
+        idempotency_key: str,
+        content: str,
+        accepted_payload: dict[str, Any],
+        *,
+        preceding_events: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+    ) -> dict[str, Any]:
+        """Atomically claim, persist the user message, and accept the request."""
+
+        session = _identifier(session_id, "session_id")
+        request = _identifier(request_id, "request_id")
+        key = _identifier(idempotency_key, "idempotency_key")
+        text = str(content or "").strip()
+        if not text:
+            raise ConversationStoreError("message content is required")
+        if not isinstance(accepted_payload, dict):
+            raise ConversationStoreError("accepted event payload must be an object")
+        prepared_events: list[tuple[str, str, str]] = []
+        for prior_request_id, event_type, payload in preceding_events:
+            prior_request = _identifier(prior_request_id, "request_id")
+            normalized_type = str(event_type or "").strip().lower()
+            if EVENT_TYPE_PATTERN.fullmatch(normalized_type) is None:
+                raise ConversationStoreError(
+                    f"invalid conversation event type: {event_type}"
+                )
+            if not isinstance(payload, dict):
+                raise ConversationStoreError("event payload must be an object")
+            prepared_events.append(
+                (prior_request, normalized_type, _payload_json(payload))
+            )
+        accepted_json = _payload_json(accepted_payload)
+        now = time.time()
+        message_id = uuid.uuid4().hex
+        accepted_event_id = uuid.uuid4().hex
+        prior_event_ids = [uuid.uuid4().hex for _ in prepared_events]
+
+        with self._lock, closing(self._connect()) as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                self._ensure_session_db(db, session, now)
+                existing = db.execute(
+                    "SELECT request_id FROM request_keys "
+                    "WHERE session_id=? AND idempotency_key=?",
+                    (session, key),
+                ).fetchone()
+                if existing is None:
+                    existing = db.execute(
+                        "SELECT request_id FROM request_keys "
+                        "WHERE session_id=? AND request_id=? ORDER BY created_at LIMIT 1",
+                        (session, request),
+                    ).fetchone()
+                if existing is not None:
+                    result = self._accepted_request_db(
+                        db, session, str(existing["request_id"])
+                    )
+                    db.commit()
+                    return result
+
+                db.execute(
+                    "INSERT INTO request_keys(session_id, idempotency_key, request_id, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (session, key, request, now),
+                )
+                message_cursor = db.execute(
+                    """
+                    INSERT INTO conversation_messages(
+                        message_id, session_id, request_id, role, content, status, created_at
+                    ) VALUES (?, ?, ?, 'user', ?, 'complete', ?)
+                    """,
+                    (message_id, session, request, text, now),
+                )
+                sequence = int(
+                    db.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 "
+                        "FROM conversation_events WHERE session_id=?",
+                        (session,),
+                    ).fetchone()[0]
+                )
+                persisted_prior: list[dict[str, Any]] = []
+                for event_id, (prior_request, event_type, payload_json) in zip(
+                    prior_event_ids, prepared_events
+                ):
+                    db.execute(
+                        """
+                        INSERT INTO conversation_events(
+                            event_id, session_id, request_id, sequence, type,
+                            timestamp, payload_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            session,
+                            prior_request,
+                            sequence,
+                            event_type,
+                            now,
+                            payload_json,
+                        ),
+                    )
+                    persisted_prior.append(
+                        _event_values(
+                            event_id,
+                            session,
+                            prior_request,
+                            sequence,
+                            event_type,
+                            now,
+                            payload_json,
+                        )
+                    )
+                    sequence += 1
+                db.execute(
+                    """
+                    INSERT INTO conversation_events(
+                        event_id, session_id, request_id, sequence, type,
+                        timestamp, payload_json
+                    ) VALUES (?, ?, ?, ?, 'request.accepted', ?, ?)
+                    """,
+                    (
+                        accepted_event_id,
+                        session,
+                        request,
+                        sequence,
+                        now,
+                        accepted_json,
+                    ),
+                )
+                db.execute(
+                    "UPDATE conversations SET updated_at=? WHERE session_id=?",
+                    (now, session),
+                )
+                message_row = db.execute(
+                    "SELECT * FROM conversation_messages WHERE id=?",
+                    (message_cursor.lastrowid,),
+                ).fetchone()
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        return {
+            "accepted": True,
+            "duplicate": False,
+            "request_id": request,
+            "message": _message_dict(message_row),
+            "preceding_events": persisted_prior,
+            "event": _event_values(
+                accepted_event_id,
+                session,
+                request,
+                sequence,
+                "request.accepted",
+                now,
+                accepted_json,
+            ),
+        }
+
     def history(
         self,
         session_id: str,
@@ -328,6 +487,31 @@ class ConversationStore:
                 raise
         return request, True
 
+    def accepted_request(
+        self,
+        session_id: str,
+        idempotency_key: str,
+        request_id: str = "",
+    ) -> dict[str, Any] | None:
+        session = _identifier(session_id, "session_id")
+        key = _identifier(idempotency_key, "idempotency_key")
+        request = _identifier(request_id, "request_id", allow_empty=True)
+        with self._lock, closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT request_id FROM request_keys "
+                "WHERE session_id=? AND idempotency_key=?",
+                (session, key),
+            ).fetchone()
+            if row is None and request:
+                row = db.execute(
+                    "SELECT request_id FROM request_keys "
+                    "WHERE session_id=? AND request_id=? ORDER BY created_at LIMIT 1",
+                    (session, request),
+                ).fetchone()
+            if row is None:
+                return None
+            return self._accepted_request_db(db, session, str(row["request_id"]))
+
     def stats(self) -> dict[str, int]:
         with self._lock, closing(self._connect()) as db:
             sessions = int(db.execute("SELECT COUNT(*) FROM conversations").fetchone()[0])
@@ -336,6 +520,34 @@ class ConversationStore:
             )
             events = int(db.execute("SELECT COUNT(*) FROM conversation_events").fetchone()[0])
         return {"sessions": sessions, "messages": messages, "events": events}
+
+    @staticmethod
+    def _accepted_request_db(
+        db: sqlite3.Connection, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        message = db.execute(
+            "SELECT * FROM conversation_messages "
+            "WHERE session_id=? AND request_id=? AND role='user' ORDER BY id LIMIT 1",
+            (session_id, request_id),
+        ).fetchone()
+        event = db.execute(
+            "SELECT event_id, session_id, request_id, sequence, type, timestamp, payload_json "
+            "FROM conversation_events WHERE session_id=? AND request_id=? "
+            "AND type='request.accepted' ORDER BY sequence LIMIT 1",
+            (session_id, request_id),
+        ).fetchone()
+        if message is None or event is None:
+            raise ConversationStoreError(
+                "idempotency claim exists without an atomic accepted request"
+            )
+        return {
+            "accepted": False,
+            "duplicate": True,
+            "request_id": request_id,
+            "message": _message_dict(message),
+            "preceding_events": [],
+            "event": _event_dict(event),
+        }
 
     @staticmethod
     def _ensure_session_db(db: sqlite3.Connection, session_id: str, now: float) -> None:
@@ -391,4 +603,34 @@ def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
         "type": row["type"],
         "timestamp": row["timestamp"],
         "payload": json.loads(row["payload_json"] or "{}"),
+    }
+
+
+def _payload_json(payload: dict[str, Any]) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ConversationStoreError(
+            f"event payload is not JSON serializable: {exc}"
+        ) from exc
+
+
+def _event_values(
+    event_id: str,
+    session_id: str,
+    request_id: str,
+    sequence: int,
+    event_type: str,
+    timestamp: float,
+    payload_json: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "event_id": event_id,
+        "session_id": session_id,
+        "request_id": request_id,
+        "sequence": sequence,
+        "type": event_type,
+        "timestamp": timestamp,
+        "payload": json.loads(payload_json),
     }
