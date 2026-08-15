@@ -12,6 +12,7 @@ from .contracts import AttentionClaim, AttentionMode, AttentionSnapshot
 
 
 _TIMESTAMP_FORMAT: Final = "%Y-%m-%dT%H:%M:%S.%fZ"
+DEFAULT_CLAIM_CAPACITY: Final = 256
 
 
 @dataclass(frozen=True)
@@ -101,9 +102,14 @@ class AttentionCoordinator:
     def __init__(
         self,
         initialized_at_utc: str = "1970-01-01T00:00:00.000Z",
+        *,
+        claim_capacity: int = DEFAULT_CLAIM_CAPACITY,
     ) -> None:
         _parse_timestamp(initialized_at_utc)
+        if type(claim_capacity) is not int or claim_capacity <= 0:
+            raise ValueError("claim_capacity must be a positive integer")
         self._claims: dict[str, _ClaimEntry] = {}
+        self._claim_capacity = claim_capacity
         self._foreground_session_id: str | None = None
         self._last_evaluated_at_utc = initialized_at_utc
         self._idle_since_utc = initialized_at_utc
@@ -112,6 +118,10 @@ class AttentionCoordinator:
     @property
     def foreground_session_id(self) -> str | None:
         return self._foreground_session_id
+
+    @property
+    def active_claim_count(self) -> int:
+        return len(self._claims)
 
     def apply(
         self,
@@ -163,12 +173,25 @@ class AttentionCoordinator:
             session_id=session_id,
             order=self._next_order,
         )
+        self._enforce_capacity()
         if foreground is True:
             self._foreground_session_id = session_id
         elif foreground is None and session_id is not None:
             if claim.priority == 100 or self._foreground_session_id is None:
                 self._foreground_session_id = session_id
         return self._snapshot_unchecked()
+
+    def _enforce_capacity(self) -> None:
+        while len(self._claims) > self._claim_capacity:
+            removable = min(
+                self._claims.items(),
+                key=lambda item: (
+                    item[1].claim.priority,
+                    _parse_timestamp(item[1].claim.acquired_at_utc),
+                    item[1].order,
+                ),
+            )[0]
+            del self._claims[removable]
 
     def expire(
         self,
@@ -368,6 +391,7 @@ __all__ = [
     "ATTENTION_POLICIES",
     "ATTENTION_PRIORITIES",
     "ATTENTION_TTLS_SECONDS",
+    "DEFAULT_CLAIM_CAPACITY",
     "AttentionCoordinator",
     "AttentionPolicy",
 ]

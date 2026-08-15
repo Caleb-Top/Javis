@@ -288,6 +288,54 @@ class ConversationGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["role"] for item in history], ["user", "assistant"])
         self.assertEqual(history[-1]["content"], "reply:hello")
 
+    async def test_exact_invocation_bypasses_execution_lock_without_agent(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent)
+        ws = FakeWebSocket([
+            self.canonical_message("presence-r1", "Javis", session_id="presence-s1")
+        ])
+
+        await self.hub._execution_lock.acquire()
+        try:
+            await asyncio.wait_for(gateway.serve(ws), timeout=1)
+        finally:
+            self.hub._execution_lock.release()
+
+        events = self.store.events_after("presence-s1")
+        accepted = next(event for event in events if event["type"] == "request.accepted")
+        invoked = next(event for event in events if event["type"] == "user.invoked")
+        deltas = [
+            event["payload"]["text"]
+            for event in events
+            if event["type"] == "response.delta"
+        ]
+        self.assertEqual(agent.calls, 0)
+        self.assertEqual(deltas, ["\u6211\u5728"])
+        self.assertIn("user.invoked", [message.get("type") for message in ws.sent])
+        self.assertEqual(accepted["payload"]["execution_lane"], "deterministic_local")
+        self.assertEqual(invoked["payload"]["execution_lane"], "deterministic_local")
+
+    async def test_alias_inside_complete_request_uses_exclusive_agent_lane(self):
+        agent = CountingAgent()
+        gateway = self.make_gateway(agent)
+        ws = FakeWebSocket([
+            self.canonical_message(
+                "model-r1",
+                "Javis, help me",
+                session_id="presence-s1",
+            )
+        ])
+
+        await asyncio.wait_for(gateway.serve(ws), timeout=2)
+
+        accepted = next(
+            event
+            for event in self.store.events_after("presence-s1")
+            if event["type"] == "request.accepted"
+        )
+        self.assertEqual(agent.calls, 1)
+        self.assertEqual(accepted["payload"]["execution_lane"], "exclusive")
+
     async def test_verified_voice_reference_is_consumed_by_atomic_acceptance(self):
         registry = VoiceTurnRegistry("boot-1")
         reference = registry.register(

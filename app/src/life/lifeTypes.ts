@@ -26,6 +26,105 @@ export type ExpressionBaseState = Exclude<LifeActivity, "quiet">;
 export type GazeTarget = "none" | "user" | "content" | "task";
 export type VoiceActivity = "silent" | "listening" | "speaking";
 
+export type AttentionMode =
+  | "idle"
+  | "present"
+  | "listening"
+  | "engaged"
+  | "speaking"
+  | "awaiting_approval"
+  | "blocked"
+  | "recovering";
+
+export type FunctionalAffectKind =
+  | "curious"
+  | "cautious"
+  | "blocked"
+  | "relieved"
+  | "satisfied";
+
+export type InnerStateReasonCode =
+  | "quiet_baseline"
+  | "user_invoked"
+  | "voice_listening_started"
+  | "voice_listening_stopped"
+  | "request_started"
+  | "request_activity"
+  | "approval_required"
+  | "approval_approved"
+  | "approval_denied"
+  | "tool_started"
+  | "tool_risk_observed"
+  | "tool_completed"
+  | "request_completed"
+  | "request_failed"
+  | "request_cancelled"
+  | "speech_started"
+  | "speech_stopped"
+  | "interaction_interrupted"
+  | "goal_verified"
+  | "runtime_degraded"
+  | "runtime_recovered"
+  | "load_reduced"
+  | "blocked_by_failure";
+
+export type AttentionSnapshot = Readonly<{
+  mode: AttentionMode;
+  target_kind: string | null;
+  target_id: string | null;
+  priority: number;
+  since_utc: string;
+  expires_at_utc: string | null;
+  source_observation_id: string | null;
+}>;
+
+export type HomeostasisSnapshot = Readonly<{
+  updated_at_utc: string;
+  activation: number;
+  cognitive_load: number;
+  certainty: number;
+  caution: number;
+  curiosity: number;
+  blockedness: number;
+  social_presence: number;
+}>;
+
+export type FunctionalAffect = Readonly<{
+  kind: FunctionalAffectKind;
+  intensity: number;
+  confidence: number;
+  reason_code: InnerStateReasonCode;
+  evidence_ids: readonly string[];
+  valid_until_utc: string;
+}>;
+
+export type PresenceSnapshot = Readonly<{
+  mode: AttentionMode;
+  intensity: number;
+  session_id: string | null;
+  source_observation_id: string | null;
+  reason_code: InnerStateReasonCode;
+  since_utc: string;
+  expires_at_utc: string | null;
+}>;
+
+export type InnerStateSnapshot = Readonly<{
+  schema_version: 1;
+  source_life_snapshot_revision: number;
+  identity_id: string;
+  instance_id: string;
+  generated_at_utc: string;
+  phase: string;
+  attention: AttentionSnapshot;
+  homeostasis: HomeostasisSnapshot;
+  affects: readonly FunctionalAffect[];
+  presence: PresenceSnapshot;
+  last_observation_id: string | null;
+  degraded: boolean;
+}>;
+
+export type InnerStateMode = "authoritative" | "compatibility";
+
 export type IdentitySummary = {
   identity_id: string;
   name: string;
@@ -87,8 +186,10 @@ export type LifeBridgeSnapshot = {
   detail: string;
   snapshotRevision: number;
   expressionRevision: number;
+  innerStateMode: InnerStateMode;
   snapshot: LifeSnapshot | null;
   expression: ExpressionIntent | null;
+  innerState: InnerStateSnapshot | null;
 };
 
 export type ExpressionListener = (intent: ExpressionIntent) => void;

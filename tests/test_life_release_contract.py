@@ -53,6 +53,7 @@ def test_life_kernel_release_contract_is_present_and_read_only():
         "/api/life/identity": {"GET"},
         "/api/life/snapshot": {"GET"},
         "/api/life/lineage": {"GET"},
+        "/api/life/inner-state": {"GET"},
         "/api/life/events": {"GET"},
     }
 

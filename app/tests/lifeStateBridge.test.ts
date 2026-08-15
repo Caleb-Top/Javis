@@ -83,6 +83,63 @@ function lifeExpressionEvent(
 }
 
 
+function innerStateEvent(
+  revision: number,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    type: "life.inner_state.changed",
+    payload: {
+      schema_version: 1,
+      source_life_snapshot_revision: revision,
+      identity_id: "identity-1",
+      instance_id: "instance-1",
+      generated_at_utc: "2026-08-12T00:00:03.000Z",
+      phase: "engaged",
+      attention: {
+        mode: "engaged",
+        target_kind: "request",
+        target_id: "request-1",
+        priority: 60,
+        since_utc: "2026-08-12T00:00:02.000Z",
+        expires_at_utc: "2026-08-12T00:00:10.000Z",
+        source_observation_id: "observation-1",
+      },
+      homeostasis: {
+        updated_at_utc: "2026-08-12T00:00:03.000Z",
+        activation: 0.4,
+        cognitive_load: 0.25,
+        certainty: 0.5,
+        caution: 0.1,
+        curiosity: 0.25,
+        blockedness: 0,
+        social_presence: 0.3,
+      },
+      affects: [{
+        kind: "cautious",
+        intensity: 0.4,
+        confidence: 0.9,
+        reason_code: "tool_risk_observed",
+        evidence_ids: ["evidence-1"],
+        valid_until_utc: "2026-08-12T00:00:10.000Z",
+      }],
+      presence: {
+        mode: "engaged",
+        intensity: 0.6,
+        session_id: "session-1",
+        source_observation_id: "observation-1",
+        reason_code: "request_started",
+        since_utc: "2026-08-12T00:00:02.000Z",
+        expires_at_utc: "2026-08-12T00:00:10.000Z",
+      },
+      last_observation_id: "observation-1",
+      degraded: false,
+      ...overrides,
+    },
+  };
+}
+
+
 test("rejects malformed life events and ignores stale revisions", () => {
   const seen: string[] = [];
   const bridge = createLifeStateBridge({
@@ -181,6 +238,97 @@ test("validates expression intent, rejects stale or expired values, and unsubscr
 });
 
 
+test("accepts read-only inner state only when it matches the authoritative L0 snapshot", () => {
+  const bridge = createLifeStateBridge({ signal: () => undefined });
+
+  assert.equal(bridge.snapshot().innerStateMode, "compatibility");
+  assert.equal(bridge.handle(innerStateEvent(3)), false);
+  assert.equal(bridge.handle(lifeSnapshotEvent(3, "thinking")), true);
+  assert.equal(bridge.handle(innerStateEvent(3)), true);
+
+  const projected = bridge.snapshot();
+  assert.equal(projected.snapshotRevision, 3);
+  assert.equal(projected.innerStateMode, "authoritative");
+  assert.equal(projected.innerState?.source_life_snapshot_revision, 3);
+  assert.equal(projected.innerState?.identity_id, projected.snapshot?.identity.identity_id);
+  assert.equal("innerStateRevision" in projected, false);
+});
+
+
+test("new L0 revisions and disconnects return L1 projection to compatibility mode", () => {
+  const bridge = createLifeStateBridge({ signal: () => undefined });
+
+  bridge.handle(lifeSnapshotEvent(3, "thinking"));
+  bridge.handle(innerStateEvent(3));
+  assert.equal(bridge.handle(lifeSnapshotEvent(4, "speaking")), true);
+  assert.equal(bridge.snapshot().innerStateMode, "compatibility");
+  assert.equal(bridge.snapshot().innerState, null);
+  assert.equal(bridge.handle(innerStateEvent(3)), false);
+  assert.equal(bridge.handle(innerStateEvent(5)), false);
+  assert.equal(bridge.handle(innerStateEvent(4)), true);
+
+  bridge.projectOffline();
+  assert.equal(bridge.snapshot().snapshotRevision, 4);
+  assert.equal(bridge.snapshot().innerStateMode, "compatibility");
+  assert.equal(bridge.snapshot().innerState, null);
+});
+
+
+test("strictly rejects malformed, mismatched, or noncanonical inner-state events", () => {
+  function accepts(event: ReturnType<typeof innerStateEvent>): boolean {
+    const bridge = createLifeStateBridge({ signal: () => undefined });
+    bridge.handle(lifeSnapshotEvent(3, "thinking"));
+    return bridge.handle(event);
+  }
+
+  assert.equal(accepts(innerStateEvent(3, { identity_id: "other" })), false);
+  assert.equal(accepts(innerStateEvent(3, { phase: "Not A Code" })), false);
+  assert.equal(accepts(innerStateEvent(3, {
+    homeostasis: {
+      ...innerStateEvent(3).payload.homeostasis,
+      cognitive_load: 1.01,
+    },
+  })), false);
+  assert.equal(accepts(innerStateEvent(3, {
+    attention: {
+      ...innerStateEvent(3).payload.attention,
+      target_id: null,
+    },
+  })), false);
+  assert.equal(accepts(innerStateEvent(3, {
+    affects: [{
+      ...innerStateEvent(3).payload.affects[0],
+      evidence_ids: ["duplicate", "duplicate"],
+    }],
+  })), false);
+  assert.equal(accepts(innerStateEvent(3, { unexpected: true })), false);
+
+  const bridge = createLifeStateBridge({ signal: () => undefined });
+  bridge.handle(lifeSnapshotEvent(3, "thinking"));
+  assert.equal(bridge.handle({ ...innerStateEvent(3), type: "life.inner_state" }), false);
+  assert.equal(bridge.snapshot().innerStateMode, "compatibility");
+});
+
+
+test("inner-state snapshots are deeply immutable and expose no write path", () => {
+  const bridge = createLifeStateBridge({ signal: () => undefined });
+  bridge.handle(lifeSnapshotEvent(3, "thinking"));
+  bridge.handle(innerStateEvent(3));
+
+  const innerState = bridge.snapshot().innerState;
+  assert.ok(innerState);
+  assert.equal(Object.isFrozen(innerState), true);
+  assert.equal(Object.isFrozen(innerState.homeostasis), true);
+  assert.equal(Object.isFrozen(innerState.affects), true);
+  assert.equal(Object.isFrozen(innerState.affects[0].evidence_ids), true);
+  assert.equal("setInnerState" in bridge, false);
+  assert.throws(() => {
+    (innerState.homeostasis as { activation: number }).activation = 1;
+  }, TypeError);
+  assert.equal(bridge.snapshot().innerState?.homeostasis.activation, 0.4);
+});
+
+
 test("rejects invalid RFC3339 timestamps, enum values, ranges, and unknown events", () => {
   const bridge = createLifeStateBridge({ signal: () => undefined });
   const invalidSnapshot = lifeSnapshotEvent(1, "thinking");
@@ -206,8 +354,10 @@ test("rejects invalid RFC3339 timestamps, enum values, ranges, and unknown event
     detail: "Javis 已待命",
     snapshotRevision: -1,
     expressionRevision: -1,
+    innerStateMode: "compatibility",
     snapshot: null,
     expression: null,
+    innerState: null,
   });
 });
 

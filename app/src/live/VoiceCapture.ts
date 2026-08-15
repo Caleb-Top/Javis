@@ -1,14 +1,30 @@
-import type { BackendClient } from "../bridge/backendClient";
+import {
+  normalizeVoiceProvenance,
+  type BackendClient,
+  type VoiceProvenance,
+} from "../bridge/backendClient.ts";
 import { resolveBackendEndpoints } from "../bridge/backendEndpoints.ts";
 import type { RuntimeAccessScope } from "../bridge/runtimeAccess.ts";
 import type { LiveState } from "./liveState";
 
 export type VoiceNoiseProfile = "off" | "standard" | "strong";
 
+export type VoiceInterruption = Readonly<{
+  speechSequence: number;
+  interruptedRequestId: string | null;
+}>;
+
+export type VoiceTranscript = Readonly<{
+  text: string;
+  turn: number;
+  sequence: number;
+  voiceProvenance: VoiceProvenance;
+}>;
+
 export type VoiceCaptureOptions = {
-  onBargeIn(): void | Promise<void>;
+  onBargeIn(interruption: VoiceInterruption): void | Promise<void>;
   onPartial?(text: string): void;
-  onTranscript?(text: string): void;
+  onTranscript?(transcript: VoiceTranscript): void | Promise<void>;
   onEmptyTranscript?(message: string): void;
   onLevel?(level: number): void;
   openStream?(url: string, protocols?: string[]): WebSocket;
@@ -50,6 +66,20 @@ export type VoiceCapture = {
 
 const DEFAULT_RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 5000] as const;
 const DEFAULT_STREAM_READY_TIMEOUT_MS = 10000;
+const MAX_TRACKED_VOICE_EVENTS = 128;
+
+type InterruptionBarrier = {
+  generation: number;
+  speechSequence: number;
+  interruptedRequestId: string | null;
+  failed: boolean;
+  settled: Promise<void>;
+};
+
+function eventCounter(value: unknown): number {
+  const counter = Number(value);
+  return Number.isInteger(counter) && counter >= 0 ? counter : 0;
+}
 
 export function createVoiceCapture(
   client: BackendClient,
@@ -65,6 +95,10 @@ export function createVoiceCapture(
   let streamReadyTimer: number | null = null;
   let reconnectAttempt = 0;
   let socketGeneration = 0;
+  let transcriptDelivery = Promise.resolve();
+  const interruptionBarriers: InterruptionBarrier[] = [];
+  const handledSpeechStarts = new Set<string>();
+  const handledFinals = new Set<string>();
   let noiseProfile: VoiceNoiseProfile = options.noiseProfile?.() ?? "standard";
   const configuredReconnectDelays = (options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS)
     .filter((delay) => Number.isFinite(delay) && delay >= 0);
@@ -105,7 +139,141 @@ export function createVoiceCapture(
       && socketGeneration === generation;
   }
 
-  function handleStreamEvent(message: Record<string, unknown>): void {
+  function rememberEvent(events: Set<string>, key: string): boolean {
+    if (events.has(key)) return false;
+    events.add(key);
+    if (events.size > MAX_TRACKED_VOICE_EVENTS) {
+      const oldest = events.values().next().value;
+      if (oldest) events.delete(oldest);
+    }
+    return true;
+  }
+
+  function reportEventError(error: unknown, fallback: string): void {
+    const message = error instanceof Error ? error.message : fallback;
+    try {
+      options.onError(message);
+    } catch {
+      // Presentation failures cannot strand the continuous voice lifecycle.
+    }
+  }
+
+  function beginInterruption(
+    message: Record<string, unknown>,
+    generation: number,
+  ): void {
+    const speechSequence = eventCounter(message.sequence);
+    const eventKey = `${generation}:${speechSequence}`;
+    if (!rememberEvent(handledSpeechStarts, eventKey)) return;
+    const interruptedRequestId = typeof client.activeRequestId === "function"
+      ? client.activeRequestId()
+      : null;
+    const interruption = Object.freeze({
+      speechSequence,
+      interruptedRequestId,
+    });
+    const barrier: InterruptionBarrier = {
+      generation,
+      speechSequence,
+      interruptedRequestId,
+      failed: false,
+      settled: Promise.resolve(),
+    };
+    interruptionBarriers.push(barrier);
+    try {
+      const outcome = options.onBargeIn(interruption);
+      barrier.settled = Promise.resolve(outcome).then(
+        () => {
+          try {
+            options.onState("listening");
+          } catch (error) {
+            reportEventError(error, "listening state update failed");
+          }
+        },
+        (error) => {
+          barrier.failed = true;
+          reportEventError(error, "barge-in failed");
+        },
+      );
+    } catch (error) {
+      barrier.failed = true;
+      reportEventError(error, "barge-in failed");
+    }
+  }
+
+  function takeInterruptionBarrier(generation: number): InterruptionBarrier | null {
+    const index = interruptionBarriers.findIndex(
+      (barrier) => barrier.generation === generation,
+    );
+    if (index < 0) return null;
+    return interruptionBarriers.splice(index, 1)[0];
+  }
+
+  function enqueueFinalTranscript(
+    message: Record<string, unknown>,
+    socket: WebSocket,
+    generation: number,
+  ): void {
+    const text = String(message.text || "").trim();
+    if (!text) return;
+    const turn = eventCounter(message.turn);
+    const sequence = eventCounter(message.sequence);
+    const finalKey = `${generation}:${sequence}:${turn}`;
+    if (!rememberEvent(handledFinals, finalKey)) return;
+    const barrier = takeInterruptionBarrier(generation);
+    transcriptDelivery = transcriptDelivery.then(async () => {
+      await barrier?.settled;
+      if (barrier?.failed || !isCurrentSocket(socket, generation)) return;
+      let voiceProvenance: VoiceProvenance;
+      try {
+        voiceProvenance = normalizeVoiceProvenance(
+          message.voice_provenance as VoiceProvenance,
+          client.sessionId(),
+        );
+        if (
+          voiceProvenance.voice_sequence !== sequence
+          || voiceProvenance.voice_turn !== turn
+        ) {
+          throw new TypeError("voice provenance does not match the final transcript");
+        }
+      } catch (error) {
+        options.onState("listening");
+        reportEventError(error, "verified voice provenance is unavailable");
+        return;
+      }
+      options.onState("thinking");
+      await options.onTranscript?.(Object.freeze({
+        text,
+        turn,
+        sequence,
+        voiceProvenance,
+      }));
+    }).catch((error) => {
+      if (isCurrentSocket(socket, generation)) options.onState("listening");
+      reportEventError(error, "final transcript handling failed");
+    });
+  }
+
+  function enqueueEmptyTranscript(
+    socket: WebSocket,
+    generation: number,
+  ): void {
+    const barrier = takeInterruptionBarrier(generation);
+    transcriptDelivery = transcriptDelivery.then(async () => {
+      await barrier?.settled;
+      if (barrier?.failed || !isCurrentSocket(socket, generation)) return;
+      options.onState("listening");
+      options.onEmptyTranscript?.(
+        "\u6ca1\u6709\u8bc6\u522b\u5230\u8bed\u97f3\uff0c\u8bf7\u518d\u8bf4\u4e00\u6b21",
+      );
+    }).catch((error) => reportEventError(error, "empty transcript handling failed"));
+  }
+
+  function handleStreamEvent(
+    message: Record<string, unknown>,
+    socket: WebSocket,
+    generation: number,
+  ): void {
     const type = String(message.type || "");
     if (type === "audio.stream.ready") {
       reconnectAttempt = 0;
@@ -121,11 +289,7 @@ export function createVoiceCapture(
       return;
     }
     if (type === "speech.start") {
-      void Promise.resolve(options.onBargeIn())
-        .then(() => options.onState("listening"))
-        .catch((error) => options.onError(
-          error instanceof Error ? error.message : "barge-in failed",
-        ));
+      beginInterruption(message, generation);
       return;
     }
     if (type === "transcript.partial") {
@@ -134,15 +298,11 @@ export function createVoiceCapture(
       return;
     }
     if (type === "transcript.final") {
-      const text = String(message.text || "").trim();
-      if (!text) return;
-      options.onState("thinking");
-      options.onTranscript?.(text);
+      enqueueFinalTranscript(message, socket, generation);
       return;
     }
     if (type === "transcript.empty") {
-      options.onState("listening");
-      options.onEmptyTranscript?.("没有识别到语音，请再说一次");
+      enqueueEmptyTranscript(socket, generation);
       return;
     }
   }
@@ -248,7 +408,7 @@ export function createVoiceCapture(
         retireSocket(socket, generation, error, error.message);
         return;
       }
-      handleStreamEvent(message);
+      handleStreamEvent(message, socket, generation);
     };
     socket.onerror = () => {
       retireSocket(
@@ -306,6 +466,9 @@ export function createVoiceCapture(
     clearReconnectTimer();
     clearStreamReadyTimer();
     socketGeneration += 1;
+    interruptionBarriers.splice(0);
+    handledSpeechStarts.clear();
+    handledFinals.clear();
     const socket = streamSocket;
     streamSocket = null;
     settleStart(new Error("native audio stream start cancelled"));

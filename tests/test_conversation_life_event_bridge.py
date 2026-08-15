@@ -52,6 +52,28 @@ def test_public_system_publish_is_durable_allowlisted_and_session_scoped(tmp_pat
     assert bus.history() == []
 
 
+def test_inner_state_system_event_is_durable_and_broadcast(tmp_path):
+    hub, _ = _hub(tmp_path)
+
+    async def exercise():
+        subscription = await hub.attach("session-1")
+        published = await hub.publish_system_event(
+            "session-1",
+            "life.inner_state.changed",
+            {"schema_version": 1, "revision": 3},
+        )
+        received = await subscription.get()
+        await subscription.close()
+        await hub.shutdown()
+        return published, received
+
+    published, received = asyncio.run(exercise())
+
+    assert received == published
+    assert published["type"] == "life.inner_state.changed"
+    assert published["request_id"] == ""
+
+
 def test_conversation_lifecycle_reaches_bus_without_private_text(tmp_path):
     hub, bus = _hub(tmp_path)
     seen = []
@@ -100,6 +122,7 @@ def test_conversation_lifecycle_reaches_bus_without_private_text(tmp_path):
         "request_id": "request-1",
         "correlation_id": "request-1",
         "interaction_mode": "live",
+        "execution_lane": "exclusive",
     }
     assert accepted.id != accepted.payload["source_event_id"]
     assert accepted.sequence == 1
@@ -182,6 +205,38 @@ def test_bridge_excludes_tool_data_free_form_activity_and_response_delta(tmp_pat
         "private-path",
     ):
         assert forbidden not in serialized
+
+
+def test_explicit_cancel_publishes_privacy_minimal_interruption(tmp_path):
+    hub, bus = _hub(tmp_path)
+    seen = []
+    bus.subscribe("*", seen.append)
+
+    async def runner(request, token):
+        yield {"type": "activity", "activity": "thinking", "detail": "private"}
+        await token.race(asyncio.sleep(30))
+
+    async def exercise():
+        await hub.submit(
+            ConversationRequest("session-1", "request-1", "private", "live"),
+            runner,
+        )
+        await asyncio.sleep(0)
+        assert await hub.cancel(
+            "session-1",
+            "request-1",
+            reason="private voice barge-in detail",
+        )
+        await hub.wait_for_terminal("request-1")
+        await hub.shutdown()
+
+    asyncio.run(exercise())
+
+    interrupted = next(event for event in seen if event.type == "interaction.interrupted")
+    assert interrupted.payload["session_id"] == "session-1"
+    assert interrupted.payload["request_id"] == "request-1"
+    assert interrupted.payload["execution_lane"] == "exclusive"
+    assert "private voice barge-in detail" not in json.dumps(interrupted.payload)
 
 
 def test_bridge_publishes_only_after_canonical_append_succeeds(tmp_path, monkeypatch):

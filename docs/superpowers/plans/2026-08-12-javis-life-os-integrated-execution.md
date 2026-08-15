@@ -68,7 +68,7 @@
 | L0-A Task 11 TypeScript 兼容桥 | 已完成 | 专项 6 tests；完整 App 154 tests；TypeScript 与生产构建通过 |
 | L0-A Task 12 发布/恢复合同 | 已完成 | 发布合同 6 tests；核心门 490 tests；完整 Python 912 tests + 28 subtests；App 154 tests 与生产构建通过；D 盘实机验收仍为 NOT EXECUTED |
 | L0-B Task 1-10 | 未开始 | Task 1 等待下载许可；Task 6 前置依赖已满足 |
-| L1 产品实现 | 未开始 | 依赖 L0-A 纵切与表达桥 |
+| L1 产品实现 | 隔离工作区代码完成，发布门未关闭 | 1178 Python tests + 28 subtests；App 166 tests；TypeScript 与 Vite 生产构建通过；Rust/Tauri 工具链不可用，安装包与 D 盘验收仍为 NOT EXECUTED |
 
 `eeebcbd` 是实现起点，不是完整 L0-A 完成点。现有 `core/life/contracts.py` 只冻结数据边界，不代表身份持久化、生命周期、日志、API、前端桥或 L1 内稳态已经实现。
 
@@ -193,7 +193,7 @@ L1 不得提前实现 L2 自传记忆、关系成长、持续人格或模型可�
 | WP-B01 | 3D 依赖与锁文件 | 用户下载许可 | 阻塞于许可门，不是技术失败 |
 | WP-B02-B05 | Manifest、Surface、Lightform、Pet 集成 | B01 | 待执行，可在 A02-A10 期间独立分支推进 |
 | WP-B06-B10 | 表达、口型、性能、预览、验收 | A11、B05 | 待执行 |
-| WP-L101-L106 | L1 六个实施批次 | A08/A11，部分依赖 B06 | 待执行 |
+| WP-L101-L106 | L1 六个实施批次 | A08/A11，部分依赖 B06 | 隔离工作区实现完成；227 项广覆盖回归与完整自动化主门通过；Rust/Tauri、安装包和 D 盘真实验收待执行 |
 
 ## 8. 测试与证据矩阵
 
@@ -234,7 +234,11 @@ L0-A 已在独立分支完成并冻结；本轮继续在新的隔离工作区交
 - [x] 核验 `G:\Javis` 主工作树内容状态与本轮开始时一致。
 - [x] 从完整 L0-A 提交创建独立 L1 分支和工作区。
 - [x] 编写 L1 十二工作包实施计划，保持安全前置和单写者依赖顺序。
-- [ ] 执行 WP-L101 runtime access 与 capture authorization。
+- [x] 完成 WP-L101-L106：授权边界、观察合同、确定性内核、精确呼唤、请求级打断、薄收据、只读表面与模型上下文。
+- [x] 完成 L1 审查加固：主动 TTL、播放终态 tombstone、全部 incomplete 收据恢复、receipt 写失败阻断 clean checkpoint、L0 offline/recovery 表达优先级。
+- [x] 通过完整 Python 回归 1178 tests + 28 subtests、L1 广覆盖回归 227 tests、App 166 tests、TypeScript 严格检查与 Vite 生产构建。
+- [ ] Rust/Tauri 自动化门：当前机器未发现 Cargo 工具链，NOT EXECUTED。
+- [ ] 安装包与 D 盘真实用户验收：按证据模板执行，当前保持 NOT EXECUTED。
 
 ## 11. 完成定义
 
@@ -246,3 +250,13 @@ Life OS 不能因“文件已创建”或“界面会动”被标记完成。阶
 4. 正式源码区只通过明确集成动作接收已验证提交。
 5. 需要下载、视觉选择、打包或 D 盘验收的门已由用户明确授权并真实执行。
 6. 每个未完成项保持真实状态，不用“基本完成”替代缺失证据。
+
+### Scoped Task 12 Release Slice
+
+| Item | Status | Evidence |
+|---|---|---|
+| L1 Task 12 release contracts (docs/static gates) | Complete in this worktree | `tests/test_l1_release_contract.py`, `docs/JAVIS_OPERATIONS.md`, `docs/verification/JAVIS_L1_D_DRIVE_ACCEPTANCE.md`; manual installer and D-drive evidence remains NOT EXECUTED |
+| L1 implementation and automated main gates | Complete except unavailable Rust/Tauri gate | Python 1178 tests + 28 subtests; App 166 tests; TypeScript and Vite production build passed; Cargo unavailable |
+
+- [x] Completed the Task 12 docs/static release contract slice in the L1 worktree.
+- [x] Preserved truthful manual status: manual installer and D-drive evidence remains NOT EXECUTED.

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import LifeEvent, PrivacyClass, RetentionClass
+from .l1.contracts import TurnExperienceReceipt
 from .privacy import PrivacyPolicy
 
 
@@ -497,4 +498,271 @@ class LifeEventJournal:
         }
 
 
-__all__ = ["LifeEventJournal"]
+class TurnReceiptJournal:
+    """Asynchronously upsert the latest privacy-thin receipt for each turn."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        capacity: int = 256,
+        max_write_retries: int = 2,
+        retry_delay_seconds: float = 0.025,
+    ) -> None:
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("capacity must be a positive integer")
+        if type(max_write_retries) is not int or max_write_retries < 0:
+            raise ValueError("max_write_retries must be a non-negative integer")
+        if (
+            isinstance(retry_delay_seconds, bool)
+            or not isinstance(retry_delay_seconds, (int, float))
+            or not 0.0 <= float(retry_delay_seconds) <= 1.0
+        ):
+            raise ValueError("retry_delay_seconds must be in [0, 1]")
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.capacity = capacity
+        self.max_write_retries = max_write_retries
+        self.retry_delay_seconds = float(retry_delay_seconds)
+        self._queue: queue.Queue[TurnExperienceReceipt] = queue.Queue(maxsize=capacity)
+        self._lock = threading.RLock()
+        self._stop_requested = threading.Event()
+        self._worker: threading.Thread | None = None
+        self._accepting = True
+        self._state = "paused"
+        self._known_hashes: dict[tuple[str, str], str] = {}
+        self._accepted = 0
+        self._persisted = 0
+        self._duplicates = 0
+        self._dropped = 0
+        self._write_failures = 0
+        self._last_error: str | None = None
+        self._init_db()
+        self._known_hashes.update(self._load_hashes())
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._state == "stopped":
+                return False
+            if self._worker is not None and self._worker.is_alive():
+                return False
+            self._stop_requested.clear()
+            self._state = "running"
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                name="javis-turn-receipts",
+                daemon=True,
+            )
+            self._worker.start()
+            return True
+
+    def enqueue(self, receipt: TurnExperienceReceipt) -> bool:
+        if not isinstance(receipt, TurnExperienceReceipt):
+            raise TypeError("receipt must be a TurnExperienceReceipt")
+        key = (receipt.session_id, receipt.request_id)
+        with self._lock:
+            if not self._accepting:
+                return False
+            if self._known_hashes.get(key) == receipt.content_hash:
+                self._duplicates += 1
+                return False
+            self._known_hashes[key] = receipt.content_hash
+            try:
+                self._queue.put_nowait(receipt)
+            except queue.Full:
+                if self._known_hashes.get(key) == receipt.content_hash:
+                    self._known_hashes.pop(key, None)
+                self._dropped += 1
+                return False
+            self._accepted += 1
+            return True
+
+    def recent(self, limit: int = 32) -> tuple[TurnExperienceReceipt, ...]:
+        limit = max(1, min(int(limit), 32))
+        if self._state == "running":
+            self.flush(timeout=2.0)
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT payload_json FROM turn_experience_receipts "
+                "ORDER BY updated_at_utc DESC, receipt_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        rows.reverse()
+        return tuple(
+            TurnExperienceReceipt.from_dict(json.loads(row["payload_json"]))
+            for row in rows
+        )
+
+    def incomplete(
+        self,
+        *,
+        limit: int = 256,
+        offset: int = 0,
+    ) -> tuple[TurnExperienceReceipt, ...]:
+        """Return one stable page of incomplete receipts for restart recovery."""
+
+        if type(limit) is not int or not 1 <= limit <= 1024:
+            raise ValueError("limit must be an integer in [1, 1024]")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if self._state == "running":
+            self.flush(timeout=2.0)
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT payload_json FROM turn_experience_receipts "
+                "WHERE completeness = ? "
+                "ORDER BY updated_at_utc ASC, receipt_id ASC LIMIT ? OFFSET ?",
+                ("incomplete", limit, offset),
+            ).fetchall()
+        return tuple(
+            TurnExperienceReceipt.from_dict(json.loads(row["payload_json"]))
+            for row in rows
+        )
+
+    def flush(self, timeout: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._queue.all_tasks_done:
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(remaining)
+        with self._lock:
+            return self._write_failures == 0
+
+    def stop(self, timeout: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._lock:
+            if self._state == "stopped":
+                return True
+            if self._worker is None and not self._queue.empty():
+                self.start()
+            self._accepting = False
+            worker = self._worker
+        flushed = self.flush(max(0.0, deadline - time.monotonic()))
+        self._stop_requested.set()
+        if worker is not None:
+            worker.join(max(0.0, deadline - time.monotonic()))
+        stopped = worker is None or not worker.is_alive()
+        with self._lock:
+            if flushed and stopped and self._write_failures == 0:
+                self._state = "stopped"
+            else:
+                self._state = "degraded"
+        return flushed and stopped
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "state": self._state,
+                "pending": self._queue.qsize(),
+                "accepted": self._accepted,
+                "persisted": self._persisted,
+                "duplicates": self._duplicates,
+                "dropped": self._dropped,
+                "write_failures": self._write_failures,
+                "last_error": self._last_error,
+            }
+
+    def _worker_loop(self) -> None:
+        while True:
+            if self._stop_requested.is_set() and self._queue.empty():
+                return
+            try:
+                receipt = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            key = (receipt.session_id, receipt.request_id)
+            try:
+                self._write(receipt)
+            except Exception as exc:
+                with self._lock:
+                    self._last_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                    self._write_failures += 1
+                    self._state = "degraded"
+                    if self._known_hashes.get(key) == receipt.content_hash:
+                        self._known_hashes.pop(key, None)
+            else:
+                with self._lock:
+                    self._persisted += 1
+            finally:
+                self._queue.task_done()
+
+    def _write(self, receipt: TurnExperienceReceipt) -> None:
+        for attempt in range(self.max_write_retries + 1):
+            try:
+                self._write_once(receipt)
+                return
+            except sqlite3.OperationalError as exc:
+                message = str(exc).casefold()
+                retryable = "locked" in message or "busy" in message
+                if not retryable or attempt >= self.max_write_retries:
+                    raise
+                delay = self.retry_delay_seconds * (attempt + 1)
+                self._stop_requested.wait(delay)
+
+    def _write_once(self, receipt: TurnExperienceReceipt) -> None:
+        payload = json.dumps(receipt.to_dict(), ensure_ascii=False, sort_keys=True)
+        with closing(self._connect()) as db, db:
+            db.execute(
+                """
+                INSERT INTO turn_experience_receipts (
+                    receipt_id, session_id, request_id, updated_at_utc,
+                    completeness, content_hash, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, request_id) DO UPDATE SET
+                    receipt_id=excluded.receipt_id,
+                    updated_at_utc=excluded.updated_at_utc,
+                    completeness=excluded.completeness,
+                    content_hash=excluded.content_hash,
+                    payload_json=excluded.payload_json
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.session_id,
+                    receipt.request_id,
+                    receipt.ended_at_utc,
+                    receipt.completeness.value,
+                    receipt.content_hash,
+                    payload,
+                ),
+            )
+
+    def _init_db(self) -> None:
+        with closing(self._connect()) as db, db:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS turn_experience_receipts (
+                    receipt_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    completeness TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(session_id, request_id)
+                )
+                """
+            )
+
+    def _load_hashes(self) -> dict[tuple[str, str], str]:
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT session_id, request_id, content_hash "
+                "FROM turn_experience_receipts"
+            ).fetchall()
+        return {
+            (str(row["session_id"]), str(row["request_id"])): str(
+                row["content_hash"]
+            )
+            for row in rows
+        }
+
+    def _connect(self) -> sqlite3.Connection:
+        db = sqlite3.connect(self.path, timeout=0.1)
+        db.row_factory = sqlite3.Row
+        return db
+
+
+__all__ = ["LifeEventJournal", "TurnReceiptJournal"]

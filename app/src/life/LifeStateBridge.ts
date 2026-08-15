@@ -2,17 +2,25 @@ import type { BackendEvent } from "../bridge/backendClient.ts";
 import type { LiveState } from "../live/liveState.ts";
 import type { StateSignal } from "../state/runtimeStateTypes.ts";
 import type {
+  AttentionMode,
+  AttentionSnapshot,
   ExpressionBaseState,
   ExpressionIntent,
   ExpressionListener,
+  FunctionalAffect,
+  FunctionalAffectKind,
   GazeTarget,
   HealthSummary,
+  HomeostasisSnapshot,
   IdentitySummary,
+  InnerStateReasonCode,
+  InnerStateSnapshot,
   InstanceSummary,
   LifeActivity,
   LifeBridgeSnapshot,
   LifeCycleState,
   LifeSnapshot,
+  PresenceSnapshot,
   VoiceActivity,
 } from "./lifeTypes.ts";
 
@@ -63,9 +71,54 @@ const EXPRESSION_STATES = new Set<ExpressionBaseState>([
 ]);
 const GAZE_TARGETS = new Set<GazeTarget>(["none", "user", "content", "task"]);
 const VOICE_ACTIVITIES = new Set<VoiceActivity>(["silent", "listening", "speaking"]);
+const ATTENTION_MODES = new Set<AttentionMode>([
+  "idle",
+  "present",
+  "listening",
+  "engaged",
+  "speaking",
+  "awaiting_approval",
+  "blocked",
+  "recovering",
+]);
+const AFFECT_KINDS = new Set<FunctionalAffectKind>([
+  "curious",
+  "cautious",
+  "blocked",
+  "relieved",
+  "satisfied",
+]);
+const INNER_STATE_REASON_CODES = new Set<InnerStateReasonCode>([
+  "quiet_baseline",
+  "user_invoked",
+  "voice_listening_started",
+  "voice_listening_stopped",
+  "request_started",
+  "request_activity",
+  "approval_required",
+  "approval_approved",
+  "approval_denied",
+  "tool_started",
+  "tool_risk_observed",
+  "tool_completed",
+  "request_completed",
+  "request_failed",
+  "request_cancelled",
+  "speech_started",
+  "speech_stopped",
+  "interaction_interrupted",
+  "goal_verified",
+  "runtime_degraded",
+  "runtime_recovered",
+  "load_reduced",
+  "blocked_by_failure",
+]);
 const RFC3339_MILLISECONDS = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+const MACHINE_CODE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+const MAX_INNER_STATE_AFFECTS = 32;
+const MAX_AFFECT_EVIDENCE_IDS = 32;
 
 const SNAPSHOT_KEYS = [
   "schema_version",
@@ -114,6 +167,56 @@ const EXPRESSION_KEYS = [
   "expires_at",
   "explanation_code",
 ] as const;
+const INNER_STATE_KEYS = [
+  "schema_version",
+  "source_life_snapshot_revision",
+  "identity_id",
+  "instance_id",
+  "generated_at_utc",
+  "phase",
+  "attention",
+  "homeostasis",
+  "affects",
+  "presence",
+  "last_observation_id",
+  "degraded",
+] as const;
+const ATTENTION_KEYS = [
+  "mode",
+  "target_kind",
+  "target_id",
+  "priority",
+  "since_utc",
+  "expires_at_utc",
+  "source_observation_id",
+] as const;
+const HOMEOSTASIS_KEYS = [
+  "updated_at_utc",
+  "activation",
+  "cognitive_load",
+  "certainty",
+  "caution",
+  "curiosity",
+  "blockedness",
+  "social_presence",
+] as const;
+const AFFECT_KEYS = [
+  "kind",
+  "intensity",
+  "confidence",
+  "reason_code",
+  "evidence_ids",
+  "valid_until_utc",
+] as const;
+const PRESENCE_KEYS = [
+  "mode",
+  "intensity",
+  "session_id",
+  "source_observation_id",
+  "reason_code",
+  "since_utc",
+  "expires_at_utc",
+] as const;
 
 const STATE_DETAILS: Record<LifeActivity, string> = {
   idle: "Javis \u5df2\u5f85\u547d",
@@ -142,6 +245,13 @@ function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isUnitNumber(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= 1;
+}
+
 function isBoundedText(value: unknown, maxLength = 4096): value is string {
   return typeof value === "string"
     && value.length > 0
@@ -151,6 +261,14 @@ function isBoundedText(value: unknown, maxLength = 4096): value is string {
 
 function isOptionalId(value: unknown): value is string | null {
   return value === null || isBoundedText(value, 256);
+}
+
+function isMachineCode(value: unknown): value is string {
+  return typeof value === "string" && MACHINE_CODE.test(value);
+}
+
+function isOptionalMachineCode(value: unknown): value is string | null {
+  return value === null || isMachineCode(value);
 }
 
 function isStringList(value: unknown): value is string[] {
@@ -262,6 +380,154 @@ function readLifeSnapshot(value: unknown): LifeSnapshot | null {
   };
 }
 
+function readAttentionSnapshot(value: unknown): AttentionSnapshot | null {
+  if (!isRecord(value) || !hasExactKeys(value, ATTENTION_KEYS)) return null;
+  const sinceAt = parseTimestamp(value.since_utc);
+  const expiresAt = value.expires_at_utc === null ? null : parseTimestamp(value.expires_at_utc);
+  const targetFields = [value.target_kind, value.target_id, value.source_observation_id];
+  const hasNoTarget = targetFields.every((item) => item === null);
+  const hasCompleteTarget = targetFields.every((item) => item !== null);
+  if (
+    typeof value.mode !== "string"
+    || !ATTENTION_MODES.has(value.mode as AttentionMode)
+    || !isOptionalMachineCode(value.target_kind)
+    || !isOptionalId(value.target_id)
+    || !Number.isSafeInteger(value.priority)
+    || (value.priority as number) < 0
+    || (value.priority as number) > 100
+    || sinceAt === null
+    || (value.expires_at_utc !== null && expiresAt === null)
+    || (expiresAt !== null && expiresAt <= sinceAt)
+    || !isOptionalId(value.source_observation_id)
+    || (!hasNoTarget && !hasCompleteTarget)
+  ) return null;
+  return {
+    mode: value.mode as AttentionMode,
+    target_kind: value.target_kind,
+    target_id: value.target_id,
+    priority: value.priority as number,
+    since_utc: value.since_utc as string,
+    expires_at_utc: value.expires_at_utc as string | null,
+    source_observation_id: value.source_observation_id,
+  };
+}
+
+function readHomeostasisSnapshot(value: unknown): HomeostasisSnapshot | null {
+  if (!isRecord(value) || !hasExactKeys(value, HOMEOSTASIS_KEYS)) return null;
+  if (
+    parseTimestamp(value.updated_at_utc) === null
+    || !isUnitNumber(value.activation)
+    || !isUnitNumber(value.cognitive_load)
+    || !isUnitNumber(value.certainty)
+    || !isUnitNumber(value.caution)
+    || !isUnitNumber(value.curiosity)
+    || !isUnitNumber(value.blockedness)
+    || !isUnitNumber(value.social_presence)
+  ) return null;
+  return {
+    updated_at_utc: value.updated_at_utc as string,
+    activation: value.activation,
+    cognitive_load: value.cognitive_load,
+    certainty: value.certainty,
+    caution: value.caution,
+    curiosity: value.curiosity,
+    blockedness: value.blockedness,
+    social_presence: value.social_presence,
+  };
+}
+
+function readFunctionalAffect(value: unknown): FunctionalAffect | null {
+  if (!isRecord(value) || !hasExactKeys(value, AFFECT_KEYS)) return null;
+  if (
+    typeof value.kind !== "string"
+    || !AFFECT_KINDS.has(value.kind as FunctionalAffectKind)
+    || !isUnitNumber(value.intensity)
+    || !isUnitNumber(value.confidence)
+    || typeof value.reason_code !== "string"
+    || !INNER_STATE_REASON_CODES.has(value.reason_code as InnerStateReasonCode)
+    || !Array.isArray(value.evidence_ids)
+    || value.evidence_ids.length === 0
+    || value.evidence_ids.length > MAX_AFFECT_EVIDENCE_IDS
+    || !value.evidence_ids.every((item) => isBoundedText(item, 256))
+    || new Set(value.evidence_ids).size !== value.evidence_ids.length
+    || parseTimestamp(value.valid_until_utc) === null
+    || (value.kind === "satisfied" && value.reason_code !== "goal_verified")
+  ) return null;
+  return {
+    kind: value.kind as FunctionalAffectKind,
+    intensity: value.intensity,
+    confidence: value.confidence,
+    reason_code: value.reason_code as InnerStateReasonCode,
+    evidence_ids: [...value.evidence_ids] as string[],
+    valid_until_utc: value.valid_until_utc as string,
+  };
+}
+
+function readPresenceSnapshot(value: unknown): PresenceSnapshot | null {
+  if (!isRecord(value) || !hasExactKeys(value, PRESENCE_KEYS)) return null;
+  const sinceAt = parseTimestamp(value.since_utc);
+  const expiresAt = value.expires_at_utc === null ? null : parseTimestamp(value.expires_at_utc);
+  if (
+    typeof value.mode !== "string"
+    || !ATTENTION_MODES.has(value.mode as AttentionMode)
+    || !isUnitNumber(value.intensity)
+    || !isOptionalId(value.session_id)
+    || !isOptionalId(value.source_observation_id)
+    || typeof value.reason_code !== "string"
+    || !INNER_STATE_REASON_CODES.has(value.reason_code as InnerStateReasonCode)
+    || sinceAt === null
+    || (value.expires_at_utc !== null && expiresAt === null)
+    || (expiresAt !== null && expiresAt <= sinceAt)
+  ) return null;
+  return {
+    mode: value.mode as AttentionMode,
+    intensity: value.intensity,
+    session_id: value.session_id,
+    source_observation_id: value.source_observation_id,
+    reason_code: value.reason_code as InnerStateReasonCode,
+    since_utc: value.since_utc as string,
+    expires_at_utc: value.expires_at_utc as string | null,
+  };
+}
+
+function readInnerStateSnapshot(value: unknown): InnerStateSnapshot | null {
+  if (!isRecord(value) || !hasExactKeys(value, INNER_STATE_KEYS)) return null;
+  const attention = readAttentionSnapshot(value.attention);
+  const homeostasis = readHomeostasisSnapshot(value.homeostasis);
+  const presence = readPresenceSnapshot(value.presence);
+  if (
+    value.schema_version !== 1
+    || !isNonNegativeInteger(value.source_life_snapshot_revision)
+    || !isBoundedText(value.identity_id, 256)
+    || !isBoundedText(value.instance_id, 256)
+    || parseTimestamp(value.generated_at_utc) === null
+    || !isMachineCode(value.phase)
+    || !attention
+    || !homeostasis
+    || !Array.isArray(value.affects)
+    || value.affects.length > MAX_INNER_STATE_AFFECTS
+    || !presence
+    || !isOptionalId(value.last_observation_id)
+    || typeof value.degraded !== "boolean"
+  ) return null;
+  const affects = value.affects.map(readFunctionalAffect);
+  if (affects.some((affect) => affect === null)) return null;
+  return {
+    schema_version: 1,
+    source_life_snapshot_revision: value.source_life_snapshot_revision,
+    identity_id: value.identity_id,
+    instance_id: value.instance_id,
+    generated_at_utc: value.generated_at_utc as string,
+    phase: value.phase,
+    attention,
+    homeostasis,
+    affects: affects as FunctionalAffect[],
+    presence,
+    last_observation_id: value.last_observation_id,
+    degraded: value.degraded,
+  };
+}
+
 function readExpressionIntent(value: unknown, now: number): ExpressionIntent | null {
   if (!isRecord(value) || !hasExactKeys(value, EXPRESSION_KEYS)) return null;
   const generatedAt = parseTimestamp(value.generated_at);
@@ -327,11 +593,29 @@ function cloneExpression(value: ExpressionIntent): ExpressionIntent {
   return { ...value };
 }
 
+function cloneInnerState(value: InnerStateSnapshot): InnerStateSnapshot {
+  const attention = Object.freeze({ ...value.attention });
+  const homeostasis = Object.freeze({ ...value.homeostasis });
+  const affects = Object.freeze(value.affects.map((affect) => Object.freeze({
+    ...affect,
+    evidence_ids: Object.freeze([...affect.evidence_ids]),
+  })));
+  const presence = Object.freeze({ ...value.presence });
+  return Object.freeze({
+    ...value,
+    attention,
+    homeostasis,
+    affects,
+    presence,
+  });
+}
+
 export function createLifeStateBridge(options: LifeStateBridgeOptions): LifeStateBridge {
   const now = options.now ?? Date.now;
   const expressionListeners = new Set<ExpressionListener>();
   let currentSnapshot: LifeSnapshot | null = null;
   let currentExpression: ExpressionIntent | null = null;
+  let currentInnerState: InnerStateSnapshot | null = null;
   let state: LiveState = "idle";
   let detail = "Javis \u5df2\u5f85\u547d";
   let lastSignalTimestamp = -1;
@@ -347,6 +631,9 @@ export function createLifeStateBridge(options: LifeStateBridgeOptions): LifeStat
     const candidate = readLifeSnapshot(payload);
     if (!candidate || candidate.revision <= (currentSnapshot?.revision ?? -1)) return false;
     currentSnapshot = candidate;
+    if (currentInnerState?.source_life_snapshot_revision !== candidate.revision) {
+      currentInnerState = null;
+    }
     state = toLiveState(candidate.activity);
     detail = STATE_DETAILS[candidate.activity];
     options.signal({
@@ -374,15 +661,32 @@ export function createLifeStateBridge(options: LifeStateBridgeOptions): LifeStat
     return true;
   }
 
+  function applyInnerState(payload: unknown): boolean {
+    const candidate = readInnerStateSnapshot(payload);
+    if (
+      !candidate
+      || !currentSnapshot
+      || candidate.source_life_snapshot_revision !== currentSnapshot.revision
+      || candidate.identity_id !== currentSnapshot.identity.identity_id
+      || candidate.instance_id !== currentSnapshot.instance.instance_id
+      || candidate.source_life_snapshot_revision
+        <= (currentInnerState?.source_life_snapshot_revision ?? -1)
+    ) return false;
+    currentInnerState = cloneInnerState(candidate);
+    return true;
+  }
+
   function handle(event: BackendEvent): boolean {
     if (event.type === "life.snapshot") return applySnapshot(event.payload);
     if (event.type === "life.expression") return applyExpression(event.payload);
+    if (event.type === "life.inner_state.changed") return applyInnerState(event.payload);
     return false;
   }
 
   function projectOffline(reason = "\u540e\u7aef\u79bb\u7ebf"): void {
     state = "offline";
     detail = reason.trim() || "\u540e\u7aef\u79bb\u7ebf";
+    currentInnerState = null;
     options.signal({
       source: "websocket",
       state,
@@ -397,8 +701,10 @@ export function createLifeStateBridge(options: LifeStateBridgeOptions): LifeStat
       detail,
       snapshotRevision: currentSnapshot?.revision ?? -1,
       expressionRevision: currentExpression?.revision ?? -1,
+      innerStateMode: currentInnerState ? "authoritative" : "compatibility",
       snapshot: currentSnapshot ? cloneLifeSnapshot(currentSnapshot) : null,
       expression: currentExpression ? cloneExpression(currentExpression) : null,
+      innerState: currentInnerState ? cloneInnerState(currentInnerState) : null,
     };
   }
 

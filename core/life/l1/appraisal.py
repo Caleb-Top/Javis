@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+import math
 from typing import Mapping
 
 from .clock import ClockReading, add_seconds, coerce_utc, format_utc_milliseconds
@@ -32,7 +33,7 @@ _HIGH_RISK = frozenset({RiskLevel.HIGH, RiskLevel.CRITICAL})
 class _AttentionRule:
     target_kind: str
     priority: int
-    ttl_seconds: float
+    ttl_seconds: float | None
     interruptible: bool = True
 
 
@@ -115,12 +116,64 @@ _ATTENTION_RULES: Mapping[ObservationKind, _AttentionRule] = {
     ObservationKind.REQUEST_STARTED: _AttentionRule("request", 70, 60.0),
     ObservationKind.REQUEST_ACTIVITY: _AttentionRule("request", 70, 60.0),
     ObservationKind.APPROVAL_REQUIRED: _AttentionRule("approval", 90, 120.0, False),
-    # Playback stop normally closes this claim; this ceiling is only a fault bound.
-    ObservationKind.SPEECH_STARTED: _AttentionRule("playback", 60, 120.0),
+    ObservationKind.SPEECH_STARTED: _AttentionRule("playback", 60, None),
     ObservationKind.INTERACTION_INTERRUPTED: _AttentionRule("interruption", 100, 5.0, False),
     ObservationKind.RUNTIME_DEGRADED: _AttentionRule("recovery", 95, 30.0, False),
     ObservationKind.RUNTIME_RECOVERED: _AttentionRule("recovery_observation", 50, 10.0),
 }
+
+_EXPECTED_OUTCOMES: Mapping[ObservationKind, frozenset[ObservationOutcome]] = {
+    ObservationKind.USER_INVOKED: frozenset({ObservationOutcome.STARTED}),
+    ObservationKind.VOICE_LISTENING_STARTED: frozenset({ObservationOutcome.STARTED}),
+    ObservationKind.VOICE_LISTENING_STOPPED: frozenset(
+        {ObservationOutcome.COMPLETED, ObservationOutcome.FAILED}
+    ),
+    ObservationKind.REQUEST_STARTED: frozenset({ObservationOutcome.STARTED}),
+    ObservationKind.REQUEST_ACTIVITY: frozenset({ObservationOutcome.NONE}),
+    ObservationKind.APPROVAL_REQUIRED: frozenset({ObservationOutcome.NONE}),
+    ObservationKind.APPROVAL_RESOLVED: frozenset(
+        {ObservationOutcome.APPROVED, ObservationOutcome.DENIED}
+    ),
+    ObservationKind.TOOL_STARTED: frozenset({ObservationOutcome.STARTED}),
+    ObservationKind.TOOL_COMPLETED: frozenset(
+        {ObservationOutcome.COMPLETED, ObservationOutcome.FAILED}
+    ),
+    ObservationKind.REQUEST_COMPLETED: frozenset({ObservationOutcome.COMPLETED}),
+    ObservationKind.REQUEST_FAILED: frozenset({ObservationOutcome.FAILED}),
+    ObservationKind.REQUEST_CANCELLED: frozenset({ObservationOutcome.CANCELLED}),
+    ObservationKind.SPEECH_STARTED: frozenset({ObservationOutcome.STARTED}),
+    ObservationKind.SPEECH_STOPPED: frozenset(
+        {
+            ObservationOutcome.COMPLETED,
+            ObservationOutcome.CANCELLED,
+            ObservationOutcome.FAILED,
+        }
+    ),
+    ObservationKind.INTERACTION_INTERRUPTED: frozenset(
+        {ObservationOutcome.INTERRUPTED}
+    ),
+    ObservationKind.GOAL_VERIFIED: frozenset({ObservationOutcome.VERIFIED}),
+    ObservationKind.RUNTIME_DEGRADED: frozenset({ObservationOutcome.FAILED}),
+    ObservationKind.RUNTIME_RECOVERED: frozenset({ObservationOutcome.COMPLETED}),
+}
+
+_REQUEST_SCOPED_KINDS = frozenset(
+    {
+        ObservationKind.REQUEST_STARTED,
+        ObservationKind.REQUEST_ACTIVITY,
+        ObservationKind.APPROVAL_REQUIRED,
+        ObservationKind.APPROVAL_RESOLVED,
+        ObservationKind.TOOL_STARTED,
+        ObservationKind.TOOL_COMPLETED,
+        ObservationKind.REQUEST_COMPLETED,
+        ObservationKind.REQUEST_FAILED,
+        ObservationKind.REQUEST_CANCELLED,
+        ObservationKind.SPEECH_STARTED,
+        ObservationKind.SPEECH_STOPPED,
+        ObservationKind.INTERACTION_INTERRUPTED,
+        ObservationKind.GOAL_VERIFIED,
+    }
+)
 
 
 class AppraisalReducer:
@@ -130,6 +183,8 @@ class AppraisalReducer:
         self,
         observation: LifeObservation,
         now: ClockReading | datetime | str,
+        *,
+        playback_duration_seconds: float | None = None,
     ) -> AppraisalResult:
         if not isinstance(observation, LifeObservation):
             raise TypeError("observation must be a LifeObservation")
@@ -137,7 +192,11 @@ class AppraisalReducer:
             raise ValueError("unsupported observation kind")
 
         now_utc = now.utc if isinstance(now, ClockReading) else coerce_utc(now)
-        now_timestamp = format_utc_milliseconds(now_utc)
+        occurred_utc = coerce_utc(observation.occurred_at_utc)
+        if occurred_utc > now_utc:
+            raise ValueError("observation occurrence cannot be in the future")
+        occurred_timestamp = format_utc_milliseconds(occurred_utc)
+        self._validate_semantics(observation)
         reason_code = self._reason_code(observation)
         deltas = dict(_DELTAS.get(observation.kind, {}))
 
@@ -155,10 +214,14 @@ class AppraisalReducer:
                 StateDimension.BLOCKEDNESS: 0.10,
             }
 
-        attention_claim = self._attention_claim(observation, now_timestamp)
+        attention_claim = self._attention_claim(
+            observation,
+            occurred_timestamp,
+            playback_duration_seconds=playback_duration_seconds,
+        )
         affect_rules = self._affect_rules(observation)
         affect_evidence = tuple(
-            self._affect_evidence(observation, now_timestamp, rule)
+            self._affect_evidence(observation, occurred_timestamp, rule)
             for rule in affect_rules
         )
         expiration_candidates = [
@@ -182,6 +245,17 @@ class AppraisalReducer:
         )
 
     @staticmethod
+    def _validate_semantics(observation: LifeObservation) -> None:
+        expected = _EXPECTED_OUTCOMES.get(observation.kind)
+        if expected is None or observation.outcome not in expected:
+            allowed = " or ".join(sorted(item.value for item in expected or ()))
+            raise ValueError(
+                f"{observation.kind.value} requires {allowed or 'a governed'} outcome"
+            )
+        if observation.kind in _REQUEST_SCOPED_KINDS and observation.request_id is None:
+            raise ValueError(f"{observation.kind.value} requires request identity")
+
+    @staticmethod
     def _reason_code(observation: LifeObservation) -> ReasonCode:
         if observation.kind is ObservationKind.APPROVAL_RESOLVED:
             if observation.outcome is ObservationOutcome.APPROVED:
@@ -196,7 +270,16 @@ class AppraisalReducer:
 
     @staticmethod
     def _target_id(observation: LifeObservation, target_kind: str) -> str:
-        if target_kind in {"request", "approval", "playback", "interruption"}:
+        if target_kind == "playback":
+            if observation.request_id is None or observation.source_generation is None:
+                raise ValueError(
+                    f"{observation.kind.value} requires playback target identity"
+                )
+            return playback_target_id(
+                observation.request_id,
+                observation.source_generation,
+            )
+        if target_kind in {"request", "approval", "interruption"}:
             target_id = observation.request_id
         elif target_kind in {"presence", "voice_session"}:
             target_id = observation.session_id
@@ -209,7 +292,9 @@ class AppraisalReducer:
     def _attention_claim(
         self,
         observation: LifeObservation,
-        now_timestamp: str,
+        occurred_timestamp: str,
+        *,
+        playback_duration_seconds: float | None,
     ) -> AttentionClaim | None:
         rule = _ATTENTION_RULES.get(observation.kind)
         if (
@@ -220,14 +305,41 @@ class AppraisalReducer:
         if rule is None:
             return None
         target_id = self._target_id(observation, rule.target_kind)
+        ttl_seconds = rule.ttl_seconds
+        if observation.kind is ObservationKind.SPEECH_STARTED:
+            if (
+                isinstance(playback_duration_seconds, bool)
+                or not isinstance(playback_duration_seconds, (int, float))
+                or not math.isfinite(float(playback_duration_seconds))
+                or float(playback_duration_seconds) < 0.0
+            ):
+                raise ValueError(
+                    "speech.started requires finite non-negative playback duration"
+                )
+            ttl_seconds = float(playback_duration_seconds) + 2.0
+        assert ttl_seconds is not None
+        stable_claim = observation.kind in {
+            ObservationKind.REQUEST_STARTED,
+            ObservationKind.REQUEST_ACTIVITY,
+            ObservationKind.SPEECH_STARTED,
+        }
+        claim_seed = target_id if stable_claim else observation.observation_id
+        claim_prefix = (
+            "claim:request"
+            if observation.kind
+            in {ObservationKind.REQUEST_STARTED, ObservationKind.REQUEST_ACTIVITY}
+            else "claim:playback"
+            if observation.kind is ObservationKind.SPEECH_STARTED
+            else "claim"
+        )
         return AttentionClaim(
-            claim_id=self._derived_id("claim", observation.observation_id),
+            claim_id=self._derived_id(claim_prefix, claim_seed),
             target_kind=rule.target_kind,
             target_id=target_id,
             priority=rule.priority,
             source_observation_id=observation.observation_id,
-            acquired_at_utc=now_timestamp,
-            expires_at_utc=add_seconds(now_timestamp, rule.ttl_seconds),
+            acquired_at_utc=occurred_timestamp,
+            expires_at_utc=add_seconds(occurred_timestamp, ttl_seconds),
             interruptible=rule.interruptible,
         )
 
@@ -342,4 +454,18 @@ class AppraisalReducer:
         return f"{prefix}:{digest}"
 
 
-__all__ = ["AppraisalReducer"]
+def playback_target_id(request_id: str, generation: int) -> str:
+    """Return the bounded owner identity shared by playback start and stop."""
+
+    if type(request_id) is not str or not request_id:
+        raise ValueError("request_id must be a non-empty string")
+    if type(generation) is not int or generation < 0:
+        raise ValueError("generation must be a non-negative integer")
+    candidate = f"{request_id}:generation:{generation}"
+    if len(candidate) <= 256:
+        return candidate
+    digest = sha256(request_id.encode("utf-8")).hexdigest()
+    return f"request:{digest}:generation:{generation}"
+
+
+__all__ = ["AppraisalReducer", "playback_target_id"]

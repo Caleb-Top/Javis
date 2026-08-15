@@ -132,3 +132,47 @@ def test_voice_turn_expiry_and_capacity_are_bounded():
             request_id="request-1",
         )
     assert registry.stats()["entries"] == 0
+
+
+def test_committed_voice_turn_cannot_be_registered_again_after_ttl():
+    now = [10.0]
+    registry = VoiceTurnRegistry("boot-1", ttl_seconds=2, clock=lambda: now[0])
+    reference = _register(registry, transcript="hello")
+    registry.reserve(
+        reference,
+        transcript="hello",
+        session_id="session-1",
+        request_id="request-1",
+    )
+    registry.commit(
+        reference,
+        session_id="session-1",
+        request_id="request-1",
+    )
+
+    now[0] = 13.0
+
+    with pytest.raises(VoiceTurnRegistryError, match="committed"):
+        _register(registry, transcript="hello")
+
+
+def test_reserved_voice_turn_survives_cleanup_until_commit_or_rollback():
+    now = [10.0]
+    registry = VoiceTurnRegistry("boot-1", ttl_seconds=2, clock=lambda: now[0])
+    reference = _register(registry, transcript="hello")
+    expected = registry.reserve(
+        reference,
+        transcript="hello",
+        session_id="session-1",
+        request_id="request-1",
+    )
+
+    now[0] = 13.0
+    assert registry.stats()["reserved"] == 1
+
+    committed = registry.commit(
+        reference,
+        session_id="session-1",
+        request_id="request-1",
+    )
+    assert committed == expected

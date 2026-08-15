@@ -182,6 +182,7 @@ def test_unclean_previous_boot_enters_explicit_recovery(tmp_path):
         assert runtime.life.status()["previous_run_reason"] == "unclean_shutdown"
         assert runtime.life.snapshot().lifecycle_state.value == "recovering"
         assert runtime.life.snapshot().recovery_required is True
+        assert runtime.life.expression().base_state.value == "error"
         assert "life.recovery.required" in {
             event["event_type"] for event in runtime.life.recent_events(limit=20)
         }
@@ -255,6 +256,28 @@ def test_stopped_wildcard_callback_is_a_noop(tmp_path):
 
     assert runtime.life.status()["journal_accepted"] == before
     assert runtime.life.stop() is True
+
+
+def test_client_offline_expression_keeps_l0_priority_over_l1_attention(tmp_path):
+    runtime = create_runtime(
+        tmp_path / "code",
+        startup_side_effects=False,
+        data_root=tmp_path / "data",
+    )
+    try:
+        runtime.event_bus.publish(
+            "request.accepted",
+            {"session_id": "s1", "request_id": "r1"},
+            source="conversation",
+        )
+        runtime.event_bus.publish("client.offline", {}, source="client")
+
+        assert runtime.life.snapshot().lifecycle_state.value == "offline"
+        assert runtime.life.expression().base_state.value == "offline"
+        assert runtime.life.expression().gaze_target.value == "none"
+        assert runtime.life.expression().voice_activity.value == "silent"
+    finally:
+        runtime.close()
 
 
 def test_flush_timeout_never_writes_a_clean_checkpoint(tmp_path, monkeypatch):

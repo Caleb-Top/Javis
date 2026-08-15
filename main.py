@@ -112,6 +112,7 @@ from voice.native_capture import (
 )
 from voice.continuous_capture import continuous_capture_manager
 from voice.native_playback import NativePlaybackManager
+from voice.playback_events import PlaybackLifecyclePublisher
 from voice.runtime_diagnostics import VoiceDiagnosticsCollector
 from voice.stt import get_diagnostics as get_stt_diagnostics, preload_model
 from voice.streaming_ws import get_gateway_diagnostics, serve_continuous_voice_stream
@@ -187,7 +188,14 @@ engine = runtime.engine
 agent = runtime.agent
 SKILL_LIST = runtime.skill_list
 CURRENT_SKILL = runtime.current_skill
-native_playback_manager = NativePlaybackManager(service=continuous_capture_manager.service)
+playback_lifecycle_publisher = PlaybackLifecyclePublisher(
+    runtime_boot_id=str(runtime.life.status().get("boot_id") or "runtime-boot-unavailable"),
+    duration_sink=runtime.life.observe_playback,
+)
+native_playback_manager = NativePlaybackManager(
+    service=continuous_capture_manager.service,
+    lifecycle=playback_lifecycle_publisher,
+)
 voice_diagnostics_collector = VoiceDiagnosticsCollector(
     capture_getter=get_capture_diagnostics,
     continuous_getter=continuous_capture_manager.status,
@@ -444,6 +452,7 @@ async def ws_voice_stream(ws: WebSocket):
         continuous_capture_manager,
         authorize=authorize_runtime_websocket,
         voice_turn_registry=voice_turn_registry,
+        life_observer=runtime.life.observe_voice_event,
     )
 
 
@@ -469,6 +478,13 @@ async def api_voice_playback_speak(request: Request, data: dict = Body(default={
     text = str(data.get("text", "") or "").strip()[:3000]
     if not text:
         return {"ok": False, "error": "text is required", "active": False}
+    session_id=data.get("session_id")
+    request_id=data.get("request_id")
+    try:
+        NativePlaybackManager._validate_stop_id(session_id, "session_id")
+        NativePlaybackManager._validate_stop_id(request_id, "request_id")
+    except ValueError as error:
+        return {"ok": False, "error": str(error), "active": False}
     reservation = await asyncio.to_thread(native_playback_manager.reserve)
     from voice.tts import synthesize
 
@@ -493,15 +509,33 @@ async def api_voice_playback_speak(request: Request, data: dict = Body(default={
             None,
             None,
             reservation,
+            session_id=session_id,
+            request_id=request_id,
         )
     except Exception as error:
         return {"ok": False, "error": str(error), "active": False}
     return {**result, "mime": mime}
 
 @app.post("/api/voice/playback/stop")
-async def api_voice_playback_stop(request: Request):
+async def api_voice_playback_stop(request: Request, data: dict = Body(default={})):
     _require_runtime_http(request, "playback")
-    return await asyncio.to_thread(native_playback_manager.stop)
+    playback_id=data.get("playback_id")
+    generation=data.get("generation")
+    session_id=data.get("session_id")
+    request_id=data.get("request_id")
+    identity = (playback_id, generation, session_id, request_id)
+    if not any(value is not None for value in identity):
+        return await asyncio.to_thread(native_playback_manager.stop)
+    try:
+        return await asyncio.to_thread(
+            native_playback_manager.stop,
+            playback_id=playback_id,
+            generation=generation,
+            session_id=session_id,
+            request_id=request_id,
+        )
+    except (TypeError, ValueError) as error:
+        return {"ok": False, "error": str(error), "active": False}
 
 @app.post("/api/voice/capture/start")
 async def api_voice_capture_start(request: Request, data: dict = Body(default={})):

@@ -13,6 +13,16 @@ export type BackendClientOptions = {
   runtimeAccessToken?(scope: RuntimeAccessScope): string;
 };
 
+export type VoiceProvenance = Readonly<{
+  runtime_boot_id: string;
+  session_id: string;
+  owner_generation: number;
+  voice_sequence: number;
+  voice_turn: number;
+  nonce: string;
+  proof: string;
+}>;
+
 export type RequestTimeouts = {
   acceptedMs: number;
   firstResponseMs: number;
@@ -73,9 +83,9 @@ export type BackendClient = {
   connect(): void;
   dispose(): void;
   refreshRuntimeAccess(): void;
-  send(text: string): string | null;
+  send(text: string, voiceProvenance?: VoiceProvenance): string | null;
   sendVoice(audioBase64: string): string | null;
-  cancel(reason?: string): boolean;
+  cancel(requestId: string, reason: string): boolean;
   checkBackendHealth(): Promise<boolean>;
   get<T>(path: string, signal?: AbortSignal): Promise<T>;
   post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T>;
@@ -95,6 +105,16 @@ const DEFAULT_REQUEST_TIMEOUTS: RequestTimeouts = {
   overallMs: 60000,
 };
 const MAX_RETIRED_REQUEST_IDS = 128;
+const MAX_VOICE_COUNTER = 2_147_483_647;
+const VOICE_PROVENANCE_FIELDS = [
+  "runtime_boot_id",
+  "session_id",
+  "owner_generation",
+  "voice_sequence",
+  "voice_turn",
+  "nonce",
+  "proof",
+] as const;
 
 type RequestWatchdogs = {
   acceptedTimer: number | null;
@@ -108,6 +128,78 @@ function isRequestTerminal(type: string): boolean {
   return type === "request.completed"
     || type === "request.cancelled"
     || type === "request.failed";
+}
+
+export function normalizeVoiceProvenance(
+  value: VoiceProvenance,
+  expectedSessionId: string,
+): VoiceProvenance {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("voice provenance must be an object");
+  }
+  const record = value as unknown as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== VOICE_PROVENANCE_FIELDS.length
+    || VOICE_PROVENANCE_FIELDS.some(
+      (field) => !Object.prototype.hasOwnProperty.call(record, field),
+    )
+  ) {
+    throw new TypeError("voice provenance has an invalid schema");
+  }
+  if (
+    typeof record.runtime_boot_id !== "string"
+    || typeof record.session_id !== "string"
+    || typeof record.nonce !== "string"
+    || typeof record.proof !== "string"
+  ) {
+    throw new TypeError("voice provenance has an invalid string field");
+  }
+  const runtimeBootId = record.runtime_boot_id.trim();
+  const provenanceSessionId = record.session_id.trim();
+  const nonce = record.nonce.trim();
+  const proof = record.proof.trim();
+  const identifiers = [runtimeBootId, provenanceSessionId];
+  if (identifiers.some((identifier) => (
+    !identifier
+    || identifier.length > 256
+    || /[\r\n\0]/.test(identifier)
+  ))) {
+    throw new TypeError("voice provenance has an invalid identity");
+  }
+  if (provenanceSessionId !== expectedSessionId) {
+    throw new TypeError("voice provenance belongs to another session");
+  }
+  const counters = [
+    record.owner_generation,
+    record.voice_sequence,
+    record.voice_turn,
+  ];
+  if (counters.some((counter) => (
+    typeof counter !== "number"
+    || !Number.isInteger(counter)
+    || counter < 0
+    || counter > MAX_VOICE_COUNTER
+  ))) {
+    throw new TypeError("voice provenance has an invalid counter");
+  }
+  if (
+    nonce.length < 16
+    || nonce.length > 128
+    || /[\r\n\0]/.test(nonce)
+    || !/^[0-9a-f]{64}$/.test(proof)
+  ) {
+    throw new TypeError("voice provenance has invalid proof material");
+  }
+  return Object.freeze({
+    runtime_boot_id: runtimeBootId,
+    session_id: provenanceSessionId,
+    owner_generation: counters[0] as number,
+    voice_sequence: counters[1] as number,
+    voice_turn: counters[2] as number,
+    nonce,
+    proof,
+  });
 }
 
 export function createBackendClient(options: BackendClientOptions): BackendClient {
@@ -558,10 +650,13 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     connect();
   }
 
-  function send(text: string): string | null {
+  function send(text: string, voiceProvenance?: VoiceProvenance): string | null {
     if (disposed) return null;
     const clean = text.trim();
     if (!clean) return null;
+    const verifiedVoiceProvenance = voiceProvenance === undefined
+      ? undefined
+      : normalizeVoiceProvenance(voiceProvenance, sessionId);
     if (currentRequestId) {
       retireRequest(currentRequestId);
       queue.cancel(currentRequestId);
@@ -587,6 +682,9 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
         session_id: sessionId,
         interaction_mode: "live",
         protocol_version: 2,
+        ...(verifiedVoiceProvenance
+          ? { voice_provenance: verifiedVoiceProvenance }
+          : {}),
       },
     });
     return requestId;
@@ -630,31 +728,35 @@ export function createBackendClient(options: BackendClientOptions): BackendClien
     return requestId;
   }
 
-  function cancel(reason = "user interrupt"): boolean {
+  function cancel(requestId: string, reason: string): boolean {
     if (disposed) return false;
-    if (!currentRequestId) return false;
-    const requestId = currentRequestId;
-    retireRequest(requestId);
-    clearRequestWatchdogs(requestId);
-    currentRequestId = null;
-    pendingApprovalId = "";
-    publishReliability({ requestPhase: "terminal" });
-    if (queue.cancel(requestId)) {
+    const targetRequestId = requestId.trim();
+    const cleanReason = reason.trim();
+    if (!targetRequestId || !cleanReason) return false;
+    const targetsCurrentRequest = currentRequestId === targetRequestId;
+    retireRequest(targetRequestId);
+    clearRequestWatchdogs(targetRequestId);
+    if (targetsCurrentRequest) {
+      currentRequestId = null;
+      pendingApprovalId = "";
+      publishReliability({ requestPhase: "terminal" });
+    }
+    if (queue.cancel(targetRequestId)) {
       return true;
     }
     const payload = {
       type: "conversation.cancel",
       payload: {
         session_id: sessionId,
-        request_id: requestId,
-        reason,
+        request_id: targetRequestId,
+        reason: cleanReason,
         protocol_version: 2,
       },
     };
     if (!sendWire(payload)) {
       queue.enqueue({
-        requestId: `cancel-${requestId}`,
-        dedupeKey: `cancel-${requestId}`,
+        requestId: `cancel-${targetRequestId}`,
+        dedupeKey: `cancel-${targetRequestId}`,
         payload,
         risk: "normal",
         createdAt: Date.now(),

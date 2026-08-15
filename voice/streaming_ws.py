@@ -7,6 +7,7 @@ from collections import OrderedDict, deque
 import hashlib
 import hmac
 import inspect
+import logging
 import math
 import secrets
 import threading
@@ -19,6 +20,9 @@ from core.runtime_access import (
     websocket_access_context,
     websocket_access_remaining,
 )
+
+
+logger = logging.getLogger("jarvis.voice.streaming")
 
 
 MAX_DIAGNOSTIC_COUNTER = (1 << 63) - 1
@@ -331,6 +335,7 @@ async def serve_continuous_voice_stream(
     diagnostics: VoiceGatewayDiagnostics | None = None,
     authorize=None,
     voice_turn_registry=None,
+    life_observer=None,
 ) -> None:
     metrics = diagnostics or _gateway_diagnostics
     metrics.handler_started()
@@ -347,6 +352,7 @@ async def serve_continuous_voice_stream(
                 metrics,
                 accept_subprotocol="javis-runtime-v1",
                 voice_turn_registry=voice_turn_registry,
+                life_observer=life_observer,
             )
         else:
             await _serve_continuous_voice_stream(
@@ -354,6 +360,7 @@ async def serve_continuous_voice_stream(
                 manager,
                 metrics,
                 voice_turn_registry=voice_turn_registry,
+                life_observer=life_observer,
             )
     finally:
         metrics.handler_finished()
@@ -366,6 +373,7 @@ async def _serve_continuous_voice_stream(
     *,
     accept_subprotocol=None,
     voice_turn_registry=None,
+    life_observer=None,
 ) -> None:
     if accept_subprotocol:
         await ws.accept(subprotocol=accept_subprotocol)
@@ -386,6 +394,45 @@ async def _serve_continuous_voice_stream(
             return
         metrics.record_error(category, recoverable=recoverable)
         failure_recorded = True
+
+    def observe_lifecycle(event: dict) -> None:
+        if life_observer is None:
+            return
+        event_type = event.get("type")
+        if event_type not in {
+            "audio.stream.ready",
+            "audio.stream.stopped",
+            "audio.error",
+        }:
+            return
+        redacted = {
+            "type": event_type,
+            "sequence": event.get("sequence"),
+            "owner_generation": expected_owner_generation,
+        }
+        timestamp = event.get("timestamp")
+        if (
+            isinstance(timestamp, str)
+            and len(timestamp) <= 64
+            and not any(character in timestamp for character in "\r\n\x00")
+        ):
+            redacted["timestamp"] = timestamp
+        monotonic_offset_ms = event.get("monotonic_offset_ms")
+        if type(monotonic_offset_ms) is int and monotonic_offset_ms >= 0:
+            redacted["monotonic_offset_ms"] = monotonic_offset_ms
+        try:
+            result = life_observer(
+                redacted,
+                session_id=session_id,
+                owner_generation=expected_owner_generation,
+            )
+            if inspect.isawaitable(result):
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+                raise TypeError("voice life observer must be synchronous")
+        except Exception as error:
+            logger.warning("Voice life observer failed: %s", type(error).__name__)
 
     async def send_json(message: dict) -> None:
         try:
@@ -580,6 +627,7 @@ async def _serve_continuous_voice_stream(
                 record_failure("event_pump_failure", recoverable=True)
                 raise
             for event in events:
+                observe_lifecycle(event)
                 outbound = event
                 if event.get("type") == "transcript.final" and voice_turn_registry is not None:
                     outbound = dict(event)

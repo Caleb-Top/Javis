@@ -220,3 +220,13 @@ def test_snapshot_lazily_expires_and_records_idle_transition_time():
     assert snapshot.target_id is None
     assert snapshot.expires_at_utc is None
     assert snapshot.since_utc == _time(4)
+
+
+def test_active_claim_storage_is_bounded_without_dropping_the_winner():
+    coordinator = AttentionCoordinator(_time(0), claim_capacity=2)
+    coordinator.apply(_claim("recovery", 50, 1, 10))
+    coordinator.apply(_claim("presence", 55, 2, 3))
+    coordinator.apply(_claim("request", 70, 3, 60))
+
+    assert coordinator.active_claim_count == 2
+    assert coordinator.snapshot().target_id == "target-request"

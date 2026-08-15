@@ -1053,6 +1053,82 @@ class ContinuousVoiceGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("pcm", repr(socket.sent).lower())
 
+    async def test_life_observer_receives_only_redacted_voice_lifecycle_metadata(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {"session_id": "session-1"},
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+        observed = []
+
+        def observe(event, *, session_id, owner_generation):
+            observed.append((event, session_id, owner_generation))
+
+        await serve_continuous_voice_stream(
+            socket,
+            FakeManager(),
+            life_observer=observe,
+        )
+
+        self.assertEqual(
+            [event[0]["type"] for event in observed],
+            ["audio.stream.ready", "audio.stream.stopped"],
+        )
+        self.assertTrue(all(item[1:] == ("session-1", 0) for item in observed))
+        self.assertTrue(
+            all(
+                set(event) <= {
+                    "type",
+                    "sequence",
+                    "owner_generation",
+                    "timestamp",
+                    "monotonic_offset_ms",
+                }
+                for event, _, _ in observed
+            )
+        )
+        self.assertNotIn("text", repr(observed).lower())
+
+    async def test_life_observer_failure_does_not_stop_audio_event_delivery(self):
+        socket = FakeSocket(
+            [
+                {
+                    "type": "audio.stream.start",
+                    "payload": {"session_id": "session-1"},
+                },
+                {
+                    "type": "audio.stream.stop",
+                    "payload": {"session_id": "session-1"},
+                },
+            ]
+        )
+
+        def broken_observer(event, *, session_id, owner_generation):
+            raise RuntimeError("life unavailable")
+
+        await serve_continuous_voice_stream(
+            socket,
+            FakeManager(),
+            life_observer=broken_observer,
+        )
+
+        self.assertEqual(
+            [message["type"] for message in socket.sent],
+            [
+                "audio.stream.ready",
+                "speech.start",
+                "transcript.final",
+                "audio.stream.stopped",
+            ],
+        )
+
     async def test_final_transcript_carries_backend_voice_provenance(self):
         socket = FakeSocket(
             [

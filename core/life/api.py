@@ -8,7 +8,7 @@ import threading
 from collections.abc import Mapping
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 
 logger = logging.getLogger("jarvis.life.api")
@@ -48,6 +48,45 @@ def _redact_for_api(value: Any) -> Any:
     return value
 
 
+def _wire_mapping(value: Any) -> dict[str, Any]:
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        value = value.to_dict()
+    if not isinstance(value, Mapping):
+        raise TypeError("life API surface must be a mapping")
+    return {str(key): item for key, item in value.items()}
+
+
+def _snapshot_revision(life: Any) -> int:
+    wire = _wire_mapping(life.snapshot())
+    revision = wire.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise TypeError("life snapshot revision must be an integer")
+    return revision
+
+
+def _inner_state_wire(
+    life: Any,
+    *,
+    snapshot_revision: int | None = None,
+) -> dict[str, Any] | None:
+    for name in ("inner_state_snapshot", "inner_state"):
+        if not hasattr(life, name):
+            continue
+        candidate = getattr(life, name)
+        try:
+            surface = candidate() if callable(candidate) else candidate
+        except RuntimeError:
+            return None
+        if surface is None:
+            return None
+        wire = _redact_for_api(_wire_mapping(surface))
+        if snapshot_revision is not None:
+            if wire.get("source_life_snapshot_revision") != snapshot_revision:
+                return None
+        return wire
+    return None
+
+
 def create_life_router(life: Any) -> APIRouter:
     """Build the L0 read-only router around one runtime-owned LifeService."""
 
@@ -64,6 +103,16 @@ def create_life_router(life: Any) -> APIRouter:
     @router.get("/lineage")
     async def lineage() -> dict[str, Any]:
         return {"ok": True, "lineage": life.lineage_summary().to_dict()}
+
+    @router.get("/inner-state")
+    async def inner_state() -> dict[str, Any]:
+        wire = _inner_state_wire(
+            life,
+            snapshot_revision=_snapshot_revision(life),
+        )
+        if wire is None:
+            raise HTTPException(status_code=503, detail="life inner state unavailable")
+        return {"ok": True, "inner_state": wire}
 
     @router.get("/events")
     async def events(
@@ -166,11 +215,18 @@ class LifeSessionPublisher:
             snapshot, expression = latest
             snapshot_wire = snapshot.to_dict()
             expression_wire = expression.to_dict()
+            inner_state_wire = _inner_state_wire(
+                self.life,
+                snapshot_revision=snapshot_wire.get("revision"),
+            )
             for session_id in self.conversation_hub.subscribed_sessions():
-                for event_type, payload in (
+                events = [
                     ("life.snapshot", snapshot_wire),
                     ("life.expression", expression_wire),
-                ):
+                ]
+                if inner_state_wire is not None:
+                    events.append(("life.inner_state.changed", inner_state_wire))
+                for event_type, payload in events:
                     try:
                         await self.conversation_hub.publish_system_event(
                             session_id,

@@ -127,6 +127,15 @@ let diagnostics: ReturnType<typeof createDiagnosticsPanel>;
 let diagnosticsReturnMode: DesktopMode = "live";
 let voiceCapture!: ReturnType<typeof createVoiceCapture>;
 const voiceRequestIds = new Set<string>();
+type VoicePlaybackIdentity = Readonly<{
+  playbackId: string;
+  generation: number;
+  sessionId: string;
+  requestId: string;
+}>;
+let activeVoicePlayback: VoicePlaybackIdentity | null = null;
+let pendingVoicePlaybackRequestId: string | null = null;
+let voicePlaybackEpoch = 0;
 const sidecar = createSidecarClient();
 
 function createRuntimeClientInstanceId(): string {
@@ -327,23 +336,62 @@ const client = createBackendClient({
       ) {
         const voiceTurn = voiceRequestIds.delete(event.request_id);
         if (event.type === "request.completed" && voiceTurn && snapshot.response.trim()) {
+          const playbackRequestId = event.request_id;
+          const playbackEpoch = ++voicePlaybackEpoch;
+          pendingVoicePlaybackRequestId = playbackRequestId;
           void client.post<{
             ok: boolean;
             active: boolean;
             duration_ms?: number;
-          }>("/api/voice/playback/speak", { text: snapshot.response.trim() })
+            playback_id?: string;
+            generation?: number;
+          }>("/api/voice/playback/speak", {
+            text: snapshot.response.trim(),
+            session_id: conversationId,
+            request_id: playbackRequestId,
+          })
             .then((playback) => {
+              if (pendingVoicePlaybackRequestId === playbackRequestId) {
+                pendingVoicePlaybackRequestId = null;
+              }
               if (!playback.ok || !playback.active) return;
+              const playbackId = String(playback.playback_id || "");
+              const generation = Number(playback.generation);
+              if (!playbackId || !Number.isInteger(generation) || generation < 0) return;
+              const identity: VoicePlaybackIdentity = Object.freeze({
+                playbackId,
+                generation,
+                sessionId: conversationId,
+                requestId: playbackRequestId,
+              });
+              if (playbackEpoch !== voicePlaybackEpoch) {
+                void client.post("/api/voice/playback/stop", {
+                  playback_id: identity.playbackId,
+                  generation: identity.generation,
+                  session_id: identity.sessionId,
+                  request_id: identity.requestId,
+                }).catch(() => undefined);
+                return;
+              }
+              activeVoicePlayback = identity;
               runtimeStateCoordinator.signal({
                 source: "voice",
                 state: "speaking",
                 timestamp: Date.now(),
                 detail: "正在回答",
               });
-              window.setTimeout(() => voiceCapture.resumeListeningState(), playback.duration_ms ?? 0);
+              window.setTimeout(() => {
+                if (activeVoicePlayback !== identity) return;
+                activeVoicePlayback = null;
+                if (!client.activeRequestId()) voiceCapture.resumeListeningState();
+              }, playback.duration_ms ?? 0);
             })
             .catch((error) => {
+              if (pendingVoicePlaybackRequestId === playbackRequestId) {
+                pendingVoicePlaybackRequestId = null;
+              }
               liveCaption.setText(error instanceof Error ? error.message : "语音播报失败");
+              voiceCapture.resumeListeningState();
             });
         }
         queueMicrotask(() => voiceCapture.resumeListeningState());
@@ -489,10 +537,28 @@ voiceCapture = createVoiceCapture(client, {
     const stored = readStringPreference("voice.inputDevice", "");
     return stored ? Number(stored) : undefined;
   },
-  onBargeIn: async () => {
+  onBargeIn: async ({ interruptedRequestId }) => {
+    const capturedPlayback = activeVoicePlayback;
+    const capturedPendingPlaybackRequestId = pendingVoicePlaybackRequestId;
+    voicePlaybackEpoch += 1;
+    if (activeVoicePlayback === capturedPlayback) activeVoicePlayback = null;
+    if (pendingVoicePlaybackRequestId === capturedPendingPlaybackRequestId) {
+      pendingVoicePlaybackRequestId = null;
+    }
     stopAudioPlayback();
-    await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
-    client.cancel("voice barge-in");
+    if (capturedPlayback) {
+      await client.post("/api/voice/playback/stop", {
+        playback_id: capturedPlayback.playbackId,
+        generation: capturedPlayback.generation,
+        session_id: capturedPlayback.sessionId,
+        request_id: capturedPlayback.requestId,
+      }).catch(() => undefined);
+    } else if (capturedPendingPlaybackRequestId) {
+      await client.post("/api/voice/playback/stop", {}).catch(() => undefined);
+    }
+    if (interruptedRequestId) {
+      client.cancel(interruptedRequestId, "voice barge-in");
+    }
   },
   onPartial: (text) => {
     liveCaption.setText(text);
@@ -503,9 +569,9 @@ voiceCapture = createVoiceCapture(client, {
   onLevel: (level) => {
     liveOrb.setAudioLevel(level);
   },
-  onTranscript: (text) => {
+  onTranscript: ({ text, voiceProvenance }) => {
     liveCaption.setText(text);
-    const requestId = client.send(text);
+    const requestId = client.send(text, voiceProvenance);
     if (requestId) voiceRequestIds.add(requestId);
   },
   onAudio: (audioBase64) => client.sendVoice(audioBase64),

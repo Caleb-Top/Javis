@@ -49,6 +49,22 @@ async function waitFor(predicate: () => boolean, timeoutMs = 200): Promise<void>
   assert.equal(predicate(), true, `condition was not met within ${timeoutMs} ms`);
 }
 
+function voiceProvenance(
+  sessionId: string,
+  turn: number,
+  sequence: number,
+): Record<string, unknown> {
+  return {
+    runtime_boot_id: "boot-voice-1",
+    session_id: sessionId,
+    owner_generation: 7,
+    voice_sequence: sequence,
+    voice_turn: turn,
+    nonce: `voice-nonce-${String(sequence).padStart(8, "0")}`,
+    proof: "b".repeat(64),
+  };
+}
+
 test("continuous native voice stays open across turns and barges in before final submit", async () => {
   const socket = new FakeVoiceSocket();
   let protocols: string[] | undefined;
@@ -68,7 +84,10 @@ test("continuous native voice stays open across turns and barges in before final
     noiseProfile: () => "strong",
     onBargeIn: async () => { order.push("barge-in"); },
     onPartial: (text) => { partials.push(text); },
-    onTranscript: (text) => { order.push(`final:${text}`); finals.push(text); },
+    onTranscript: (transcript) => {
+      order.push(`final:${transcript.text}`);
+      finals.push(transcript.text);
+    },
     onAudio: () => undefined,
     onState: (state) => { order.push(`state:${state}`); },
     onError: (message) => { throw new Error(message); },
@@ -85,13 +104,26 @@ test("continuous native voice stays open across turns and barges in before final
   ]);
   assert.equal((socket.sent[0].payload as Record<string, unknown>).session_id, "session-voice");
   assert.equal((socket.sent[0].payload as Record<string, unknown>).noise_profile, "strong");
-  socket.emit({ type: "speech.start" });
+  socket.emit({ type: "speech.start", sequence: 2 });
   socket.emit({ type: "transcript.partial", text: "first par" });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  socket.emit({ type: "transcript.final", text: "first turn", turn: 1 });
-  socket.emit({ type: "speech.start" });
+  socket.emit({
+    type: "transcript.final",
+    text: "first turn",
+    turn: 1,
+    sequence: 3,
+    voice_provenance: voiceProvenance("session-voice", 1, 3),
+  });
+  socket.emit({ type: "speech.start", sequence: 4 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  socket.emit({ type: "transcript.final", text: "second turn", turn: 2 });
+  socket.emit({
+    type: "transcript.final",
+    text: "second turn",
+    turn: 2,
+    sequence: 5,
+    voice_provenance: voiceProvenance("session-voice", 2, 5),
+  });
+  await waitFor(() => finals.length === 2);
 
   assert.deepEqual(partials, ["first par"]);
   assert.deepEqual(finals, ["first turn", "second turn"]);
@@ -102,6 +134,93 @@ test("continuous native voice stays open across turns and barges in before final
   await capture.pauseContinuous();
   assert.equal((socket.sent.at(-1)?.payload as Record<string, unknown>).session_id, "session-voice");
   assert.equal(capture.isContinuous(), false);
+});
+
+test("a final transcript waits for its immutable interruption barrier and submits once", async () => {
+  const socket = new FakeVoiceSocket();
+  let activeRequestId: string | null = "request-old";
+  let releaseInterruption!: () => void;
+  const delayedStop = new Promise<void>((resolve) => { releaseInterruption = resolve; });
+  const cancelled: Array<string | null> = [];
+  const submitted: Array<Record<string, unknown>> = [];
+  const client = {
+    sessionId: () => "session-barrier",
+    activeRequestId: () => activeRequestId,
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
+    onBargeIn: async ({ interruptedRequestId }) => {
+      await delayedStop;
+      cancelled.push(interruptedRequestId);
+    },
+    onTranscript: (transcript) => { submitted.push(transcript); },
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: (message) => { throw new Error(message); },
+  });
+
+  const started = capture.startContinuous();
+  socket.open();
+  socket.emit({ type: "audio.stream.ready" });
+  await started;
+  socket.emit({ type: "speech.start", sequence: 20 });
+  activeRequestId = "request-new";
+  const final = {
+    type: "transcript.final",
+    text: "new spoken request",
+    turn: 4,
+    sequence: 21,
+    voice_provenance: voiceProvenance("session-barrier", 4, 21),
+  };
+  socket.emit(final);
+  socket.emit(final);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(cancelled, []);
+  assert.deepEqual(submitted, []);
+  releaseInterruption();
+  await waitFor(() => submitted.length === 1);
+
+  assert.deepEqual(cancelled, ["request-old"]);
+  assert.deepEqual(submitted[0], {
+    text: "new spoken request",
+    turn: 4,
+    sequence: 21,
+    voiceProvenance: voiceProvenance("session-barrier", 4, 21),
+  });
+  await capture.stop();
+});
+
+test("continuous final transcripts fail closed when provenance is missing", async () => {
+  const socket = new FakeVoiceSocket();
+  const transcripts: Record<string, unknown>[] = [];
+  const errors: string[] = [];
+  const client = {
+    sessionId: () => "session-missing-provenance",
+    activeRequestId: () => null,
+    post: async () => ({ ok: true }),
+  } as unknown as BackendClient;
+  const capture = createVoiceCapture(client, {
+    openStream: () => socket as unknown as WebSocket,
+    onBargeIn: () => undefined,
+    onTranscript: (transcript) => { transcripts.push(transcript); },
+    onAudio: () => undefined,
+    onState: () => undefined,
+    onError: (message) => { errors.push(message); },
+  });
+
+  const started = capture.startContinuous();
+  socket.open();
+  socket.emit({ type: "audio.stream.ready" });
+  await started;
+  socket.emit({ type: "speech.start", sequence: 30 });
+  socket.emit({ type: "transcript.final", text: "unverified", turn: 5, sequence: 31 });
+  await waitFor(() => errors.length === 1);
+
+  assert.deepEqual(transcripts, []);
+  assert.match(errors[0], /provenance/i);
+  await capture.stop();
 });
 
 test("empty transcripts return continuous capture to listening without submitting text", async () => {
@@ -136,6 +255,7 @@ test("empty transcripts return continuous capture to listening without submittin
     input_rms: 0.12,
     input_peak: 0.42,
   });
+  await waitFor(() => emptyMessages.length === 1);
 
   assert.equal(states.length, statesBeforeEmpty + 1);
   assert.equal(states.at(-1), "listening");
@@ -385,7 +505,10 @@ test("the App sends only final transcripts and resumes listening after request t
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
   assert.match(main, /onPartial:\s*\(text\)[\s\S]*?liveCaption\.setText\(text\)/);
-  assert.match(main, /onTranscript:\s*\(text\)[\s\S]*?client\.send\(text\)/);
+  assert.match(
+    main,
+    /onTranscript:\s*\(\{\s*text,\s*voiceProvenance\s*\}\)[\s\S]*?client\.send\(text,\s*voiceProvenance\)/,
+  );
   assert.match(main, /request\.(completed|cancelled|failed)[\s\S]*?resumeListeningState/);
 });
 
@@ -428,10 +551,13 @@ test("voice turns use native playback and barge-in stops it before cancellation"
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
   assert.match(main, /voiceRequestIds\.add\(requestId\)/);
-  assert.match(main, /request\.completed[\s\S]*?\/api\/voice\/playback\/speak/);
   assert.match(
     main,
-    /onBargeIn:\s*async[\s\S]*?\/api\/voice\/playback\/stop[\s\S]*?client\.cancel/,
+    /request\.completed[\s\S]*?\/api\/voice\/playback\/speak[\s\S]*?session_id:\s*conversationId[\s\S]*?request_id:\s*playbackRequestId/,
+  );
+  assert.match(
+    main,
+    /onBargeIn:\s*async\s*\(\{\s*interruptedRequestId\s*\}\)[\s\S]*?const capturedPlayback[\s\S]*?\/api\/voice\/playback\/stop[\s\S]*?playback_id:\s*capturedPlayback\.playbackId[\s\S]*?client\.cancel\(interruptedRequestId,\s*"voice barge-in"\)/,
   );
 });
 

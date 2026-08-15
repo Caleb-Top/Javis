@@ -249,7 +249,27 @@ The model and every frontend are read-only consumers. State changes are determin
 
 **Commit:** `test(life): lock l1 release contracts`
 
-## 5. Test Commands
+## 5. Current Implementation Evidence
+
+| Scope | Status | Evidence |
+|---|---|---|
+| Tasks 1-6 contracts and deterministic reducers | Complete in the L1 worktree | runtime/capture authorization, immutable L1 contracts, atomic provenance, appraisal, attention, homeostasis and affect tests |
+| Tasks 7-9 production observations and presence lane | Complete in the L1 worktree | real conversation/voice/playback bridges, exact local invocation, request-scoped barge-in and generation-scoped playback |
+| Tasks 10-11 receipts and read-only surfaces | Complete in the L1 worktree | asynchronous thin receipts, all-incomplete restart recovery, inner-state API/push, model read-only summary and frontend compatibility bridge |
+| Task 12 static release contracts | Complete in the L1 worktree | release scans, operations guidance and truthful D-drive acceptance template |
+| Python main gate | PASS | 1178 tests + 28 subtests |
+| L1 broad gate | PASS | 227 tests |
+| App gate | PASS | 166 tests, TypeScript strict check and Vite production build |
+| Rust/Tauri gate | NOT EXECUTED | Cargo toolchain is unavailable on the current machine; no Rust source was changed by L1 |
+| Installer and D-drive manual gates | NOT EXECUTED | `docs/verification/JAVIS_L1_D_DRIVE_ACCEPTANCE.md` remains the required evidence record |
+
+Independent review also locked the failure boundaries: a receipt write failure
+cannot produce a clean checkpoint; playback TTL expires through the one
+service-owned timer; terminal playback generations cannot be revived by replay;
+restart recovery covers every incomplete receipt rather than only the visible
+recent window; and L0 offline/recovery expression semantics retain priority.
+
+## 6. Test Commands
 
 PowerShell does not expand pytest wildcards. Resolve lists before invocation:
 
@@ -261,7 +281,7 @@ $lifeTests = @(Get-ChildItem tests -Filter 'test_l*.py' -File | Sort-Object Name
 
 App tests/build use existing dependencies only. In an isolated worktree without `node_modules`, use the already installed formal-workspace dependencies through a temporary validated resolver mapping; do not install or alter lock files.
 
-## 6. Exit Rules
+## 7. Exit Rules
 
 - Automated success never marks D-drive or installer scenarios passed.
 - A missing production publisher removes the observation mapping; tests cannot invent one.

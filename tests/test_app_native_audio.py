@@ -1,12 +1,35 @@
 import base64
+import asyncio
 import io
+import os
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+os.environ["JAVIS_TEST_MODE"] = "1"
+os.environ["JAVIS_DISABLE_STARTUP_SIDE_EFFECTS"] = "1"
+
+
+class FakePlaybackApiManager:
+    def __init__(self):
+        self.reserve_calls = 0
+        self.play_calls = []
+        self.stop_calls = []
+
+    def reserve(self):
+        self.reserve_calls += 1
+        return 7
+
+    def play_reserved_wav(self, *args, **kwargs):
+        self.play_calls.append((args, kwargs))
+        return {"ok": True, "playback_id": "playback-1", "generation": 7}
+
+    def stop(self, **kwargs):
+        self.stop_calls.append(kwargs)
+        return {"ok": True, "stopped": bool(kwargs)}
 
 
 class NativeAudioContractTests(unittest.TestCase):
@@ -69,6 +92,68 @@ class NativeAudioContractTests(unittest.TestCase):
         self.assertIn("transcript.final", voice)
         self.assertIn('@app.websocket("/ws_voice_stream")', main)
         self.assertIn("serve_continuous_voice_stream", main)
+
+    def test_backend_wires_life_observers_and_scoped_playback_identity(self):
+        main = self.read("main.py")
+
+        self.assertIn("PlaybackLifecyclePublisher", main)
+        self.assertIn("duration_sink=runtime.life.observe_playback", main)
+        self.assertIn("life_observer=runtime.life.observe_voice_event", main)
+        self.assertIn('session_id=data.get("session_id")', main)
+        self.assertIn('request_id=data.get("request_id")', main)
+        self.assertNotIn('session_id=str(data.get("session_id")', main)
+        self.assertNotIn('request_id=str(data.get("request_id")', main)
+        for field in ("playback_id", "generation", "session_id", "request_id"):
+            self.assertIn(f'{field}=data.get("{field}")', main)
+
+    def test_speak_endpoint_forwards_session_and_request_identity(self):
+        import main
+
+        manager = FakePlaybackApiManager()
+        with (
+            patch.object(main, "_require_runtime_http"),
+            patch.object(main, "native_playback_manager", manager),
+            patch("voice.tts.synthesize", new=AsyncMock(return_value=(
+                base64.b64encode(b"wav").decode("ascii"),
+                "audio/wav",
+            ))),
+        ):
+            result = asyncio.run(main.api_voice_playback_speak(
+                object(),
+                {
+                    "text": "hello",
+                    "session_id": "session-1",
+                    "request_id": "request-1",
+                },
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(manager.reserve_calls, 1)
+        self.assertEqual(manager.play_calls[0][1], {
+            "session_id": "session-1",
+            "request_id": "request-1",
+        })
+
+    def test_stop_endpoint_forwards_complete_scope_and_preserves_empty_fallback(self):
+        import main
+
+        manager = FakePlaybackApiManager()
+        identity = {
+            "playback_id": "playback-1",
+            "generation": 7,
+            "session_id": "session-1",
+            "request_id": "request-1",
+        }
+        with (
+            patch.object(main, "_require_runtime_http"),
+            patch.object(main, "native_playback_manager", manager),
+        ):
+            scoped = asyncio.run(main.api_voice_playback_stop(object(), identity))
+            fallback = asyncio.run(main.api_voice_playback_stop(object(), {}))
+
+        self.assertTrue(scoped["stopped"])
+        self.assertFalse(fallback["stopped"])
+        self.assertEqual(manager.stop_calls, [identity, {}])
 
     def test_native_capture_encodes_pcm_as_valid_wav(self):
         from voice.native_capture import frames_to_wav_base64

@@ -70,7 +70,7 @@ class VoiceTurnRegistry:
         if len(self._secret) < 32:
             raise ValueError("voice turn registry secret must contain at least 32 bytes")
         self._entries: OrderedDict[tuple[str, str, int, int, int], _Entry] = OrderedDict()
-        self._committed: OrderedDict[tuple[str, str, int, int, int], float] = OrderedDict()
+        self._committed: OrderedDict[tuple[str, str, int, int, int], None] = OrderedDict()
         self._lock = threading.RLock()
 
     def register(
@@ -179,7 +179,7 @@ class VoiceTurnRegistry:
                 raise VoiceTurnRegistryError("voice reservation does not match request")
             provenance = self._provenance(key)
             del self._entries[key]
-            self._committed[key] = self._clock() + self.ttl_seconds
+            self._committed[key] = None
             self._committed.move_to_end(key)
             while len(self._committed) > self.capacity:
                 self._committed.popitem(last=False)
@@ -288,11 +288,9 @@ class VoiceTurnRegistry:
 
     def _cleanup(self, now: float) -> None:
         for key in tuple(self._entries):
-            if self._entries[key].expires_at <= now:
+            entry = self._entries[key]
+            if entry.state == "available" and entry.expires_at <= now:
                 del self._entries[key]
-        for key in tuple(self._committed):
-            if self._committed[key] <= now:
-                del self._committed[key]
 
     def _make_room(self) -> None:
         while len(self._entries) >= self.capacity:

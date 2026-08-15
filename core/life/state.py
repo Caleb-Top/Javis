@@ -318,6 +318,27 @@ class MinimalLifeStateMachine:
         self._explanation = event_type
         return True
 
+    def mark_semantic_change(
+        self,
+        *,
+        event_id: str,
+        now: float,
+        explanation: str,
+    ) -> bool:
+        """Advance the one public revision without changing lifecycle facts."""
+
+        normalized_event_id = _id(event_id, field_name="event_id")
+        if normalized_event_id == self._last_event_id:
+            return False
+        if type(explanation) is not str or not explanation:
+            raise ValueError("explanation must be a non-empty string")
+        event_epoch = _epoch(now)
+        self._revision += 1
+        self._last_event_id = normalized_event_id
+        self._updated_epoch = max(self._updated_epoch, event_epoch)
+        self._explanation = explanation[:128]
+        return True
+
     def snapshot(self) -> LifeSnapshot:
         lifecycle_state = (
             LifeCycleState.OFFLINE if self._client_offline else self._backend_state

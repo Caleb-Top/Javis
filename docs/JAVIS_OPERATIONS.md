@@ -288,3 +288,42 @@ $env:PYTHONPATH = $SourceRoot
 - 当前审计: `docs/JAVIS_CURRENT_AUDIT.md`
 - App V1 规格: `docs/superpowers/specs/2026-07-27-javis-app-v1-master-design.md`
 - 项目总账: `logs/JAVIS_MASTER_PLAN_AND_LOG_INDEX_2026-07-27.md`
+
+## L1 Presence Release Evidence
+
+This section defines the operator-only manual evidence required by L1 Task 12.
+It is a release truthfulness contract, not a claim that any installer or D-drive
+scenario has passed. Until the exact packaged build is exercised by a human on
+the installed target, every installer and D-drive line remains `NOT EXECUTED`.
+
+Use the matching checklist in `docs/verification/JAVIS_L1_D_DRIVE_ACCEPTANCE.md`
+and keep command output, screenshots, log paths, and exported artifacts for each
+gate. Do not prefill any pass/fail outcome before the human operator executes
+the installed-package scenario.
+
+Minimum evidence to capture:
+
+1. `GET /api/life/inner-state` and `GET /api/life/snapshot` from the exact
+   installed package while verifying Live/Code/Pet revision agreement.
+2. The `life.inner_state.changed` conversation push payload or a captured client
+   trace proving that all surfaces observed the same validated revision.
+3. The exact request and provenance material for the offline exact invocation
+   gate, including whether `voice_provenance` or text mode was used.
+4. Manual results for exact invocation offline, malicious local webpage
+   rejection, verified microphone provenance, delayed playback stop barge-in,
+   model switch continuity, restart recovery, and Live/Code/Pet revision
+   agreement.
+
+Named manual gates for the release checklist: exact invocation offline;
+malicious local webpage rejection; verified microphone provenance; delayed
+playback stop barge-in; model switch continuity; restart recovery; Live/Code/Pet
+revision agreement.
+
+Operator rules:
+
+- Never mutate source checkout files or the running package while collecting
+  acceptance evidence.
+- Never treat automated worktree tests as a substitute for the installed
+  package.
+- If a gate was not run on the exact installed package, record it as
+  `NOT EXECUTED`.

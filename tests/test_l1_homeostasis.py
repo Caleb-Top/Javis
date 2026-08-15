@@ -9,6 +9,7 @@ from core.life.l1.clock import ClockReading
 from core.life.l1.contracts import (
     AffectEvidence,
     AppraisalResult,
+    AttentionClaim,
     FunctionalAffectKind,
     ReasonCode,
     StateDimension,
@@ -31,12 +32,13 @@ def appraisal(
     reason: ReasonCode = ReasonCode.REQUEST_STARTED,
     expires_at_utc: str | None = None,
     evidence: tuple[AffectEvidence, ...] = (),
+    attention_claim: AttentionClaim | None = None,
 ) -> AppraisalResult:
     return AppraisalResult(
         schema_version=1,
         observation_id=observation_id,
         deltas=deltas,
-        attention_claim=None,
+        attention_claim=attention_claim,
         affect_evidence=evidence,
         reason_code=reason,
         confidence=1.0,
@@ -185,6 +187,47 @@ def test_semantic_threshold_accumulates_small_changes() -> None:
         appraisal("small-3", {StateDimension.ACTIVATION: 0.02}), utc(), 0
     )
     assert not reducer.has_semantic_change()
+
+
+def test_default_semantic_threshold_requires_change_over_one_hundredth() -> None:
+    reducer = HomeostasisReducer(utc(), 0)
+
+    assert not reducer.apply(
+        appraisal("below-threshold", {StateDimension.ACTIVATION: 0.009}), utc(), 0
+    )
+    assert reducer.apply(
+        appraisal("over-threshold", {StateDimension.ACTIVATION: 0.002}), utc(), 0
+    )
+
+
+def test_request_activity_is_aggregated_per_request_window() -> None:
+    reducer = HomeostasisReducer(utc(), 0)
+
+    def activity(observation_id: str, occurred: float) -> AppraisalResult:
+        claim = AttentionClaim(
+            claim_id="claim:request:request-1",
+            target_kind="request",
+            target_id="request-1",
+            priority=70,
+            source_observation_id=observation_id,
+            acquired_at_utc=utc(occurred),
+            expires_at_utc=utc(occurred + 60),
+            interruptible=True,
+        )
+        return appraisal(
+            observation_id,
+            {StateDimension.COGNITIVE_LOAD: 0.05},
+            reason=ReasonCode.REQUEST_ACTIVITY,
+            attention_claim=claim,
+        )
+
+    reducer.apply(activity("activity-1", 0), utc(), 0)
+    reducer.apply(activity("activity-2", 0.5), utc(), 0)
+    after_window_duplicate = reducer.snapshot().cognitive_load
+    reducer.apply(activity("activity-3", 1.001), utc(1.001), 1_001)
+
+    assert after_window_duplicate == pytest.approx(0.10)
+    assert reducer.snapshot().cognitive_load > after_window_duplicate
 
 
 def test_tick_reports_thresholded_decay_without_sleeping() -> None:

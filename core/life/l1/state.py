@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import RLock
 from types import MappingProxyType
 from typing import Final
@@ -17,7 +17,7 @@ from .clock import (
     decay_toward_baseline,
     format_utc_milliseconds,
 )
-from .contracts import AppraisalResult, HomeostasisSnapshot, StateDimension
+from .contracts import AppraisalResult, HomeostasisSnapshot, ReasonCode, StateDimension
 
 
 BASELINES = MappingProxyType(
@@ -31,8 +31,9 @@ HALF_LIVES_SECONDS = MappingProxyType(
     }
 )
 
-DEFAULT_SEMANTIC_THRESHOLD: Final = 0.02
+DEFAULT_SEMANTIC_THRESHOLD: Final = 0.01
 DEFAULT_OBSERVATION_CAPACITY: Final = 8_192
+DEFAULT_ACTIVITY_WINDOW_MS: Final = 1_000
 _DIMENSION_NAMES: Final = tuple(BASELINES)
 
 
@@ -94,7 +95,7 @@ def thresholded_semantic_change(
     )
     if threshold_value == 0.0:
         return any(difference > 0.0 for difference in differences)
-    return any(difference >= threshold_value for difference in differences)
+    return any(difference > threshold_value for difference in differences)
 
 
 class HomeostasisReducer:
@@ -134,6 +135,7 @@ class HomeostasisReducer:
         self._semantic_anchor = dict(self._values)
         self._observation_capacity = observation_capacity
         self._observations: OrderedDict[str, None] = OrderedDict()
+        self._activity_windows: OrderedDict[str, datetime] = OrderedDict()
         self._last_observation_id: str | None = None
 
     @classmethod
@@ -186,6 +188,9 @@ class HomeostasisReducer:
                 _, expiry = _utc(appraisal.expires_at_utc)
                 if parsed >= expiry:
                     return self._consume_semantic_change()
+
+            if self._aggregate_activity(appraisal):
+                return self._consume_semantic_change()
 
             for dimension, delta in appraisal.deltas.items():
                 name = dimension.value
@@ -255,6 +260,7 @@ class HomeostasisReducer:
             self._updated_at_datetime = parsed
             self._monotonic_ms = monotonic_value
             self._observations.clear()
+            self._activity_windows.clear()
             self._last_observation_id = None
             return self._snapshot_unlocked()
 
@@ -285,6 +291,24 @@ class HomeostasisReducer:
         while len(self._observations) > self._observation_capacity:
             self._observations.popitem(last=False)
 
+    def _aggregate_activity(self, appraisal: AppraisalResult) -> bool:
+        if appraisal.reason_code is not ReasonCode.REQUEST_ACTIVITY:
+            return False
+        claim = appraisal.attention_claim
+        if claim is None or claim.target_kind != "request":
+            raise ValueError("request activity requires a request attention claim")
+        _, occurred = _utc(claim.acquired_at_utc)
+        previous = self._activity_windows.get(claim.target_id)
+        if previous is not None and occurred <= previous + timedelta(
+            milliseconds=DEFAULT_ACTIVITY_WINDOW_MS
+        ):
+            return True
+        self._activity_windows[claim.target_id] = occurred
+        self._activity_windows.move_to_end(claim.target_id)
+        while len(self._activity_windows) > self._observation_capacity:
+            self._activity_windows.popitem(last=False)
+        return False
+
     def _semantic_changed_unlocked(self) -> bool:
         threshold = self._semantic_threshold
         differences = (
@@ -293,7 +317,7 @@ class HomeostasisReducer:
         )
         if threshold == 0.0:
             return any(difference > 0.0 for difference in differences)
-        return any(difference >= threshold for difference in differences)
+        return any(difference > threshold for difference in differences)
 
     def _consume_semantic_change(self) -> bool:
         changed = self._semantic_changed_unlocked()
@@ -317,6 +341,7 @@ class HomeostasisReducer:
 __all__ = [
     "BASELINES",
     "DEFAULT_SEMANTIC_THRESHOLD",
+    "DEFAULT_ACTIVITY_WINDOW_MS",
     "HALF_LIVES_SECONDS",
     "HomeostasisReducer",
     "decay_toward_baseline",

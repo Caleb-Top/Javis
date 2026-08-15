@@ -119,6 +119,24 @@ def _enum_override(value: Any, enum_type: type, field_name: str):
         raise ValueError(f"{field_name} has an unsupported value: {value!r}") from exc
 
 
+def _boolean_override(value: Any, field_name: str) -> bool | None:
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise ValueError(f"{field_name} must be a boolean")
+    return value
+
+
+def _text_override(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or not value or len(value) > 128:
+        raise ValueError(f"{field_name} must be a bounded non-empty string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field_name} must not contain control characters")
+    return value
+
+
 class ExpressionProjector:
     """Stateful monotonic projector; it never writes back to life state."""
 
@@ -133,8 +151,11 @@ class ExpressionProjector:
         now: float,
         *,
         intensity: float | None = None,
+        base_state: ExpressionBaseState | str | None = None,
         gaze_target: GazeTarget | str | None = None,
         voice_activity: VoiceActivity | str | None = None,
+        interrupt: bool | None = None,
+        explanation_code: str | None = None,
     ) -> ExpressionIntent:
         if not isinstance(snapshot, LifeSnapshot):
             raise ValueError("snapshot must be a LifeSnapshot")
@@ -142,7 +163,12 @@ class ExpressionProjector:
             raise StaleSnapshotError(
                 "stale snapshot revision cannot replace a newer expression"
             )
-        base_state = BASE_STATE_BY_ACTIVITY.get(snapshot.activity)
+        resolved_base_state = _enum_override(
+            base_state,
+            ExpressionBaseState,
+            "base_state",
+        )
+        base_state = resolved_base_state or BASE_STATE_BY_ACTIVITY.get(snapshot.activity)
         if base_state is None:
             raise ValueError(f"unsupported expression activity: {snapshot.activity!r}")
         generated_epoch = max(_epoch(now), self._last_generated_epoch)
@@ -161,6 +187,11 @@ class ExpressionProjector:
             VoiceActivity,
             "voice_activity",
         )
+        resolved_interrupt = _boolean_override(interrupt, "interrupt")
+        resolved_explanation_code = _text_override(
+            explanation_code,
+            "explanation_code",
+        )
         self._revision += 1
         self._last_snapshot_revision = snapshot.revision
         self._last_generated_epoch = generated_epoch
@@ -173,11 +204,15 @@ class ExpressionProjector:
             gaze_target=resolved_gaze or _DEFAULT_GAZE[base_state],
             voice_activity=resolved_voice or _DEFAULT_VOICE[base_state],
             transition_ms=_TRANSITION_MS[base_state],
-            interrupt=base_state in _INTERRUPTING_STATES,
+            interrupt=(
+                resolved_interrupt
+                if resolved_interrupt is not None
+                else base_state in _INTERRUPTING_STATES
+            ),
             source_snapshot_revision=snapshot.revision,
             generated_at=_timestamp(generated_epoch),
             expires_at=_timestamp(expiry),
-            explanation_code=base_state.value,
+            explanation_code=resolved_explanation_code or base_state.value,
         )
 
 

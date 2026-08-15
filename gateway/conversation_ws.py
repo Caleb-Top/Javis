@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from contextlib import suppress
 from typing import Any, Callable
 
@@ -23,6 +24,7 @@ from core.life.l1.contracts import (
     InputProvenance,
     InputVerification,
 )
+from core.life.l1.wake import DETERMINISTIC_LOCAL_LANE, PresenceResponder
 from core.runtime_access import websocket_access_remaining
 from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
@@ -41,6 +43,7 @@ class ConversationWebSocketGateway:
         stall_harness: ConversationStallHarness | None = None,
         authorize: Callable[[Any, str], Any] | None = None,
         voice_turn_registry=None,
+        presence_responder: PresenceResponder | None = None,
     ):
         self.runtime = runtime
         self.transcribe = transcribe
@@ -49,6 +52,7 @@ class ConversationWebSocketGateway:
         self.stall_harness = stall_harness
         self.authorize = authorize
         self.voice_turn_registry = voice_turn_registry
+        self.presence_responder = presence_responder or PresenceResponder()
 
     async def serve(self, ws) -> None:
         if self.authorize is not None:
@@ -280,6 +284,26 @@ class ConversationWebSocketGateway:
                 None,
                 None,
             )
+        try:
+            presence_decision = self.presence_responder.decide(
+                user_text,
+                session_id=command.session_id,
+                request_id=command.request_id,
+                idempotency_key=command.idempotency_key or command.request_id,
+                input_provenance=input_provenance,
+                now_monotonic_ms=time.monotonic() * 1000.0,
+            )
+        except (TypeError, ValueError) as exc:
+            if reservation_active:
+                self.voice_turn_registry.rollback(
+                    voice_reference,
+                    session_id=command.session_id,
+                    request_id=command.request_id,
+                )
+            raise ConversationProtocolError(
+                "invalid_presence_invocation", str(exc)[:200]
+            ) from exc
+
         request = ConversationRequest(
             session_id=command.session_id,
             request_id=command.request_id,
@@ -287,9 +311,18 @@ class ConversationWebSocketGateway:
             interaction_mode=str(command.payload.get("interaction_mode") or ""),
             idempotency_key=command.idempotency_key or command.request_id,
             input_provenance=input_provenance,
+            execution_lane=presence_decision.execution_lane,
         )
 
         async def runner(active_request, token):
+            if active_request.execution_lane == DETERMINISTIC_LOCAL_LANE:
+                if presence_decision.should_respond:
+                    yield {
+                        "type": "text_delta",
+                        "text": presence_decision.response_text,
+                    }
+                yield {"type": "done", "success": True, "detail": "presence"}
+                return
             if stall_mode is not None:
                 if self.stall_harness is None:
                     raise RuntimeError("stall mode requires an injected harness")

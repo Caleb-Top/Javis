@@ -67,7 +67,7 @@ def observation(
     [
         (
             ObservationKind.USER_INVOKED,
-            ObservationOutcome.NONE,
+            ObservationOutcome.STARTED,
             {StateDimension.ACTIVATION: 0.25, StateDimension.SOCIAL_PRESENCE: 0.55},
         ),
         (
@@ -87,7 +87,7 @@ def observation(
         ),
         (
             ObservationKind.APPROVAL_REQUIRED,
-            ObservationOutcome.STARTED,
+            ObservationOutcome.NONE,
             {StateDimension.CAUTION: 0.30, StateDimension.CERTAINTY: -0.15},
         ),
         (
@@ -180,9 +180,20 @@ def test_approval_resolution_with_unknown_outcome_fails_closed():
 
 def test_claim_ttls_and_targets_use_injected_time():
     reducer = AppraisalReducer()
-    invoked = reducer.reduce(observation(ObservationKind.USER_INVOKED), NOW)
-    listening = reducer.reduce(observation(ObservationKind.VOICE_LISTENING_STARTED), NOW)
-    request = reducer.reduce(observation(ObservationKind.REQUEST_STARTED), NOW)
+    invoked = reducer.reduce(
+        observation(ObservationKind.USER_INVOKED, outcome=ObservationOutcome.STARTED), NOW
+    )
+    listening = reducer.reduce(
+        observation(
+            ObservationKind.VOICE_LISTENING_STARTED,
+            outcome=ObservationOutcome.STARTED,
+        ),
+        NOW,
+    )
+    request = reducer.reduce(
+        observation(ObservationKind.REQUEST_STARTED, outcome=ObservationOutcome.STARTED),
+        NOW,
+    )
     approval = reducer.reduce(observation(ObservationKind.APPROVAL_REQUIRED), NOW)
 
     assert (invoked.attention_claim.priority, invoked.attention_claim.expires_at_utc) == (
@@ -203,11 +214,34 @@ def test_claim_ttls_and_targets_use_injected_time():
     )
 
 
+def test_delayed_observation_uses_occurrence_time_not_arrival_time():
+    event = replace(
+        observation(ObservationKind.REQUEST_STARTED, outcome=ObservationOutcome.STARTED),
+        occurred_at_utc="2026-08-12T09:59:00.000Z",
+    )
+
+    result = AppraisalReducer().reduce(event, NOW)
+
+    assert result.attention_claim is not None
+    assert result.attention_claim.acquired_at_utc == "2026-08-12T09:59:00.000Z"
+    assert result.attention_claim.expires_at_utc == NOW
+
+
+def test_future_observation_fails_closed():
+    event = replace(
+        observation(ObservationKind.REQUEST_STARTED, outcome=ObservationOutcome.STARTED),
+        occurred_at_utc="2026-08-12T10:00:00.001Z",
+    )
+
+    with pytest.raises(ValueError, match="future"):
+        AppraisalReducer().reduce(event, NOW)
+
+
 def test_high_risk_approval_uses_safety_priority_and_fault_ttl():
     result = AppraisalReducer().reduce(
         observation(
             ObservationKind.APPROVAL_REQUIRED,
-            outcome=ObservationOutcome.STARTED,
+            outcome=ObservationOutcome.NONE,
             risk=RiskLevel.HIGH,
         ),
         NOW,
@@ -234,6 +268,61 @@ def test_satisfied_can_only_come_from_goal_verified():
     assert verified.affect_evidence[0].reason_code is ReasonCode.GOAL_VERIFIED
 
 
+@pytest.mark.parametrize(
+    ("event", "message"),
+    [
+        (
+            observation(ObservationKind.GOAL_VERIFIED, outcome=ObservationOutcome.FAILED),
+            "verified",
+        ),
+        (
+            replace(
+                observation(ObservationKind.REQUEST_FAILED, outcome=ObservationOutcome.FAILED),
+                request_id=None,
+            ),
+            "request identity",
+        ),
+    ],
+)
+def test_malformed_semantic_outcomes_fail_closed(event, message):
+    with pytest.raises(ValueError, match=message):
+        AppraisalReducer().reduce(event, NOW)
+
+
+def test_request_activity_renews_one_request_claim_identity():
+    reducer = AppraisalReducer()
+    started = reducer.reduce(
+        observation(
+            ObservationKind.REQUEST_STARTED,
+            outcome=ObservationOutcome.STARTED,
+            observation_id="started",
+        ),
+        NOW,
+    )
+    activity = reducer.reduce(
+        observation(ObservationKind.REQUEST_ACTIVITY, observation_id="activity"),
+        NOW,
+    )
+
+    assert started.attention_claim is not None
+    assert activity.attention_claim is not None
+    assert activity.attention_claim.claim_id == started.attention_claim.claim_id
+
+
+def test_speech_claim_requires_and_uses_playback_duration():
+    event = observation(
+        ObservationKind.SPEECH_STARTED,
+        outcome=ObservationOutcome.STARTED,
+    )
+
+    with pytest.raises(ValueError, match="playback duration"):
+        AppraisalReducer().reduce(event, NOW)
+
+    result = AppraisalReducer().reduce(event, NOW, playback_duration_seconds=6)
+    assert result.attention_claim is not None
+    assert result.attention_claim.expires_at_utc == "2026-08-12T10:00:08.000Z"
+
+
 def test_same_observation_and_injected_time_are_field_for_field_deterministic():
     reducer = AppraisalReducer()
     event = observation(
@@ -246,9 +335,12 @@ def test_same_observation_and_injected_time_are_field_for_field_deterministic():
 
 
 def test_missing_attention_identity_fails_closed():
-    event = replace(observation(ObservationKind.REQUEST_STARTED), request_id=None)
+    event = replace(
+        observation(ObservationKind.REQUEST_STARTED, outcome=ObservationOutcome.STARTED),
+        request_id=None,
+    )
 
-    with pytest.raises(ValueError, match="target identity"):
+    with pytest.raises(ValueError, match="request identity"):
         AppraisalReducer().reduce(event, NOW)
 
 
