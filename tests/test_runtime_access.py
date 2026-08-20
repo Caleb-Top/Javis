@@ -1,14 +1,21 @@
 import asyncio
+import hashlib
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from core.runtime_access import (
+    ACTION_RUNTIME_ACCESS_SCOPES,
     ENVIRONMENT_RUNTIME_ACCESS_SCOPES,
+    RUNTIME_ACCESS_SCOPES,
     RuntimeAccessAuthority,
+    RuntimeAccessSession,
     capability_from_websocket_protocols,
     create_http_authorizer,
     create_websocket_authorizer,
+    validate_websocket_command,
+    websocket_runtime_session,
 )
 
 
@@ -74,6 +81,45 @@ def test_environment_scopes_extend_without_changing_existing_scope_catalog():
             origin=TAURI_ORIGIN,
             peer_host="127.0.0.1",
         ).allowed
+
+
+def test_l6_scope_catalog_is_exact_and_has_no_wildcard_semantics():
+    required = {
+        "conversation.read",
+        "conversation.write",
+        "conversation.cancel",
+        "diagnostics.run",
+        "intent.read",
+        "intent.write",
+        "action.read",
+        "action.execute",
+        "action.approve",
+        "action.recover",
+        "environment.grant",
+        "memory.write",
+        "config.read",
+        "config.write",
+        "permission.write",
+        "models.install",
+        "skills.write",
+        "evolution.write",
+        "control.read",
+        "control.cancel",
+        "control.root.issue",
+        "control.fuse.trip",
+        "control.fuse.reset",
+        "runtime.shutdown",
+        "workspace.write",
+    }
+    assert required <= ACTION_RUNTIME_ACCESS_SCOPES
+    assert ACTION_RUNTIME_ACCESS_SCOPES <= RUNTIME_ACCESS_SCOPES
+    assert all("*" not in scope for scope in RUNTIME_ACCESS_SCOPES)
+
+    authority = _authority()
+    with pytest.raises(ValueError, match="scope"):
+        authority.issue("desktop-main", ("action.*",))
+    with pytest.raises(ValueError, match="scope"):
+        authority.issue("desktop-main", ("conversation.write.extra",))
 
 
 def test_capability_is_scoped_bounded_and_never_exposed_by_diagnostics():
@@ -213,6 +259,76 @@ def test_websocket_authorizer_closes_before_accept_with_stable_codes():
     assert context["client_id_hash"]
     assert context["nonce_digest"]
     assert valid.token not in repr(context)
+    session = websocket_runtime_session(allowed)
+    assert isinstance(session, RuntimeAccessSession)
+    assert session.session_ref == context["session_ref"]
+    assert valid.token not in repr(session)
+    assert hashlib.sha256(valid.token.encode("ascii")).hexdigest() not in repr(session)
+
+
+def test_process_local_session_revalidates_scope_revocation_and_binding():
+    authority = _authority()
+    issued = authority.issue("desktop-main", ("conversation.read",), ttl_seconds=30)
+    decision, session = authority.open_session(
+        issued.token,
+        scope="conversation.read",
+        origin=TAURI_ORIGIN,
+        peer_host="127.0.0.1",
+    )
+    assert decision.allowed and session is not None
+    assert authority.validate_session(
+        session,
+        required_scopes=("conversation.read",),
+    ).allowed
+    assert authority.validate_session(
+        session,
+        required_scopes=("conversation.write",),
+    ).reason_code == "scope_denied"
+
+    forged = replace(session, client_id_hash="0" * 64)
+    assert authority.validate_session(
+        forged,
+        required_scopes=("conversation.read",),
+    ).reason_code == "session_invalid"
+
+    authority.revoke_client("desktop-main")
+    assert authority.validate_session(
+        session,
+        required_scopes=("conversation.read",),
+    ).reason_code == "capability_revoked"
+
+
+def test_process_local_session_revalidates_expiry_and_current_boot():
+    now = [100.0]
+    authority = _authority(now=lambda: now[0])
+    issued = authority.issue("desktop-main", ("conversation.read",), ttl_seconds=5)
+    _, session = authority.open_session(
+        issued.token,
+        scope="conversation.read",
+        origin=TAURI_ORIGIN,
+        peer_host="127.0.0.1",
+    )
+    assert session is not None
+    now[0] = 105.0
+    assert authority.validate_session(
+        session,
+        required_scopes=("conversation.read",),
+    ).reason_code == "capability_expired"
+
+    now[0] = 200.0
+    issued = authority.issue("desktop-main", ("conversation.read",), ttl_seconds=5)
+    _, session = authority.open_session(
+        issued.token,
+        scope="conversation.read",
+        origin=TAURI_ORIGIN,
+        peer_host="127.0.0.1",
+    )
+    assert session is not None
+    authority.rotate_boot("boot-2")
+    assert authority.validate_session(
+        session,
+        required_scopes=("conversation.read",),
+    ).reason_code == "boot_mismatch"
 
 
 def test_http_authorizer_uses_the_same_origin_peer_and_scope_policy():

@@ -14,7 +14,7 @@ import threading
 import time
 from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from typing import Any
 
 
@@ -35,15 +35,46 @@ MEMORY_RUNTIME_ACCESS_SCOPES = frozenset(
         "memory.read",
     }
 )
+ACTION_RUNTIME_ACCESS_SCOPES = frozenset(
+    {
+        "action.approve",
+        "action.execute",
+        "action.read",
+        "action.recover",
+        "config.read",
+        "config.write",
+        "control.cancel",
+        "control.fuse.reset",
+        "control.fuse.trip",
+        "control.read",
+        "control.root.issue",
+        "conversation.cancel",
+        "conversation.read",
+        "conversation.write",
+        "diagnostics.run",
+        "environment.grant",
+        "evolution.write",
+        "intent.read",
+        "intent.write",
+        "memory.write",
+        "models.install",
+        "permission.write",
+        "runtime.shutdown",
+        "skills.write",
+        "workspace.write",
+    }
+)
 RUNTIME_ACCESS_SCOPES = frozenset(
     {
+        # Explicit compatibility scope for clients shipped before L6. New
+        # clients receive conversation.read/conversation.write separately.
         "conversation",
         "diagnostics.read",
         "life.read",
         "playback",
         "voice.capture",
     }
-) | ENVIRONMENT_RUNTIME_ACCESS_SCOPES | MEMORY_RUNTIME_ACCESS_SCOPES
+) | ACTION_RUNTIME_ACCESS_SCOPES | ENVIRONMENT_RUNTIME_ACCESS_SCOPES | MEMORY_RUNTIME_ACCESS_SCOPES
 PACKAGED_ORIGINS = frozenset(
     {
         "tauri://localhost",
@@ -107,6 +138,27 @@ class RuntimeAccessPrincipal:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeAccessSession:
+    """Bearer-free handle to a capability retained only by this process."""
+
+    session_ref: str
+    token_digest: str = dataclass_field(repr=False)
+    client_id_hash: str = ""
+    runtime_boot_id: str = ""
+    deadline_epoch: float = 0.0
+    binding_source: str = ""
+
+    def safe_projection(self) -> dict[str, Any]:
+        return {
+            "session_ref": self.session_ref,
+            "client_id_hash": self.client_id_hash,
+            "runtime_boot_id": self.runtime_boot_id,
+            "deadline_epoch": self.deadline_epoch,
+            "binding_source": self.binding_source,
+        }
+
+
 @dataclass(frozen=True)
 class _Grant:
     runtime_boot_id: str
@@ -116,6 +168,16 @@ class _Grant:
     issued_at_epoch: float
     expires_at_epoch: float
     nonce_digest: str
+
+
+@dataclass(frozen=True)
+class _SessionBinding:
+    session_ref: str
+    token_digest: str = dataclass_field(repr=False)
+    client_id_hash: str = ""
+    runtime_boot_id: str = ""
+    deadline_epoch: float = 0.0
+    binding_source: str = ""
 
 
 def _bounded_id(value: Any, field_name: str, *, maximum: int = 256) -> str:
@@ -175,6 +237,7 @@ class RuntimeAccessAuthority:
         max_ttl_seconds: int = 300,
         token_factory: Callable[[], str] | None = None,
         nonce_factory: Callable[[], str] | None = None,
+        session_ref_factory: Callable[[], str] | None = None,
     ) -> None:
         self._runtime_boot_id = _bounded_id(runtime_boot_id, "runtime_boot_id")
         if type(max_active) is not int or max_active < 1 or max_active > 4096:
@@ -187,7 +250,9 @@ class RuntimeAccessAuthority:
         self._max_ttl_seconds = max_ttl_seconds
         self._token_factory = token_factory or (lambda: _random_urlsafe(32))
         self._nonce_factory = nonce_factory or (lambda: _random_urlsafe(16))
+        self._session_ref_factory = session_ref_factory or (lambda: _random_urlsafe(18))
         self._grants: OrderedDict[str, _Grant] = OrderedDict()
+        self._sessions: OrderedDict[str, _SessionBinding] = OrderedDict()
         self._reason_counts: Counter[str] = Counter()
         self._audit = deque(maxlen=64)
         self._lock = threading.RLock()
@@ -315,7 +380,7 @@ class RuntimeAccessAuthority:
                     close_code=4401,
                     grant=grant,
                 )
-            if requested_scope not in grant.scopes:
+            if not self._grant_has_scope(grant, requested_scope):
                 return self._deny_locked(
                     "scope_denied",
                     requested_scope,
@@ -338,6 +403,143 @@ class RuntimeAccessAuthority:
                     issued_at_epoch=grant.issued_at_epoch,
                     expires_at_epoch=grant.expires_at_epoch,
                     binding_source=_binding_source(origin),
+                ),
+            )
+
+    def open_session(
+        self,
+        token: str,
+        *,
+        scope: str,
+        origin: str,
+        peer_host: str,
+    ) -> tuple[RuntimeAccessDecision, RuntimeAccessSession | None]:
+        """Validate a bearer once and replace it with a process-local handle."""
+
+        decision = self.validate(
+            token,
+            scope=scope,
+            origin=origin,
+            peer_host=peer_host,
+        )
+        if not decision.allowed or decision.principal is None:
+            return decision, None
+        digest = _token_digest(str(token or ""))
+        session_ref = self._session_ref_factory()
+        if not _TOKEN_VALUE.fullmatch(session_ref):
+            raise RuntimeError("session reference factory returned an invalid value")
+        principal = decision.principal
+        binding = _SessionBinding(
+            session_ref=session_ref,
+            token_digest=digest,
+            client_id_hash=principal.client_id_hash,
+            runtime_boot_id=principal.runtime_boot_id,
+            deadline_epoch=principal.expires_at_epoch,
+            binding_source=principal.binding_source,
+        )
+        with self._lock:
+            if session_ref in self._sessions:
+                raise RuntimeError("session reference factory produced a duplicate")
+            self._sessions[session_ref] = binding
+            while len(self._sessions) > self._max_active * 2:
+                self._sessions.popitem(last=False)
+        return decision, RuntimeAccessSession(
+            session_ref=binding.session_ref,
+            token_digest=binding.token_digest,
+            client_id_hash=binding.client_id_hash,
+            runtime_boot_id=binding.runtime_boot_id,
+            deadline_epoch=binding.deadline_epoch,
+            binding_source=binding.binding_source,
+        )
+
+    def validate_session(
+        self,
+        session: RuntimeAccessSession,
+        *,
+        required_scopes: Iterable[str],
+    ) -> RuntimeAccessDecision:
+        """Revalidate current boot, revocation, expiry and exact command scopes."""
+
+        scopes = self._normalize_scopes(required_scopes)
+        primary_scope = scopes[0]
+        if not isinstance(session, RuntimeAccessSession):
+            return self._deny("session_invalid", primary_scope, close_code=4401)
+        now = self._clock()
+        with self._lock:
+            if session.runtime_boot_id != self._runtime_boot_id:
+                self._sessions.pop(session.session_ref, None)
+                return self._deny_locked(
+                    "boot_mismatch",
+                    primary_scope,
+                    close_code=4401,
+                )
+            if session.deadline_epoch <= now:
+                self._sessions.pop(session.session_ref, None)
+                self._grants.pop(session.token_digest, None)
+                return self._deny_locked(
+                    "capability_expired",
+                    primary_scope,
+                    close_code=4401,
+                )
+            binding = self._sessions.get(session.session_ref)
+            if binding is None or not self._session_matches_binding(session, binding):
+                return self._deny_locked(
+                    "session_invalid",
+                    primary_scope,
+                    close_code=4401,
+                )
+            if binding.deadline_epoch <= now:
+                self._sessions.pop(binding.session_ref, None)
+                self._grants.pop(binding.token_digest, None)
+                return self._deny_locked(
+                    "capability_expired",
+                    primary_scope,
+                    close_code=4401,
+                )
+            grant = self._grants.get(binding.token_digest)
+            if grant is None:
+                return self._deny_locked(
+                    "capability_revoked",
+                    primary_scope,
+                    close_code=4401,
+                )
+            if (
+                grant.runtime_boot_id != binding.runtime_boot_id
+                or grant.client_id_hash != binding.client_id_hash
+            ):
+                return self._deny_locked(
+                    "session_binding_mismatch",
+                    primary_scope,
+                    close_code=4401,
+                    grant=grant,
+                )
+            denied_scope = next(
+                (scope_name for scope_name in scopes if not self._grant_has_scope(grant, scope_name)),
+                None,
+            )
+            if denied_scope is not None:
+                return self._deny_locked(
+                    "scope_denied",
+                    denied_scope,
+                    close_code=4403,
+                    grant=grant,
+                )
+            self._record_locked("session_command_accepted", primary_scope, grant)
+            return RuntimeAccessDecision(
+                allowed=True,
+                reason_code="authorized",
+                close_code=0,
+                scope=primary_scope,
+                client_id_hash=grant.client_id_hash,
+                expires_in_seconds=max(0.0, grant.expires_at_epoch - now),
+                nonce_digest=grant.nonce_digest,
+                principal=RuntimeAccessPrincipal(
+                    runtime_boot_id=grant.runtime_boot_id,
+                    client_id_hash=grant.client_id_hash,
+                    scopes=grant.scopes,
+                    issued_at_epoch=grant.issued_at_epoch,
+                    expires_at_epoch=grant.expires_at_epoch,
+                    binding_source=binding.binding_source,
                 ),
             )
 
@@ -372,6 +574,7 @@ class RuntimeAccessAuthority:
                 "schema_version": 1,
                 "runtime_boot_id_hash": _client_hash(self._runtime_boot_id),
                 "active_capabilities": len(self._grants),
+                "active_sessions": len(self._sessions),
                 "reason_counts": dict(sorted(self._reason_counts.items())),
                 "recent_audit": [dict(item) for item in self._audit],
             }
@@ -386,6 +589,31 @@ class RuntimeAccessAuthority:
         if not normalized or any(scope not in RUNTIME_ACCESS_SCOPES for scope in normalized):
             raise ValueError("scope is not supported")
         return normalized
+
+    @staticmethod
+    def _session_matches_binding(
+        session: RuntimeAccessSession,
+        binding: _SessionBinding,
+    ) -> bool:
+        return (
+            hmac.compare_digest(session.session_ref, binding.session_ref)
+            and hmac.compare_digest(session.token_digest, binding.token_digest)
+            and hmac.compare_digest(session.client_id_hash, binding.client_id_hash)
+            and hmac.compare_digest(session.runtime_boot_id, binding.runtime_boot_id)
+            and session.deadline_epoch == binding.deadline_epoch
+            and session.binding_source == binding.binding_source
+        )
+
+    @staticmethod
+    def _grant_has_scope(grant: _Grant, required_scope: str) -> bool:
+        if required_scope in grant.scopes:
+            return True
+        # `conversation` was the sole pre-L6 conversation capability. Keep it
+        # as an explicit compatibility grant, never as a prefix or wildcard.
+        return (
+            required_scope in {"conversation.read", "conversation.write"}
+            and "conversation" in grant.scopes
+        )
 
     def _clock(self) -> float:
         value = self._now()
@@ -410,6 +638,13 @@ class RuntimeAccessAuthority:
         ]
         for digest in expired:
             self._grants.pop(digest, None)
+        expired_sessions = [
+            session_ref
+            for session_ref, binding in self._sessions.items()
+            if binding.deadline_epoch <= now
+        ]
+        for session_ref in expired_sessions:
+            self._sessions.pop(session_ref, None)
 
     def _deny(
         self,
@@ -487,24 +722,27 @@ def create_websocket_authorizer(
             _header(headers, "sec-websocket-protocol")
         )
         client = getattr(websocket, "client", None)
-        decision = authority.validate(
+        handshake_scope = "conversation.read" if scope == "conversation" else scope
+        decision, session = authority.open_session(
             token,
-            scope=scope,
+            scope=handshake_scope,
             origin=_header(headers, "origin"),
             peer_host=str(getattr(client, "host", "") or ""),
         )
-        if decision.allowed:
+        if decision.allowed and session is not None:
             socket_scope = getattr(websocket, "scope", None)
             if isinstance(socket_scope, dict):
                 socket_scope["javis.runtime_access"] = {
-                    "scope": decision.scope,
+                    "scope": scope,
                     "client_id_hash": decision.client_id_hash,
                     "nonce_digest": decision.nonce_digest,
+                    "session_ref": session.session_ref,
                     "deadline_monotonic": (
                         asyncio.get_running_loop().time()
                         + decision.expires_in_seconds
                     ),
                 }
+                socket_scope["javis.runtime_session"] = session
                 socket_scope["javis.runtime_principal"] = decision.principal
             return True
         await websocket.close(
@@ -530,6 +768,71 @@ def websocket_runtime_principal(websocket: Any) -> RuntimeAccessPrincipal | None
         return None
     value = socket_scope.get("javis.runtime_principal")
     return value if isinstance(value, RuntimeAccessPrincipal) else None
+
+
+def websocket_runtime_session(websocket: Any) -> RuntimeAccessSession | None:
+    socket_scope = getattr(websocket, "scope", None)
+    if not isinstance(socket_scope, Mapping):
+        return None
+    value = socket_scope.get("javis.runtime_session")
+    return value if isinstance(value, RuntimeAccessSession) else None
+
+
+def validate_websocket_command(
+    authority: RuntimeAccessAuthority,
+    websocket: Any,
+    command_type: str,
+    *,
+    registry: Any = None,
+) -> RuntimeAccessDecision:
+    """Resolve the central WS policy and revalidate the bound session."""
+
+    if registry is None:
+        from core.action.route_policy import DEFAULT_ROUTE_POLICY_REGISTRY
+
+        registry = DEFAULT_ROUTE_POLICY_REGISTRY
+    try:
+        policy = registry.websocket_policy(command_type)
+    except (KeyError, TypeError, ValueError):
+        return authority._deny(
+            "route_policy_missing",
+            "conversation.read",
+            close_code=4403,
+        )
+    session = websocket_runtime_session(websocket)
+    if session is None:
+        return authority._deny(
+            "session_invalid",
+            policy.required_scopes[0],
+            close_code=4401,
+        )
+    return authority.validate_session(
+        session,
+        required_scopes=policy.required_scopes,
+    )
+
+
+def create_websocket_command_authorizer(
+    authority: RuntimeAccessAuthority,
+    *,
+    registry: Any = None,
+) -> Callable[[Any, str], Any]:
+    async def authorize(websocket: Any, command_type: str) -> bool:
+        decision = validate_websocket_command(
+            authority,
+            websocket,
+            command_type,
+            registry=registry,
+        )
+        if decision.allowed:
+            socket_scope = getattr(websocket, "scope", None)
+            if isinstance(socket_scope, dict):
+                socket_scope["javis.runtime_principal"] = decision.principal
+            return True
+        await websocket.close(code=decision.close_code, reason=decision.reason_code)
+        return False
+
+    return authorize
 
 
 def websocket_access_remaining(websocket: Any) -> float | None:
@@ -560,6 +863,7 @@ def create_http_authorizer(
 
 
 __all__ = [
+    "ACTION_RUNTIME_ACCESS_SCOPES",
     "DEVELOPMENT_ORIGINS",
     "ENVIRONMENT_RUNTIME_ACCESS_SCOPES",
     "IssuedRuntimeCapability",
@@ -569,10 +873,14 @@ __all__ = [
     "RuntimeAccessAuthority",
     "RuntimeAccessDecision",
     "RuntimeAccessPrincipal",
+    "RuntimeAccessSession",
     "capability_from_websocket_protocols",
     "create_http_authorizer",
     "create_websocket_authorizer",
+    "create_websocket_command_authorizer",
+    "validate_websocket_command",
     "websocket_access_context",
     "websocket_access_remaining",
     "websocket_runtime_principal",
+    "websocket_runtime_session",
 ]
