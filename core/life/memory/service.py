@@ -26,6 +26,7 @@ from .contracts import (
     Subject,
     UserModelClaim,
 )
+from .extraction import EpisodeExtractor, JournalProjection
 from .projection import TerminalProjector
 from .store import MemoryStore
 
@@ -104,6 +105,7 @@ class MemoryService:
         critical_enqueue_timeout: float = 0.05,
         store_factory: Callable[..., MemoryStore] = MemoryStore,
         terminal_projector: TerminalProjector | None = None,
+        episode_extractor: EpisodeExtractor | None = None,
     ) -> None:
         if type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError("queue_capacity must be a positive integer")
@@ -138,6 +140,7 @@ class MemoryService:
         self._critical_enqueue_timeout = float(critical_enqueue_timeout)
         self._store_factory = store_factory
         self._terminal_projector = terminal_projector or TerminalProjector()
+        self._episode_extractor = episode_extractor or EpisodeExtractor()
 
         self._lock = threading.RLock()
         self._writer_token = object()
@@ -158,6 +161,8 @@ class MemoryService:
             "terminal_scanned": 0,
             "terminal_advanced": 0,
             "terminal_pending": 0,
+            "terminal_projected": 0,
+            "terminal_not_selected": 0,
             "reconcile_failures": 0,
         }
 
@@ -309,6 +314,16 @@ class MemoryService:
             source_store_id,
             terminal_cursor,
             priority=MemoryCommandPriority.CRITICAL,
+        )
+
+    def put_journal_projection(self, projection: JournalProjection) -> Future[dict[str, Any]]:
+        if not isinstance(projection, JournalProjection):
+            raise TypeError("projection must be a JournalProjection")
+        return self._submit_store_mutation(
+            "put_journal_projection",
+            projection.entry,
+            projection.derivation_edges,
+            priority=MemoryCommandPriority.NORMAL,
         )
 
     def get_subject(self, subject_id: str) -> Future[Subject | None]:
@@ -589,10 +604,9 @@ class MemoryService:
             limit=self._reconcile_page_size,
         )
         source_store_id = str(page["source_store_id"])
-        scanned = advanced = pending = 0
+        scanned = advanced = pending = projected = not_selected = 0
         for terminal in page.get("events", ()):
             scanned += 1
-            terminal_cursor = int(terminal["terminal_row_id"])
             outcome = str(terminal["outcome"])
             evidence = (
                 conversation_store.read_request_evidence(
@@ -612,6 +626,44 @@ class MemoryService:
                 evidence=evidence,
                 existing_receipt=existing,
             )
+            if decision.candidate is not None:
+                if not decision.write_receipt:
+                    pending += 1
+                    break
+                store.record_terminal_receipt(
+                    writer_token=writer_token,
+                    **dict(decision.receipt_values),
+                )
+                extraction = self._episode_extractor.extract(decision.candidate, evidence)
+                if extraction.episode is not None:
+                    store.project_episode(
+                        extraction.episode,
+                        decision.receipt_values,
+                        writer_token=writer_token,
+                    )
+                    projected += 1
+                else:
+                    final_values = dict(
+                        decision.receipt_values,
+                        projection_state="not_selected",
+                        reason_code=extraction.selection.reason.value,
+                        episode_id=None,
+                        next_retry_at_utc=None,
+                    )
+                    store.complete_terminal_projection(
+                        final_values,
+                        writer_token=writer_token,
+                    )
+                    not_selected += 1
+                advanced += 1
+                continue
+            if decision.advance_cursor:
+                store.complete_terminal_projection(
+                    decision.receipt_values,
+                    writer_token=writer_token,
+                )
+                advanced += 1
+                continue
             if decision.write_receipt:
                 store.record_terminal_receipt(
                     writer_token=writer_token,
@@ -625,14 +677,12 @@ class MemoryService:
             if not decision.advance_cursor:
                 pending += 1
                 break
-            store.set_source_progress(
-                source_store_id, terminal_cursor, writer_token=writer_token
-            )
-            advanced += 1
         with self._lock:
             self._metrics["terminal_scanned"] += scanned
             self._metrics["terminal_advanced"] += advanced
             self._metrics["terminal_pending"] += pending
+            self._metrics["terminal_projected"] += projected
+            self._metrics["terminal_not_selected"] += not_selected
         return {"scanned": scanned, "advanced": advanced, "pending": pending}
 
 

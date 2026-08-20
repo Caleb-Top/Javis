@@ -740,6 +740,88 @@ class MemoryStore:
         with self._writer_transaction(writer_token) as writer:
             writer.set_source_progress(source_store_id, terminal_cursor)
 
+    def complete_terminal_projection(
+        self,
+        receipt_values: Mapping[str, Any],
+        *,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        """Atomically finalize a terminal without creating an episode."""
+
+        values = dict(receipt_values)
+        if values.get("projection_state") not in {"excluded", "not_selected"}:
+            raise ValueError("terminal completion requires a final non-episode state")
+        if values.get("episode_id") is not None:
+            raise ValueError("non-episode terminal completion cannot reference an episode")
+        cursor = values.get("terminal_row_id")
+        source_store_id = values.get("source_store_id")
+        with self._writer_transaction(writer_token) as writer:
+            receipt = writer.record_terminal_receipt(**values)
+            writer.set_source_progress(str(source_store_id), int(cursor))
+            return receipt
+
+    def project_episode(
+        self,
+        episode: ExperienceEpisode,
+        receipt_values: Mapping[str, Any],
+        *,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        """Atomically persist an episode, finalize its receipt, and move the cursor."""
+
+        if not isinstance(episode, ExperienceEpisode):
+            raise TypeError("episode must be an ExperienceEpisode")
+        values = dict(receipt_values)
+        if (
+            values.get("outcome") != "completed"
+            or values.get("session_id") != episode.session_id
+            or values.get("request_id") != episode.request_id
+            or values.get("source_terminal_event_id") != episode.source_terminal_event_id
+            or values.get("terminal_row_id") is None
+        ):
+            raise ValueError("episode and terminal receipt identity must match")
+        values.update(
+            projection_state="projected",
+            reason_code="selected_episode",
+            episode_id=episode.episode_id,
+            next_retry_at_utc=None,
+        )
+        with self._writer_transaction(writer_token) as writer:
+            created = writer.put_item(episode)
+            receipt = writer.record_terminal_receipt(**values)
+            writer.set_source_progress(
+                str(values["source_store_id"]), int(values["terminal_row_id"])
+            )
+            return {"episode_created": created, "receipt": receipt}
+
+    def put_journal_projection(
+        self,
+        entry: JournalEntry,
+        derivation_edges: Iterable[DerivationEdge],
+        *,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        """Persist a journal and all required derivation edges in one transaction."""
+
+        if not isinstance(entry, JournalEntry):
+            raise TypeError("entry must be a JournalEntry")
+        edges = tuple(derivation_edges)
+        if not edges or any(not isinstance(edge, DerivationEdge) for edge in edges):
+            raise ValueError("journal projection requires derivation edges")
+        if {edge.source_id for edge in edges} != set(entry.source_episode_ids) or any(
+            edge.source_kind is not MemoryItemKind.EXPERIENCE_EPISODE
+            or edge.target_kind is not MemoryItemKind.JOURNAL_ENTRY
+            or edge.relation.value != "derived_from"
+            or edge.target_id != entry.entry_id
+            or not edge.active
+            for edge in edges
+        ):
+            raise ValueError("journal derivation closure does not match its sources")
+        with self._writer_transaction(writer_token) as writer:
+            created = writer.put_item(entry)
+            edge_results = tuple(writer.put_derivation_edge(edge) for edge in edges)
+            return {"journal_created": created, "edge_results": edge_results}
+
     @contextmanager
     def _writer_transaction(self, writer_token: object) -> Iterator["_MemoryWriter"]:
         """Yield domain primitives only to the bound token on the bound thread."""

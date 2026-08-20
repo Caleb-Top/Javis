@@ -18,6 +18,7 @@ from core.life.memory.projection import (
 )
 from core.life.memory.service import MemoryService
 from core.life.memory.store import DATABASE_RELATIVE_PATH
+from core.life.memory.contracts import Subject
 
 
 NOW = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
@@ -144,6 +145,26 @@ def row_count(path: Path, table: str) -> int:
         return int(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     finally:
         db.close()
+
+
+def seed_owner(service: MemoryService) -> None:
+    owner = Subject.from_dict(
+        {
+            "schema_version": 1,
+            "subject_id": "subject-user",
+            "revision": 1,
+            "subject_kind": "primary_user",
+            "display_name": "Primary user",
+            "status": "active",
+            "identity_assurance": "desktop_confirmed",
+            "credential_reference_hash": None,
+            "merged_into_subject_id": None,
+            "session_scope_id": None,
+            "created_at_utc": "2026-08-20T10:00:00.000Z",
+            "updated_at_utc": "2026-08-20T10:00:00.000Z",
+        }
+    )
+    assert service.put_subject(owner).result(timeout=20) is True
 
 
 def test_completed_authorized_evidence_yields_content_free_candidate():
@@ -300,7 +321,7 @@ def test_evidence_digest_is_deterministic_across_mapping_order():
     assert first.candidate.source_digest == second.candidate.source_digest
 
 
-def test_duplicate_wakeup_and_restart_keep_one_receipt(tmp_path: Path):
+def test_duplicate_wakeup_and_restart_keep_one_receipt_and_episode(tmp_path: Path):
     conversations = ConversationStore(tmp_path / "conversations.sqlite3")
     completed_request(conversations, "session-1", "request-1")
     data_root = tmp_path / "data"
@@ -313,10 +334,16 @@ def test_duplicate_wakeup_and_restart_keep_one_receipt(tmp_path: Path):
         terminal_projector=projector,
     ).start()
     try:
-        assert first.reconcile_once().result(timeout=20)["pending"] == 1
-        assert first.reconcile_once().result(timeout=20)["pending"] == 1
+        seed_owner(first)
+        assert first.reconcile_once().result(timeout=20) == {
+            "scanned": 1,
+            "advanced": 1,
+            "pending": 0,
+        }
+        assert first.reconcile_once().result(timeout=20)["scanned"] == 0
         path = data_root / DATABASE_RELATIVE_PATH
         assert row_count(path, "terminal_projection_receipts") == 1
+        assert row_count(path, "experience_episodes") == 1
     finally:
         assert first.shutdown(timeout=20)
 
@@ -327,9 +354,10 @@ def test_duplicate_wakeup_and_restart_keep_one_receipt(tmp_path: Path):
         terminal_projector=projector,
     ).start()
     try:
-        assert restarted.reconcile_once().result(timeout=20)["pending"] == 1
+        assert restarted.reconcile_once().result(timeout=20)["scanned"] == 0
         assert row_count(path, "terminal_projection_receipts") == 1
-        assert restarted.status()["store"]["terminal_cursor"] == 0
+        assert row_count(path, "experience_episodes") == 1
+        assert restarted.status()["store"]["terminal_cursor"] > 0
     finally:
         assert restarted.shutdown(timeout=20)
 
@@ -347,6 +375,7 @@ def test_late_assistant_message_updates_pending_receipt_without_duplication(tmp_
         ),
     ).start()
     try:
+        seed_owner(service)
         assert service.reconcile_once().result(timeout=20)["pending"] == 1
         receipt = service.get_terminal_receipt(
             conversations.source_store_id(), "session-1", "request-1"
@@ -354,13 +383,15 @@ def test_late_assistant_message_updates_pending_receipt_without_duplication(tmp_
         assert receipt["reason_code"] == "evidence_pending"
         conversations.append_message("session-1", "request-1", "assistant", "late result")
         time.sleep(0.005)
-        assert service.reconcile_once().result(timeout=20)["pending"] == 1
+        assert service.reconcile_once().result(timeout=20)["advanced"] == 1
         updated = service.get_terminal_receipt(
             conversations.source_store_id(), "session-1", "request-1"
         ).result(timeout=20)
         assert updated["receipt_id"] == receipt["receipt_id"]
-        assert updated["reason_code"] == "eligible_candidate"
+        assert updated["projection_state"] == "projected"
+        assert updated["reason_code"] == "selected_episode"
         assert row_count(data_root / DATABASE_RELATIVE_PATH, "terminal_projection_receipts") == 1
+        assert row_count(data_root / DATABASE_RELATIVE_PATH, "experience_episodes") == 1
     finally:
         assert service.shutdown(timeout=20)
 

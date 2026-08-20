@@ -236,7 +236,7 @@ def test_receipt_failure_never_advances_terminal_cursor(tmp_path: Path):
     store_holder: list[MemoryStore] = []
 
     class ReceiptFailureStore(MemoryStore):
-        def record_terminal_receipt(self, *, writer_token, **values):
+        def complete_terminal_projection(self, receipt_values, *, writer_token):
             raise RuntimeError("receipt write failed")
 
     def factory(*args, **kwargs):
@@ -279,7 +279,9 @@ def test_successful_excluded_terminal_advances_cursor_after_receipt(tmp_path: Pa
         assert service.shutdown()
 
 
-def test_completed_owner_terminal_stays_pending_without_projection(tmp_path: Path):
+def test_completed_owner_terminal_without_extractable_evidence_is_not_selected(
+    tmp_path: Path,
+):
     service = MemoryService(
         tmp_path,
         conversation_store=TerminalSource(outcome="completed"),
@@ -287,13 +289,13 @@ def test_completed_owner_terminal_stays_pending_without_projection(tmp_path: Pat
     ).start()
     try:
         result = service.reconcile_once().result(timeout=2)
-        assert result == {"scanned": 1, "advanced": 0, "pending": 1}
-        assert service.status()["store"]["terminal_cursor"] == 0
+        assert result == {"scanned": 1, "advanced": 1, "pending": 0}
+        assert service.status()["store"]["terminal_cursor"] == 11
         receipt = service.get_terminal_receipt(
             "conversation-store-1", "session-1", "request-1"
         ).result(timeout=2)
-        assert receipt["projection_state"] == "pending"
-        assert receipt["reason_code"] == "eligible_candidate"
+        assert receipt["projection_state"] == "not_selected"
+        assert receipt["reason_code"] == "evidence_ineligible"
     finally:
         assert service.shutdown()
 
