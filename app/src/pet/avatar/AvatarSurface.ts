@@ -14,7 +14,10 @@ import type {
   ExpressionTarget,
 } from "./avatarTypes.ts";
 import { createAvatarScene, type AvatarSceneController } from "./AvatarScene.ts";
-import { createProceduralAvatar } from "./ProceduralAvatar.ts";
+import {
+  createProceduralAvatar,
+  type ProceduralAvatar,
+} from "./ProceduralAvatar.ts";
 
 export type AvatarSurfaceMode = "pet" | "live" | "code" | "settings";
 export type AvatarSurfaceTier = Extract<
@@ -97,6 +100,41 @@ export type CreateAvatarSurfaceOptions = Readonly<{
   onContextRestored?(): void;
 }>;
 
+export function applyExpressionToProceduralAvatar(
+  avatar: ProceduralAvatar,
+  target: AvatarExpressionTarget,
+): void {
+  avatar.handles.mouth.set(target.mouth / 0.65);
+  avatar.handles.eyes.set(
+    target.blinkRate === "off" ? 0.08
+      : target.blinkRate === "slow" ? 0.78
+        : target.blinkRate === "fast" ? 0.92
+          : 1,
+  );
+  avatar.handles.head.set(
+    target.posture === "cautious" || target.posture === "retracted" ? 0.35
+      : target.posture === "active" ? 0.62
+        : target.posture === "attentive" ? 0.55
+          : target.posture === "focused" ? 0.43
+            : 0.5,
+  );
+  avatar.handles.body.set(
+    target.posture === "active" ? 0.7
+      : target.posture === "attentive" ? 0.58
+        : target.posture === "focused" ? 0.46
+          : target.posture === "cautious" ? 0.4
+            : target.posture === "retracted" ? 0.32
+              : 0.5,
+  );
+  avatar.handles.coreLight.set(
+    target.color === "red" ? 0.95
+      : target.color === "dim" ? 0.18
+        : target.color === "amber" ? 0.62
+          : target.color === "violet" ? 0.82
+            : 0.72,
+  );
+}
+
 function createDefaultResources(): AvatarSurfaceResources {
   return {
     createRenderer: (parameters) => new WebGLRenderer(parameters),
@@ -111,20 +149,7 @@ function createDefaultResources(): AvatarSurfaceResources {
         owned: false,
         update(_deltaSeconds, target) {
           if (!target) return;
-          avatar.handles.mouth.set(target.mouth / 0.65);
-          avatar.handles.eyes.set(target.blinkRate === "off" ? 0.08 : 1);
-          avatar.handles.head.set(
-            target.posture === "cautious" || target.posture === "retracted" ? 0.35
-              : target.posture === "active" ? 0.62
-                : 0.5,
-          );
-          avatar.handles.body.set(target.posture === "active" ? 0.7 : 0.5);
-          avatar.handles.coreLight.set(
-            target.color === "red" ? 0.95
-              : target.color === "dim" ? 0.18
-                : target.color === "amber" ? 0.62
-                  : 0.72,
-          );
+          applyExpressionToProceduralAvatar(avatar, target);
         },
         dispose: () => avatar.dispose(),
       };

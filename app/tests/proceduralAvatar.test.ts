@@ -10,6 +10,7 @@ import {
 } from "three";
 
 import { createProceduralAvatar } from "../src/pet/avatar/ProceduralAvatar.ts";
+import { applyExpressionToProceduralAvatar } from "../src/pet/avatar/AvatarSurface.ts";
 
 const source = readFileSync(
   new URL("../src/pet/avatar/ProceduralAvatar.ts", import.meta.url),
@@ -81,6 +82,50 @@ test("numeric handles clamp all visual drive values to zero through one", () => 
     assert.equal(handle.value, 0);
   }
 
+  avatar.dispose();
+});
+
+test("nine-state expression channels produce distinct bounded Lightform poses", () => {
+  const scene = new Scene();
+  const avatar = createProceduralAvatar(scene);
+
+  applyExpressionToProceduralAvatar(avatar, {
+    state: "listening",
+    gaze: "user",
+    mouth: 0,
+    blinkRate: "normal",
+    posture: "attentive",
+    color: "cyan",
+    gesture: "none",
+    interrupt: false,
+  });
+  const listening = {
+    eyes: avatar.handles.eyes.value,
+    head: avatar.handles.head.value,
+    body: avatar.handles.body.value,
+    core: avatar.handles.coreLight.value,
+  };
+
+  applyExpressionToProceduralAvatar(avatar, {
+    state: "thinking",
+    gaze: "content",
+    mouth: 0,
+    blinkRate: "slow",
+    posture: "focused",
+    color: "violet",
+    gesture: "none",
+    interrupt: false,
+  });
+  const thinking = {
+    eyes: avatar.handles.eyes.value,
+    head: avatar.handles.head.value,
+    body: avatar.handles.body.value,
+    core: avatar.handles.coreLight.value,
+  };
+
+  assert.notDeepEqual(listening, thinking);
+  assert.deepEqual(listening, { eyes: 1, head: 0.55, body: 0.58, core: 0.72 });
+  assert.deepEqual(thinking, { eyes: 0.78, head: 0.43, body: 0.46, core: 0.82 });
   avatar.dispose();
 });
 
