@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "javis-lightform",
+  "version": "1.0.0",
+  "kind": "procedural3d",
+  "name": "Javis Lightform",
+  "description": "A local, zero-asset procedural head-and-shoulders avatar.",
+  "accent": "#61e9f0",
+  "license": {
+    "id": "Javis-Original",
+    "author": "Javis Project",
+    "source": "local procedural geometry",
+    "attributionFile": "ATTRIBUTION.md"
+  },
+  "capabilities": [
+    "idle",
+    "blink",
+    "gaze",
+    "mouth",
+    "head",
+    "body",
+    "coreLight"
+  ],
+  "assetBudget": {
+    "maxBytes": 26214400,
+    "maxTriangles": 80000,
+    "maxMaterials": 8,
+    "maxTextureSize": 2048
+  },
+  "fallbackId": "javis-anime"
+}
