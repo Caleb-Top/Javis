@@ -80,6 +80,8 @@ class TerminalSource:
                     "event_id": "terminal-event-1",
                     "session_id": "session-1",
                     "request_id": "request-1",
+                    "sequence": 3,
+                    "sequence_domain": "conversation_store:session-1",
                     "outcome": self.outcome,
                 }
             )
@@ -92,12 +94,28 @@ class TerminalSource:
 
     def read_request_evidence(self, session_id: str, request_id: str):
         return {
+            "source_store_id": "conversation-store-1",
             "session_id": session_id,
             "request_id": request_id,
+            "sequence_domain": f"conversation_store:{session_id}",
             "redacted": False,
             "terminal_conflict": False,
+            "terminal_events": [
+                {
+                    "event_id": "terminal-event-1",
+                    "sequence": 3,
+                    "type": f"request.{self.outcome}",
+                }
+            ],
             "evidence_ready": True,
-            "access_projection": {"actor_kind": "primary_user"},
+            "access_projection": {
+                "actor_kind": "primary_user",
+                "actor_subject_id": "subject-user",
+                "participant_subject_ids": ["subject-user", "subject-javis"],
+                "audience_ceiling": "owner_private",
+                "identity_assurance": "desktop_confirmed",
+                "acl_epoch": 0,
+            },
         }
 
 
@@ -275,7 +293,7 @@ def test_completed_owner_terminal_stays_pending_without_projection(tmp_path: Pat
             "conversation-store-1", "session-1", "request-1"
         ).result(timeout=2)
         assert receipt["projection_state"] == "pending"
-        assert receipt["reason_code"] == "awaiting_projection"
+        assert receipt["reason_code"] == "eligible_candidate"
     finally:
         assert service.shutdown()
 

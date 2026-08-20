@@ -108,10 +108,12 @@ class ConversationHub:
         *,
         resolve_confirmation: Callable[[bool], None] | None = None,
         event_bus: EventBus | None = None,
+        terminal_wakeup: Callable[[], Any] | None = None,
     ):
         self.store = store
         self.run_store = run_store
         self.event_bus = event_bus
+        self._terminal_wakeup = terminal_wakeup
         self._resolve_confirmation = resolve_confirmation
         self._lock = asyncio.Lock()
         self._execution_lock = asyncio.Lock()
@@ -569,6 +571,16 @@ class ConversationHub:
 
     def _broadcast_persisted(self, event: dict[str, Any]) -> None:
         self._publish_runtime_observation(event)
+        if event.get("type") in {
+            "request.completed",
+            "request.failed",
+            "request.cancelled",
+        } and self._terminal_wakeup is not None:
+            try:
+                self._terminal_wakeup()
+            except Exception:
+                # Durable cursor reconciliation recovers a dropped low-latency wakeup.
+                pass
         session_id = str(event.get("session_id") or "")
         for queue in tuple(self._subscribers.get(session_id, ())):
             if queue.full():

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import itertools
 import queue
 import threading
@@ -27,6 +26,7 @@ from .contracts import (
     Subject,
     UserModelClaim,
 )
+from .projection import TerminalProjector
 from .store import MemoryStore
 
 
@@ -103,6 +103,7 @@ class MemoryService:
         deletion_cache_capacity: int = 128,
         critical_enqueue_timeout: float = 0.05,
         store_factory: Callable[..., MemoryStore] = MemoryStore,
+        terminal_projector: TerminalProjector | None = None,
     ) -> None:
         if type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError("queue_capacity must be a positive integer")
@@ -136,6 +137,7 @@ class MemoryService:
         self._deletion_cache: OrderedDict[str, Future[Any]] = OrderedDict()
         self._critical_enqueue_timeout = float(critical_enqueue_timeout)
         self._store_factory = store_factory
+        self._terminal_projector = terminal_projector or TerminalProjector()
 
         self._lock = threading.RLock()
         self._writer_token = object()
@@ -590,51 +592,37 @@ class MemoryService:
         scanned = advanced = pending = 0
         for terminal in page.get("events", ()):
             scanned += 1
-            outcome = str(terminal["outcome"])
             terminal_cursor = int(terminal["terminal_row_id"])
-            state = "excluded"
-            reason_code = f"terminal_{outcome}"
-            can_advance = outcome != "completed"
-            if outcome == "completed":
-                evidence = conversation_store.read_request_evidence(
+            outcome = str(terminal["outcome"])
+            evidence = (
+                conversation_store.read_request_evidence(
                     str(terminal["session_id"]), str(terminal["request_id"])
                 )
-                access = evidence.get("access_projection")
-                if evidence.get("redacted"):
-                    reason_code = "deletion_suppressed"
-                    can_advance = True
-                elif evidence.get("terminal_conflict"):
-                    reason_code = "terminal_conflict"
-                    can_advance = False
-                elif not evidence.get("evidence_ready"):
-                    state = "pending"
-                    reason_code = "evidence_pending"
-                    can_advance = False
-                elif not isinstance(access, Mapping) or access.get("actor_kind") == "guest":
-                    reason_code = "guest_or_unbound"
-                    can_advance = True
-                else:
-                    state = "pending"
-                    reason_code = "awaiting_projection"
-                    can_advance = False
-            receipt_id = _terminal_receipt_id(
+                if outcome == "completed"
+                else None
+            )
+            existing = store.get_terminal_receipt(
                 source_store_id,
                 str(terminal["session_id"]),
                 str(terminal["request_id"]),
             )
-            store.record_terminal_receipt(
-                writer_token=writer_token,
-                receipt_id=receipt_id,
+            decision = self._terminal_projector.decide(
                 source_store_id=source_store_id,
-                terminal_row_id=terminal_cursor,
-                session_id=str(terminal["session_id"]),
-                request_id=str(terminal["request_id"]),
-                source_terminal_event_id=str(terminal["event_id"]),
-                outcome=outcome,
-                projection_state=state,
-                reason_code=reason_code,
+                terminal=terminal,
+                evidence=evidence,
+                existing_receipt=existing,
             )
-            if not can_advance:
+            if decision.write_receipt:
+                store.record_terminal_receipt(
+                    writer_token=writer_token,
+                    **dict(decision.receipt_values),
+                )
+            if decision.reason_code == "terminal_conflict":
+                with self._lock:
+                    self._state = "degraded"
+                    self._reason_code = "terminal_conflict"
+                    self._accepting = False
+            if not decision.advance_cursor:
                 pending += 1
                 break
             store.set_source_progress(
@@ -646,13 +634,6 @@ class MemoryService:
             self._metrics["terminal_advanced"] += advanced
             self._metrics["terminal_pending"] += pending
         return {"scanned": scanned, "advanced": advanced, "pending": pending}
-
-
-def _terminal_receipt_id(source_store_id: str, session_id: str, request_id: str) -> str:
-    digest = hashlib.sha256(
-        f"{source_store_id}\0{session_id}\0{request_id}".encode("utf-8")
-    ).hexdigest()
-    return f"terminal-{digest}"
 
 
 def _resolved_future(value: _T) -> Future[_T]:
