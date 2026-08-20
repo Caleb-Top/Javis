@@ -1,8 +1,28 @@
 import hashlib
 import json
+import re
 import struct
+from pathlib import Path
 
 from scripts.validate_avatar_asset import validate_avatar_manifest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = ROOT / "app"
+DEFAULT_AVATAR_ROOT = APP_ROOT / "public/pets/javis-3d"
+DEFAULT_AVATAR_MANIFEST = DEFAULT_AVATAR_ROOT / "avatar-manifest.json"
+REMOTE_SCHEME = re.compile(r"^(?:https?|data|blob|file):", re.IGNORECASE)
+
+
+def string_values(value):
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from string_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from string_values(nested)
+    elif isinstance(value, str):
+        yield value
 
 
 def valid_manifest(*, kind="vrm", model="avatar.vrm"):
@@ -149,3 +169,59 @@ def test_validator_enforces_local_texture_dimensions(tmp_path):
 
     assert report["budget"]["max_texture_size"] == 4096
     assert "texture exceeds max_texture_size" in report["errors"]
+
+
+def test_default_avatar_release_is_offline_licensed_and_bounded():
+    manifest = json.loads(DEFAULT_AVATAR_MANIFEST.read_text(encoding="utf-8"))
+    report = validate_avatar_manifest(DEFAULT_AVATAR_MANIFEST)
+
+    assert report["ok"] is True, report["errors"]
+    assert report["errors"] == []
+    assert manifest["id"] == "javis-lightform"
+    assert manifest["fallbackId"] in {"javis-anime", "javis-orb"}
+    assert not any(REMOTE_SCHEME.match(value.strip()) for value in string_values(manifest))
+
+    license_info = manifest["license"]
+    assert all(license_info[field].strip() for field in ("id", "author", "source", "attributionFile"))
+    attribution = DEFAULT_AVATAR_ROOT / license_info["attributionFile"]
+    attribution_text = attribution.read_text(encoding="utf-8")
+    assert attribution.is_file()
+    assert license_info["id"] in attribution_text
+    assert license_info["author"] in attribution_text
+    assert license_info["source"] in attribution_text
+
+    budget = manifest["assetBudget"]
+    assert budget["maxBytes"] <= 25 * 1024 * 1024
+    assert budget["maxTriangles"] <= 80_000
+    assert budget["maxMaterials"] <= 8
+    assert budget["maxTextureSize"] <= 2048
+    assert sum(path.stat().st_size for path in DEFAULT_AVATAR_ROOT.rglob("*") if path.is_file()) <= budget["maxBytes"]
+    assert report["budget"]["triangles"] <= budget["maxTriangles"]
+    assert report["budget"]["materials"] <= budget["maxMaterials"]
+    assert report["budget"]["max_texture_size"] <= budget["maxTextureSize"]
+    assert report["budget"]["within_budget"] is True
+
+
+def test_release_permanently_packages_2d_and_orb_fallbacks():
+    skin_manifest = json.loads(
+        (APP_ROOT / "public/pets/javis-anime/skin.json").read_text(encoding="utf-8")
+    )
+    for field in ("idle", "sourceStrip"):
+        asset_path = APP_ROOT / "public" / skin_manifest[field].lstrip("/")
+        assert asset_path.is_file()
+        assert asset_path.stat().st_size > 0
+
+    idle_asset = APP_ROOT / "public" / skin_manifest["idle"].lstrip("/")
+    idle_sha256 = hashlib.sha256(idle_asset.read_bytes()).hexdigest()
+    registry_source = (APP_ROOT / "src/pet/avatar/AvatarAssetRegistry.ts").read_text(encoding="utf-8")
+    skin_registry_source = (APP_ROOT / "src/pet/PetSkinRegistry.ts").read_text(encoding="utf-8")
+    styles_source = (APP_ROOT / "src/styles.css").read_text(encoding="utf-8")
+
+    assert skin_manifest["id"] == "javis-anime"
+    assert idle_sha256 in registry_source
+    assert 'id: "javis-anime"' in registry_source
+    assert 'fallbackId: "javis-orb"' in registry_source
+    assert 'id: "javis-orb"' in registry_source
+    assert 'id: "javis-anime"' in skin_registry_source
+    assert 'id: "javis-orb"' in skin_registry_source
+    assert ".pet-sprite.skin-orb" in styles_source

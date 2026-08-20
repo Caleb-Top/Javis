@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { createLifeStateBridge } from "../src/life/LifeStateBridge.ts";
+import { PerformanceGovernor } from "../src/pet/avatar/PerformanceGovernor.ts";
+import { getPetSkin } from "../src/pet/PetSkinRegistry.ts";
 import * as runtimeStateTypes from "../src/state/runtimeStateTypes.ts";
 
 const liveStageSource = readFileSync(
@@ -76,4 +79,55 @@ test("voice failures never combine an error label with the thinking detail", () 
     }),
     "需要检查 · 麦克风设备不可用",
   );
+});
+
+test("reduced motion lowers the tier and renders a static avatar frame", () => {
+  const governor = new PerformanceGovernor({ initialTier: "3d-high", reducedMotion: true });
+  assert.equal(governor.tier(), "3d-low");
+  assert.equal(governor.setReducedMotion(false).tier, "3d-low");
+  assert.match(petSource, /matchMedia\?\.\("\(prefers-reduced-motion: reduce\)"\)\.matches/);
+  assert.match(petSource, /mountedSurface\.setVisible\(false\);\s*mountedSurface\.renderOnce\(\)/);
+});
+
+test("renderer failure preserves status, interactions and manual Orb switching", () => {
+  const mountAvatarSource = petSource.slice(
+    petSource.indexOf("async function mountAvatarSkin"),
+    petSource.indexOf("function applySkin"),
+  );
+  assert.match(mountAvatarSource, /catch \{[\s\S]*?fallbackFrom\(skin\)/);
+  assert.match(petSource, /status\.textContent = formatSurfaceStatus\(snapshot\)/);
+  assert.match(petSource, /status\.dataset\.visible = "true"/);
+  assert.match(petSource, /spriteButton\.addEventListener\("click"/);
+  assert.match(petSource, /spriteButton\.addEventListener\("contextmenu"/);
+  assert.match(petSource, /function setSkin\(skinId: string\)[\s\S]*?applySkin\(getPetSkin\(skinId\)\)/);
+  assert.match(petSource, /petSkinRegistry\.find\(\(candidate\) => candidate\.kind === "orb"\)/);
+  assert.equal(getPetSkin("javis-orb").kind, "orb");
+});
+
+test("unknown life states fail closed to a neutral idle target", () => {
+  const bridge = createLifeStateBridge({
+    signal: () => undefined,
+    now: () => Date.parse("2026-08-20T10:00:00.000Z"),
+  });
+  const accepted = bridge.handle({
+    type: "life.expression",
+    payload: {
+      schema_version: 1,
+      revision: 1,
+      base_state: "celebrating",
+      intensity: 0.5,
+      gaze_target: "none",
+      voice_activity: "silent",
+      transition_ms: 180,
+      interrupt: false,
+      source_snapshot_revision: 1,
+      generated_at: "2026-08-20T09:59:59.000Z",
+      expires_at: "2026-08-20T10:00:01.000Z",
+      explanation_code: "unknown_test_state",
+    },
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(bridge.snapshot().state, "idle");
+  assert.equal(bridge.snapshot().expression, null);
 });

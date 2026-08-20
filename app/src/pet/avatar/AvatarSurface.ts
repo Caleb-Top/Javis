@@ -18,6 +18,7 @@ import {
   createProceduralAvatar,
   type ProceduralAvatar,
 } from "./ProceduralAvatar.ts";
+import { createAvatarModelLoader } from "./AvatarModelLoader.ts";
 
 export type AvatarSurfaceMode = "pet" | "live" | "code" | "settings";
 export type AvatarSurfaceTier = Extract<
@@ -136,23 +137,26 @@ export function applyExpressionToProceduralAvatar(
 }
 
 function createDefaultResources(): AvatarSurfaceResources {
+  const loadAvatarModel = createAvatarModelLoader();
   return {
     createRenderer: (parameters) => new WebGLRenderer(parameters),
     createClock: () => new Clock(),
     requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
     cancelAnimationFrame: (frameId) => window.cancelAnimationFrame(frameId),
     loadModel(manifest, scene) {
-      if (manifest.kind !== "procedural3d") return null;
-      const avatar = createProceduralAvatar(scene.modelAnchor);
-      return {
-        object: avatar.object,
-        owned: false,
-        update(_deltaSeconds, target) {
-          if (!target) return;
-          applyExpressionToProceduralAvatar(avatar, target);
-        },
-        dispose: () => avatar.dispose(),
-      };
+      if (manifest.kind === "procedural3d") {
+        const avatar = createProceduralAvatar(scene.modelAnchor);
+        return {
+          object: avatar.object,
+          owned: false,
+          update(_deltaSeconds, target) {
+            if (!target) return;
+            applyExpressionToProceduralAvatar(avatar, target);
+          },
+          dispose: () => avatar.dispose(),
+        };
+      }
+      return loadAvatarModel(manifest);
     },
   };
 }

@@ -6,6 +6,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "app"
+PINNED_AVATAR_PACKAGES = {
+    "three": ("dependencies", "0.185.1"),
+    "@pixiv/three-vrm": ("dependencies", "3.5.5"),
+    "@types/three": ("devDependencies", "0.185.1"),
+}
 
 
 def test_avatar_dependencies_are_exact_and_lockfiles_agree():
@@ -28,6 +33,22 @@ def test_avatar_dependencies_are_exact_and_lockfiles_agree():
     assert importer["dependencies"]["@pixiv/three-vrm"]["specifier"] == "3.5.5"
     assert importer["dependencies"]["@pixiv/three-vrm"]["version"].split("(", 1)[0] == "3.5.5"
     assert importer["devDependencies"]["@types/three"]["specifier"] == "0.185.1"
+
+    for name, (section, version) in PINNED_AVATAR_PACKAGES.items():
+        assert package[section][name] == version
+        assert npm_lock["packages"][""][section][name] == version
+        assert npm_lock["packages"][f"node_modules/{name}"]["version"] == version
+
+        pnpm_entry = importer[section][name]
+        assert pnpm_entry["specifier"] == version
+        assert pnpm_entry["version"].split("(", 1)[0] == version
+        assert f"{name}@{version}" in pnpm_lock["packages"]
+
+    assert npm_lock["packages"]["node_modules/@pixiv/three-vrm"]["peerDependencies"]["three"] == ">=0.137"
+    assert not any(
+        (APP_ROOT / name).exists()
+        for name in ("yarn.lock", "bun.lock", "bun.lockb", "npm-shrinkwrap.json")
+    )
 
 
 def test_avatar_runtime_has_no_remote_dependency_contract():
