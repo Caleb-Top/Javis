@@ -14,6 +14,7 @@ import type {
   ExpressionTarget,
 } from "./avatarTypes.ts";
 import { createAvatarScene, type AvatarSceneController } from "./AvatarScene.ts";
+import { createProceduralAvatar } from "./ProceduralAvatar.ts";
 
 export type AvatarSurfaceMode = "pet" | "live" | "code" | "settings";
 export type AvatarSurfaceTier = Extract<
@@ -99,6 +100,32 @@ function createDefaultResources(): AvatarSurfaceResources {
     createClock: () => new Clock(),
     requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
     cancelAnimationFrame: (frameId) => window.cancelAnimationFrame(frameId),
+    loadModel(manifest, scene) {
+      if (manifest.kind !== "procedural3d") return null;
+      const avatar = createProceduralAvatar(scene.modelAnchor);
+      return {
+        object: avatar.object,
+        owned: false,
+        update(_deltaSeconds, target) {
+          if (!target) return;
+          avatar.handles.mouth.set(target.mouth / 0.65);
+          avatar.handles.eyes.set(target.blinkRate === "off" ? 0.08 : 1);
+          avatar.handles.head.set(
+            target.posture === "cautious" || target.posture === "retracted" ? 0.35
+              : target.posture === "active" ? 0.62
+                : 0.5,
+          );
+          avatar.handles.body.set(target.posture === "active" ? 0.7 : 0.5);
+          avatar.handles.coreLight.set(
+            target.color === "red" ? 0.95
+              : target.color === "dim" ? 0.18
+                : target.color === "amber" ? 0.62
+                  : 0.72,
+          );
+        },
+        dispose: () => avatar.dispose(),
+      };
+    },
   };
 }
 
@@ -141,10 +168,12 @@ function collectModelResources(model: AvatarLoadedModel): Set<DisposableResource
 }
 
 function disposeModel(model: AvatarLoadedModel | null): void {
-  if (!model || model.owned === false) return;
-  const shared = new Set<DisposableResource>(model.sharedResources || []);
-  for (const resource of collectModelResources(model)) {
-    if (!shared.has(resource)) resource.dispose();
+  if (!model) return;
+  if (model.owned !== false) {
+    const shared = new Set<DisposableResource>(model.sharedResources || []);
+    for (const resource of collectModelResources(model)) {
+      if (!shared.has(resource)) resource.dispose();
+    }
   }
   model.dispose?.();
 }

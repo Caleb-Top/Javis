@@ -9,9 +9,9 @@ import {
   MeshStandardMaterial,
   PlaneGeometry,
   PointLight,
-  Scene,
   SphereGeometry,
   TorusGeometry,
+  type Object3D,
 } from "three";
 
 const HANDLE_MIN = 0;
@@ -39,6 +39,7 @@ export type ProceduralAvatarDiagnostics = Readonly<{
 }>;
 
 export type ProceduralAvatar = Readonly<{
+  object: Object3D;
   handles: ProceduralAvatarHandles;
   diagnostics: ProceduralAvatarDiagnostics;
   dispose(): void;
@@ -77,7 +78,7 @@ function countGeometryTriangles(geometry: BufferGeometry): number {
   return Math.floor(elementCount / 3);
 }
 
-export function createProceduralAvatar(scene: Scene): ProceduralAvatar {
+export function createProceduralAvatar(parent: Object3D): ProceduralAvatar {
   const geometries = new Set<BufferGeometry>();
   const materials = new Set<Material>();
   let disposed = false;
@@ -270,7 +271,7 @@ export function createProceduralAvatar(scene: Scene): ProceduralAvatar {
   corePointLight.position.z = 0.13;
   coreAnchor.add(corePointLight);
 
-  scene.add(root);
+  parent.add(root);
 
   const handles: ProceduralAvatarHandles = Object.freeze({
     body: createNumericHandle(0.5, (value) => {
@@ -328,12 +329,13 @@ export function createProceduralAvatar(scene: Scene): ProceduralAvatar {
   });
 
   return Object.freeze({
+    object: root,
     handles,
     diagnostics,
     dispose() {
       if (disposed) return;
       disposed = true;
-      scene.remove(root);
+      parent.remove(root);
       root.clear();
       geometries.forEach((geometry) => geometry.dispose());
       materials.forEach((material) => material.dispose());
