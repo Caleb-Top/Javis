@@ -1,7 +1,7 @@
 """
 P3-3: /learn 技能闭环 — AI自创技能 + background_review + Curator + 技能市场
 """
-import os, logging, time, json, asyncio, shutil, re, ast
+import ast, json, logging, re, time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
@@ -9,6 +9,15 @@ from enum import Enum
 
 logger = logging.getLogger("skill_creator")
 _SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+
+
+def _governance_disabled(action: str) -> dict:
+    return {
+        "success": False,
+        "code": "legacy_governance_disabled",
+        "error": "legacy_governance_disabled",
+        "action": action,
+    }
 
 
 class SkillStatus(str, Enum):
@@ -110,32 +119,19 @@ class SkillCurator:
         self._load()
 
     def _load(self):
-        self._market_file.parent.mkdir(parents=True, exist_ok=True)
         if self._market_file.exists():
             try:
                 self._market = json.loads(self._market_file.read_text())
             except Exception:
                 self._market = {}
 
-    def _save(self):
-        self._market_file.write_text(json.dumps(
-            self._market, indent=2, ensure_ascii=False
-        ))
-
-    def publish(self, skill: SkillDef) -> bool:
+    def publish(self, skill: SkillDef) -> dict:
         """发布技能到市场"""
-        self._market[skill.name] = skill.to_market_dict()
-        self._save()
-        logger.info(f"技能已发布到市场: {skill.name}")
-        return True
+        return _governance_disabled("publish")
 
-    def unpublish(self, name: str) -> bool:
+    def unpublish(self, name: str) -> dict:
         """下架技能"""
-        if name in self._market:
-            del self._market[name]
-            self._save()
-            return True
-        return False
+        return _governance_disabled("unpublish")
 
     def search(self, query: str = "", category: str = "",
               tags: List[str] = None) -> list[dict]:
@@ -182,10 +178,8 @@ class SkillCreator:
         self._skills_dir = Path(skills_dir) if skills_dir else (
             Path(__file__).parent.parent / "skills"
         )
-        self._skills_dir.mkdir(exist_ok=True)
         self._reviewer = SkillReviewer()
         self._curator = SkillCurator(Path(skills_dir).parent if skills_dir else None)
-        self._review_queue: asyncio.Queue = asyncio.Queue()
 
     @staticmethod
     def _validate_name(name: str) -> str:
@@ -196,90 +190,13 @@ class SkillCreator:
 
     def create(self, name: str, description: str, prompt: str,
               category: str = "general", tags: list = None,
-              author: str = "Javis AI") -> str:
+              author: str = "Javis AI") -> dict:
         """创建新技能文件 — /learn 命令触发"""
-        name = self._validate_name(name)
-        # 检查名称冲突
-        existing = self.list_skills()
-        if name in existing:
-            logger.warning(f"技能已存在: {name}")
-            return str(self._skills_dir / f"{name}.py")
+        return self._legacy_disabled("create")
 
-        filename = f"{name}.py"
-        path = self._skills_dir / filename
-        meta = {
-            "name": name,
-            "description": description,
-            "category": category,
-            "author": author,
-            "version": "1.0.0",
-            "tags": tags or [],
-        }
-
-        content = f'''"""Auto-generated Javis skill: {name}."""
-
-SKILL_NAME = {json.dumps(name, ensure_ascii=False)}
-SKILL_DESC = {json.dumps(description, ensure_ascii=False)}
-SKILL_CATEGORY = {json.dumps(category, ensure_ascii=False)}
-SKILL_PROMPT = {json.dumps(prompt, ensure_ascii=False)}
-SKILL_META = {json.dumps(meta, ensure_ascii=False, indent=4)}
-
-
-def register(tools):
-    """技能注册入口 — 加载时被 Javis 调用"""
-    pass
-'''
-        path.write_text(content, encoding="utf-8")
-        logger.info(f"技能已创建: {name} → {path}")
-
-        # 加入审查队列
-        skill = SkillDef(
-            name=name, description=description,
-            system_prompt=prompt, category=category,
-            tags=tags or [], author=author,
-        )
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("无运行事件循环，跳过技能后台审查任务")
-        else:
-            loop.create_task(self._background_review(skill))
-
-        return str(path)
-
-    async def _background_review(self, skill: SkillDef):
-        """后台审查技能"""
-        await asyncio.sleep(1)  # 短暂延迟
-
-        existing = set(self.list_skills())
-        result = self._reviewer.review(skill, existing)
-
-        if result["passed"]:
-            skill.status = SkillStatus.ACTIVE.value
-            self._curator.publish(skill)
-            logger.info(f"技能审查通过: {skill.name} (score={result['score']})")
-        elif result["recommendation"] == "needs_improvement":
-            skill.status = SkillStatus.REVIEWING.value
-            skill.review_notes = f"需要改进: {result['score']}分"
-            logger.info(f"技能待改进: {skill.name} (score={result['score']})")
-        else:
-            skill.status = SkillStatus.REJECTED.value
-            skill.review_notes = f"未通过审查: {result['score']}分"
-            logger.info(f"技能被拒绝: {skill.name} (score={result['score']})")
-
-        # 保存审查结果
-        self._save_review_result(skill, result)
-
-    def _save_review_result(self, skill: SkillDef, result: dict):
-        """保存审查结果"""
-        review_dir = self._skills_dir.parent / "data" / "skills" / "reviews"
-        review_dir.mkdir(parents=True, exist_ok=True)
-        review_file = review_dir / f"{skill.name}.json"
-        review_file.write_text(json.dumps({
-            "skill": skill.to_dict(),
-            "review": result,
-            "reviewed_at": time.time(),
-        }, indent=2, ensure_ascii=False))
+    @staticmethod
+    def _legacy_disabled(action: str) -> dict:
+        return _governance_disabled(action)
 
     def review(self, name: str) -> dict:
         """手动审查技能"""
@@ -331,40 +248,9 @@ def register(tools):
         }
 
     def improve(self, name: str, new_prompt: str = "",
-               new_description: str = "") -> bool:
+               new_description: str = "") -> dict:
         """改进已存在的技能"""
-        try:
-            name = self._validate_name(name)
-        except ValueError:
-            return False
-        path = self._skills_dir / f"{name}.py"
-        if not path.exists():
-            return False
-
-        content = path.read_text(encoding="utf-8")
-
-        if new_prompt:
-            # 替换 SKILL_PROMPT
-            import re
-            content = re.sub(
-                r"^SKILL_PROMPT = .*$",
-                f"SKILL_PROMPT = {json.dumps(new_prompt, ensure_ascii=False)}",
-                content,
-                flags=re.MULTILINE,
-            )
-
-        if new_description:
-            content = re.sub(
-                r"^SKILL_DESC = .*$",
-                f"SKILL_DESC = {json.dumps(new_description, ensure_ascii=False)}",
-                content,
-                count=1,
-                flags=re.MULTILINE,
-            )
-
-        path.write_text(content, encoding="utf-8")
-        logger.info(f"技能已改进: {name}")
-        return True
+        return self._legacy_disabled("improve")
 
     def list_skills(self) -> list[str]:
         """列出所有技能名称"""
@@ -373,47 +259,17 @@ def register(tools):
             if f.name != "__init__.py"
         ])
 
-    def delete_skill(self, name: str) -> bool:
+    def delete_skill(self, name: str) -> dict:
         """删除技能"""
-        try:
-            name = self._validate_name(name)
-        except ValueError:
-            return False
-        path = self._skills_dir / f"{name}.py"
-        if path.exists():
-            path.unlink()
-            self._curator.unpublish(name)
-            logger.info(f"技能已删除: {name}")
-            return True
-        return False
+        return self._legacy_disabled("delete")
 
-    def export_skill(self, name: str, target_dir: str) -> Optional[str]:
+    def export_skill(self, name: str, target_dir: str) -> dict:
         """导出技能到目录"""
-        try:
-            name = self._validate_name(name)
-        except ValueError:
-            return None
-        path = self._skills_dir / f"{name}.py"
-        if not path.exists():
-            return None
+        return self._legacy_disabled("export")
 
-        target = Path(target_dir) / f"{name}.py"
-        shutil.copy2(str(path), str(target))
-        return str(target)
-
-    def import_skill(self, source_path: str) -> Optional[str]:
+    def import_skill(self, source_path: str) -> dict:
         """导入技能文件"""
-        source = Path(source_path)
-        if not source.exists() or source.suffix.lower() != ".py":
-            return None
-        try:
-            self._validate_name(source.stem)
-        except ValueError:
-            return None
-
-        target = self._skills_dir / source.name
-        shutil.copy2(str(source), str(target))
-        return str(target)
+        return self._legacy_disabled("import")
 
     def get_stats(self) -> dict:
         """技能统计"""
@@ -457,29 +313,7 @@ def get_skill_creator(skills_dir: str = "") -> SkillCreator:
 def register_in_manifest(reg):
     """注册技能创建工具到 manifest"""
     from core.tool_registry import ToolDef
-    from core.tool_result import ToolResult
     sc = get_creator()
-
-    async def create_skill(
-        name: str,
-        description: str = "",
-        system_prompt: str = "",
-        category: str = "general",
-        tags: list | None = None,
-        author: str = "Javis AI",
-    ):
-        try:
-            path = sc.create(
-                name=name,
-                description=description,
-                prompt=system_prompt,
-                category=category,
-                tags=tags or [],
-                author=author,
-            )
-        except ValueError as e:
-            return ToolResult.failure(str(e))
-        return {"success": True, "path": path, "name": name}
 
     async def list_skills():
         skills = sc.list_skills()
@@ -488,18 +322,6 @@ def register_in_manifest(reg):
     async def review_skill(name: str):
         result = sc.review(name)
         return {"success": True, **result}
-
-    async def improve_skill(name: str, system_prompt: str = "", description: str = ""):
-        ok = sc.improve(
-            name=name,
-            new_prompt=system_prompt,
-            new_description=description,
-        )
-        return {"success": ok, "name": name}
-
-    async def delete_skill(name: str):
-        ok = sc.delete_skill(name)
-        return {"success": ok, "name": name}
 
     async def skill_stats():
         return {"success": True, **sc.get_stats()}
@@ -516,45 +338,13 @@ def register_in_manifest(reg):
         results = sc.market_top(limit)
         return {"success": True, "results": results, "count": len(results)}
 
-    async def export_skill_tool(name: str, target_dir: str = "."):
-        path = sc.export_skill(name, target_dir)
-        if path:
-            return {"success": True, "path": path}
-        return {"success": False, "error": f"Skill not found: {name}"}
-
-    async def import_skill_tool(source_path: str):
-        path = sc.import_skill(source_path)
-        if path:
-            return {"success": True, "path": path}
-        return {"success": False, "error": "Import failed"}
-
     reg.register_many([
-        ToolDef("skill_create", "创建新技能 (/learn 命令)",
-                {"type":"object","properties":{
-                    "name":{"type":"string"},
-                    "description":{"type":"string","default":""},
-                    "system_prompt":{"type":"string","default":""},
-                    "category":{"type":"string","default":"general"},
-                    "tags":{"type":"array","items":{"type":"string"},"default":[]},
-                    "author":{"type":"string","default":"Javis AI"},
-                },"required":["name"]},
-                create_skill, "skill"),
         ToolDef("skill_list", "列出所有已学习技能",
                 {"type":"object","properties":{},"required":[]},
                 list_skills, "skill"),
         ToolDef("skill_review", "审查技能质量",
                 {"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
                 review_skill, "skill"),
-        ToolDef("skill_improve", "改进已有技能",
-                {"type":"object","properties":{
-                    "name":{"type":"string"},
-                    "system_prompt":{"type":"string","default":""},
-                    "description":{"type":"string","default":""},
-                },"required":["name"]},
-                improve_skill, "skill"),
-        ToolDef("skill_delete", "删除技能",
-                {"type":"object","properties":{"name":{"type":"string"}},"required":["name"]},
-                delete_skill, "skill"),
         ToolDef("skill_stats", "技能系统统计",
                 {"type":"object","properties":{},"required":[]},
                 skill_stats, "skill"),
@@ -568,13 +358,4 @@ def register_in_manifest(reg):
         ToolDef("skill_market_top", "热门技能排行",
                 {"type":"object","properties":{"limit":{"type":"integer","default":10}},"required":[]},
                 market_top, "skill"),
-        ToolDef("skill_export", "导出技能文件",
-                {"type":"object","properties":{
-                    "name":{"type":"string"},
-                    "target_dir":{"type":"string","default":"."},
-                },"required":["name"]},
-                export_skill_tool, "skill"),
-        ToolDef("skill_import", "导入技能文件",
-                {"type":"object","properties":{"source_path":{"type":"string"}},"required":["source_path"]},
-                import_skill_tool, "skill"),
     ])

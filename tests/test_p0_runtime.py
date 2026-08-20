@@ -2089,7 +2089,7 @@ class P0RuntimeTests(unittest.TestCase):
                 skill_manager.SKILLS_DIR = original_dir
                 skill_manager._manager = original_manager
 
-        self.assertEqual(installed, [{"name": "demo", "status": "active"}])
+        self.assertEqual(installed, [])
 
     def test_skill_manager_registered_tools_accept_registry_kwargs(self):
         from core import skill_manager
@@ -2110,8 +2110,7 @@ class P0RuntimeTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertIn("'success': True", result.data)
-        self.assertIn("'name': 'demo'", result.data)
-        self.assertIn("'status': 'active'", result.data)
+        self.assertIn("'skills': []", result.data)
 
     def test_skill_creator_registered_tools_accept_registry_kwargs(self):
         from core import skill_creator
@@ -2139,9 +2138,12 @@ class P0RuntimeTests(unittest.TestCase):
                 outside.unlink()
             creator = skill_creator.SkillCreator(td)
             try:
-                with self.assertRaises(ValueError):
-                    creator.create("../bad", "description long enough", "prompt long enough for testing")
-
+                result = creator.create(
+                    "../bad",
+                    "description long enough",
+                    "prompt long enough for testing",
+                )
+                self.assertEqual(result["code"], "legacy_governance_disabled")
                 self.assertFalse(outside.exists())
                 self.assertEqual(list(Path(td).rglob("*.py")), [])
             finally:
@@ -2156,9 +2158,12 @@ class P0RuntimeTests(unittest.TestCase):
             outside.write_text("original", encoding="utf-8")
             creator = skill_creator.SkillCreator(td)
             try:
-                self.assertFalse(creator.improve("../bad", new_prompt="changed"))
-                self.assertIsNone(creator.export_skill("../bad", td))
-                self.assertFalse(creator.delete_skill("../bad"))
+                for result in (
+                    creator.improve("../bad", new_prompt="changed"),
+                    creator.export_skill("../bad", td),
+                    creator.delete_skill("../bad"),
+                ):
+                    self.assertEqual(result["code"], "legacy_governance_disabled")
 
                 self.assertTrue(outside.exists())
                 self.assertEqual(outside.read_text(encoding="utf-8"), "original")
@@ -2172,7 +2177,21 @@ class P0RuntimeTests(unittest.TestCase):
         long_prompt = "x" * 120
         with tempfile.TemporaryDirectory() as td:
             creator = skill_creator.SkillCreator(td)
-            creator.create("demo_skill", "description long enough", long_prompt)
+            (Path(td) / "demo_skill.py").write_text(
+                "\n".join([
+                    'SKILL_META = {"name": "demo_skill"}',
+                    'SKILL_DESC = "description long enough"',
+                    f"SKILL_PROMPT = {long_prompt!r}",
+                    "def register(tools):",
+                    "    pass",
+                    "",
+                    "# governed fixture",
+                    "# governed fixture",
+                    "# governed fixture",
+                    "# governed fixture",
+                ]),
+                encoding="utf-8",
+            )
             review = creator.review("demo_skill")
 
         prompt_check = next(c for c in review["checks"] if c["check"] == "prompt_min_100")

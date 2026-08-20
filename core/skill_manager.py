@@ -17,48 +17,27 @@ class SkillManager:
 
     def _refresh(self):
         self._status.clear()
-        if self._skills_dir.exists():
-            for f in self._skills_dir.glob('*.py'):
-                n = f.stem
-                if not n.startswith('_'):
-                    self._status[n] = 'active'
+
+    @staticmethod
+    def _disabled(action: str) -> dict:
+        return {
+            'success': False,
+            'code': 'legacy_governance_disabled',
+            'error': 'legacy_governance_disabled',
+            'action': action,
+        }
 
     def install(self, name: str, source_path: str) -> dict:
-        if name in self._status:
-            return {'success': False, 'error': f'{name} already installed'}
-        import shutil
-        src = Path(source_path)
-        if not src.exists():
-            return {'success': False, 'error': f'Source not found: {source_path}'}
-        dest = self._skills_dir / src.name
-        shutil.copy2(str(src), str(dest))
-        self._status[name] = 'active'
-        logger.info(f'Skill installed: {name}')
-        return {'success': True, 'action': 'install', 'name': name, 'path': str(dest)}
+        return self._disabled('install')
 
     def enable(self, name: str) -> dict:
-        if name not in self._status:
-            return {'success': False, 'error': f'Skill not found: {name}'}
-        self._status[name] = 'active'
-        logger.info(f'Skill enabled: {name}')
-        return {'success': True, 'action': 'enable', 'name': name}
+        return self._disabled('enable')
 
     def disable(self, name: str) -> dict:
-        if name not in self._status:
-            return {'success': False, 'error': f'Skill not found: {name}'}
-        self._status[name] = 'disabled'
-        logger.info(f'Skill disabled: {name}')
-        return {'success': True, 'action': 'disable', 'name': name}
+        return self._disabled('disable')
 
     def uninstall(self, name: str, delete_file: bool = True) -> dict:
-        if name not in self._status:
-            return {'success': False, 'error': f'Skill not found: {name}'}
-        if delete_file:
-            for f in self._skills_dir.glob(f'{name}*.py'):
-                f.unlink()
-        del self._status[name]
-        logger.info(f'Skill uninstalled: {name}')
-        return {'success': True, 'action': 'uninstall', 'name': name}
+        return self._disabled('uninstall')
 
     def list_installed(self) -> list[dict]:
         return [{'name': n, 'status': s} for n, s in self._status.items()]
@@ -90,14 +69,6 @@ def register_in_manifest(reg):
     from core.tool_registry import ToolDef
     mgr = get_manager()
 
-    async def _install(name: str, source_path: str):
-        return mgr.install(name, source_path)
-    async def _enable(name: str):
-        return mgr.enable(name)
-    async def _disable(name: str):
-        return mgr.disable(name)
-    async def _uninstall(name: str, delete_file: bool = True):
-        return mgr.uninstall(name, delete_file)
     async def _list():
         return {'success': True, 'skills': mgr.list_installed(), **mgr.count()}
     async def _status(name: str):
@@ -107,24 +78,6 @@ def register_in_manifest(reg):
         return {'success': True, **info}
 
     reg.register_many([
-        ToolDef('skill_install', 'Install skill from file path',
-                {'type': 'object', 'properties': {
-                    'name': {'type': 'string'},
-                    'source_path': {'type': 'string'}
-                }, 'required': ['name', 'source_path']}, _install, 'skill'),
-        ToolDef('skill_enable', 'Enable a disabled skill',
-                {'type': 'object', 'properties': {
-                    'name': {'type': 'string'}
-                }, 'required': ['name']}, _enable, 'skill'),
-        ToolDef('skill_disable', 'Disable skill (keep file, stop loading)',
-                {'type': 'object', 'properties': {
-                    'name': {'type': 'string'}
-                }, 'required': ['name']}, _disable, 'skill'),
-        ToolDef('skill_uninstall', 'Uninstall skill (optional file deletion)',
-                {'type': 'object', 'properties': {
-                    'name': {'type': 'string'},
-                    'delete_file': {'type': 'boolean', 'default': True}
-                }, 'required': ['name']}, _uninstall, 'skill'),
         ToolDef('skill_list_installed', 'List all installed skills with status',
                 {'type': 'object', 'properties': {}, 'required': []}, _list, 'skill'),
         ToolDef('skill_status', 'Query single skill install status',

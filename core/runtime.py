@@ -371,7 +371,6 @@ def _register_extension_tools(registry: ToolRegistry, root: Path) -> None:
         ("core.subagent", "Subagent system registered"),
         ("core.hook_system", "Hook system registered"),
         ("tools.cron_scheduler", "Cron scheduler registered"),
-        ("core.auto_updater", "Auto updater registered"),
         ("tools.sandbox", "Sandbox system registered"),
         ("gateway.gateway_manager", "Gateway manager registered"),
     ]
@@ -383,20 +382,8 @@ def _register_extension_tools(registry: ToolRegistry, root: Path) -> None:
         except Exception as exc:
             logger.warning("%s: %s", module_name, exc)
 
-    try:
-        from core.skill_creator import get_skill_creator, register_in_manifest as register_skill_creator
-
-        skill_creator = get_skill_creator(str(root))
-        logger.info("Skill creator initialized: %s skills", len(skill_creator.list_skills()))
-        register_skill_creator(registry)
-        logger.info("Skill creator tools registered")
-        from core.skill_manager import get_skill_manager, register_in_manifest as register_skill_manager
-
-        skill_manager = get_skill_manager()
-        register_skill_manager(registry)
-        logger.info("SkillManager registered: %s skills loaded", len(skill_manager.list_all()))
-    except Exception as exc:
-        logger.warning("Skill creator: %s", exc)
+    # Source updates and skill mutation are governed by native release continuity
+    # and SkillForge. Legacy modules remain importable but are not model-facing.
 
 
 def _start_background_services(brain: Brain) -> None:
