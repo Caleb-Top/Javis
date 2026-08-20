@@ -504,6 +504,7 @@ const surfaceMenu = createSurfaceContextMenu({
 });
 const petSurface = createPetSurface({
   root: document.querySelector<HTMLElement>("#pet-surface-root")!,
+  subscribeExpression: lifeStateBridge.subscribeExpression,
   onOpenLive: () => {
     document.body.setAttribute("data-surface", "live");
     void setDesktopMode("live");
@@ -822,6 +823,7 @@ async function bootRuntime(): Promise<void> {
 }
 
 window.addEventListener("beforeunload", () => {
+  petSurface.dispose();
   runtimeAccess.dispose();
   client.dispose();
 });

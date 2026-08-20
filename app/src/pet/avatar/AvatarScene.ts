@@ -27,11 +27,11 @@ export function createAvatarScene(): AvatarSceneController {
 
   scene.name = "javis-avatar-scene";
   modelAnchor.name = "javis-avatar-model-anchor";
-  modelAnchor.position.set(0, -1.05, 0);
+  modelAnchor.position.set(0, 0.25, 0);
 
   camera.name = "javis-avatar-camera";
-  camera.position.set(0, 1.15, 3.8);
-  camera.lookAt(0, 0.85, 0);
+  camera.position.set(0, 0.02, 5.9);
+  camera.lookAt(0, -0.08, 0);
 
   keyLight.name = "javis-avatar-key-light";
   keyLight.position.set(2.5, 3.5, 4);

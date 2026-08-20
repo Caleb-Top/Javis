@@ -1760,6 +1760,7 @@ body[data-desktop-mode="code"] .code-surface,
   left: calc(10px + var(--pet-offset-x, 0px));
   width: var(--pet-boundary-size, 148px);
   height: var(--pet-boundary-size, 148px);
+  isolation: isolate;
   pointer-events: auto;
 }
 
@@ -1778,10 +1779,41 @@ body[data-desktop-mode="code"] .code-surface,
   pointer-events: none;
 }
 
-.pet-sprite-button {
+.pet-avatar-host {
   position: absolute;
   inset: 0;
   z-index: 1;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 22%;
+  background: transparent;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.pet-surface[data-pet-renderer="3d"] .pet-avatar-host {
+  opacity: 1;
+  visibility: visible;
+}
+
+.pet-avatar-host .avatar-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  background: transparent !important;
+  pointer-events: none !important;
+}
+
+.pet-sprite-button {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   display: grid;
   place-items: center;
   padding: 0;
@@ -1792,6 +1824,7 @@ body[data-desktop-mode="code"] .code-surface,
 }
 
 .pet-sprite-button:active { cursor: grabbing; }
+.pet-surface[data-pet-renderer="3d"] .pet-sprite { visibility: hidden; }
 
 .pet-sprite {
   position: relative;
@@ -1889,7 +1922,7 @@ body[data-desktop-mode="code"] .code-surface,
   left: 50%;
   top: calc(var(--pet-boundary-size, 148px) + 2px);
   bottom: auto;
-  z-index: 2;
+  z-index: 3;
   width: max-content;
   max-width: calc(var(--pet-boundary-size, 148px) + 16px);
   min-height: 22px;
@@ -2079,6 +2112,16 @@ body[data-desktop-mode="pet"] #code-root { display: none !important; }
 @keyframes pet-speaking { from { transform: translateY(0); } to { transform: translateY(-8px); } }
 @keyframes pet-executing { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(5px); } }
 @keyframes pet-atlas-loop { from { background-position: 0 center; } to { background-position: 100% center; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-boundary,
+  .pet-sprite,
+  .pet-avatar-host,
+  .pet-avatar-host .avatar-canvas {
+    animation: none !important;
+    transition: none !important;
+  }
+}
 
 @media (max-width: 720px) {
   .pet-shortcut-slot { grid-template-columns: minmax(0, 1fr) minmax(105px, .8fr) 36px; }
