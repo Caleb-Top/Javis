@@ -18,6 +18,15 @@ from dataclasses import dataclass
 from typing import Any
 
 
+ENVIRONMENT_RUNTIME_ACCESS_SCOPES = frozenset(
+    {
+        "camera.capture",
+        "environment.observe",
+        "environment.read",
+        "screen.capture",
+        "workspace.read",
+    }
+)
 RUNTIME_ACCESS_SCOPES = frozenset(
     {
         "conversation",
@@ -26,7 +35,7 @@ RUNTIME_ACCESS_SCOPES = frozenset(
         "playback",
         "voice.capture",
     }
-)
+) | ENVIRONMENT_RUNTIME_ACCESS_SCOPES
 PACKAGED_ORIGINS = frozenset(
     {
         "tauri://localhost",
@@ -497,6 +506,7 @@ def create_http_authorizer(
 
 __all__ = [
     "DEVELOPMENT_ORIGINS",
+    "ENVIRONMENT_RUNTIME_ACCESS_SCOPES",
     "IssuedRuntimeCapability",
     "PACKAGED_ORIGINS",
     "RUNTIME_ACCESS_SCOPES",

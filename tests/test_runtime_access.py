@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.runtime_access import (
+    ENVIRONMENT_RUNTIME_ACCESS_SCOPES,
     RuntimeAccessAuthority,
     capability_from_websocket_protocols,
     create_http_authorizer,
@@ -42,6 +43,37 @@ def _authority(*, now=None, allow_development_origins=False):
         now=now,
         allow_development_origins=allow_development_origins,
     )
+
+
+def test_environment_scopes_extend_without_changing_existing_scope_catalog():
+    assert ENVIRONMENT_RUNTIME_ACCESS_SCOPES == frozenset(
+        {
+            "environment.read",
+            "environment.observe",
+            "workspace.read",
+            "screen.capture",
+            "camera.capture",
+        }
+    )
+
+    authority = _authority()
+    issued = authority.issue(
+        "desktop-main",
+        (
+            "conversation",
+            "diagnostics.read",
+            "life.read",
+            "playback",
+            "voice.capture",
+        ),
+    )
+    for scope in issued.scopes:
+        assert authority.validate(
+            issued.token,
+            scope=scope,
+            origin=TAURI_ORIGIN,
+            peer_host="127.0.0.1",
+        ).allowed
 
 
 def test_capability_is_scoped_bounded_and_never_exposed_by_diagnostics():
