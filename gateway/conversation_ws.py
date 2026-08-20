@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any, Callable
 
 from fastapi import WebSocketDisconnect
@@ -25,7 +26,9 @@ from core.life.l1.contracts import (
     InputVerification,
 )
 from core.life.l1.wake import DETERMINISTIC_LOCAL_LANE, PresenceResponder
-from core.runtime_access import websocket_access_remaining
+from core.life.memory.access import PrincipalBindingSource, ServerPrincipal
+from core.life.memory.contracts import AccessPurpose
+from core.runtime_access import websocket_access_remaining, websocket_runtime_principal
 from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
 
@@ -144,7 +147,10 @@ class ConversationWebSocketGateway:
                     break
                 try:
                     message = json.loads(raw)
-                    command = normalize_client_message(message, default_session=attached_session)
+                    command = self._attach_server_principal(
+                        ws,
+                        normalize_client_message(message, default_session=attached_session),
+                    )
                     if command.type == "conversation.attach":
                         await attach(command, acknowledge=True)
                     elif command.type == "conversation.message":
@@ -312,6 +318,7 @@ class ConversationWebSocketGateway:
             idempotency_key=command.idempotency_key or command.request_id,
             input_provenance=input_provenance,
             execution_lane=presence_decision.execution_lane,
+            access_context=self._access_context_for(command),
         )
 
         async def runner(active_request, token):
@@ -379,6 +386,40 @@ class ConversationWebSocketGateway:
                     request_id=command.request_id,
                 )
         return result
+
+    @staticmethod
+    def _attach_server_principal(ws, command: ClientCommand) -> ClientCommand:
+        authorized = websocket_runtime_principal(ws)
+        if authorized is None or not command.session_id:
+            return command
+        try:
+            source = PrincipalBindingSource(authorized.binding_source)
+            principal = ServerPrincipal(
+                runtime_boot_id=authorized.runtime_boot_id,
+                session_id=command.session_id,
+                client_id_hash=authorized.client_id_hash,
+                capability_scopes=authorized.scopes,
+                issued_at_epoch=authorized.issued_at_epoch,
+                expires_at_epoch=authorized.expires_at_epoch,
+                binding_source=source,
+            )
+        except (TypeError, ValueError):
+            return command
+        return replace(command, server_principal=principal)
+
+    def _access_context_for(self, command: ClientCommand):
+        factory = getattr(self.runtime, "memory_access_factory", None)
+        resolve = getattr(factory, "for_session", None)
+        if not callable(resolve):
+            return None
+        try:
+            return resolve(
+                command.session_id,
+                principal=command.server_principal,
+                purpose=AccessPurpose.CONVERSATION,
+            )
+        except (TypeError, ValueError, RuntimeError):
+            return None
 
     async def _dispatch_local_action(self, ws, command: ClientCommand) -> bool:
         if self.local_action_resolver is None:

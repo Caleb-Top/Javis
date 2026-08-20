@@ -6,6 +6,12 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from core.life.memory.access import (
+    ReservedAccessFieldError,
+    ServerPrincipal,
+    reject_reserved_client_access_fields,
+)
+
 
 CANONICAL_COMMANDS = {
     "conversation.attach",
@@ -49,6 +55,7 @@ class ClientCommand:
     after_sequence: int = 0
     protocol_version: int = 1
     legacy: bool = False
+    server_principal: ServerPrincipal | None = None
 
 
 def normalize_client_message(
@@ -72,6 +79,13 @@ def normalize_client_message(
     payload = message.get("payload", {})
     if not isinstance(payload, dict):
         raise ConversationProtocolError("invalid_payload", "payload must be an object")
+    try:
+        reject_reserved_client_access_fields(payload)
+    except ReservedAccessFieldError as exc:
+        raise ConversationProtocolError(
+            "reserved_access_field",
+            f"client field is server-owned: {exc.field_name}",
+        ) from exc
 
     protocol_version = _bounded_int(
         payload.get("protocol_version", message.get("protocol_version", 1 if legacy else 2)),

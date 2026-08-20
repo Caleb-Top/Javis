@@ -13,6 +13,8 @@ from core.conversation_store import ConversationStore, ConversationStoreError
 from core.events import EventBus
 from core.life.l1.contracts import InputProvenance
 from core.life.l1.wake import DETERMINISTIC_LOCAL_LANE, EXCLUSIVE_LANE
+from core.life.memory.access import AccessContextFactory, safe_access_projection
+from core.life.memory.contracts import AccessContext
 
 
 Runner = Callable[["ConversationRequest", CancellationToken], AsyncIterator[dict[str, Any]]]
@@ -60,6 +62,7 @@ class ConversationRequest:
     idempotency_key: str = ""
     input_provenance: InputProvenance = field(default_factory=InputProvenance.unknown)
     execution_lane: str = EXCLUSIVE_LANE
+    access_context: AccessContext | None = None
 
 
 @dataclass
@@ -188,6 +191,9 @@ class ConversationHub:
                     "replaces_request_id": previous.request.request_id if previous else "",
                     "input_provenance": normalized.input_provenance.to_dict(),
                     "execution_lane": normalized.execution_lane,
+                    "access_projection": safe_access_projection(
+                        normalized.access_context
+                    ),
                 },
                 preceding_events=preceding_events,
             )
@@ -653,6 +659,7 @@ class ConversationHub:
         idempotency_key = str(request.idempotency_key or request_id).strip()
         input_provenance = request.input_provenance
         execution_lane = str(request.execution_lane or "").strip()
+        access_context = request.access_context
         for field, value in (
             ("session_id", session_id),
             ("request_id", request_id),
@@ -666,6 +673,15 @@ class ConversationHub:
             raise ConversationStoreError("invalid input provenance")
         if execution_lane not in {EXCLUSIVE_LANE, DETERMINISTIC_LOCAL_LANE}:
             raise ConversationStoreError("invalid execution lane")
+        if access_context is None:
+            access_context = AccessContextFactory(
+                None,
+                runtime_boot_id="runtime-compatibility",
+            ).for_session(session_id, principal=None)
+        if not isinstance(access_context, AccessContext):
+            raise ConversationStoreError("invalid access context")
+        if access_context.session_id != session_id:
+            raise ConversationStoreError("access context session mismatch")
         return ConversationRequest(
             session_id,
             request_id,
@@ -674,4 +690,5 @@ class ConversationHub:
             idempotency_key,
             input_provenance,
             execution_lane,
+            access_context,
         )

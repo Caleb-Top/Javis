@@ -27,6 +27,14 @@ ENVIRONMENT_RUNTIME_ACCESS_SCOPES = frozenset(
         "workspace.read",
     }
 )
+MEMORY_RUNTIME_ACCESS_SCOPES = frozenset(
+    {
+        "memory.delete",
+        "memory.manage",
+        "memory.migrate",
+        "memory.read",
+    }
+)
 RUNTIME_ACCESS_SCOPES = frozenset(
     {
         "conversation",
@@ -35,7 +43,7 @@ RUNTIME_ACCESS_SCOPES = frozenset(
         "playback",
         "voice.capture",
     }
-) | ENVIRONMENT_RUNTIME_ACCESS_SCOPES
+) | ENVIRONMENT_RUNTIME_ACCESS_SCOPES | MEMORY_RUNTIME_ACCESS_SCOPES
 PACKAGED_ORIGINS = frozenset(
     {
         "tauri://localhost",
@@ -76,6 +84,27 @@ class RuntimeAccessDecision:
     client_id_hash: str
     expires_in_seconds: float = 0.0
     nonce_digest: str = ""
+    principal: "RuntimeAccessPrincipal | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAccessPrincipal:
+    runtime_boot_id: str
+    client_id_hash: str
+    scopes: tuple[str, ...]
+    issued_at_epoch: float
+    expires_at_epoch: float
+    binding_source: str
+
+    def safe_projection(self) -> dict[str, Any]:
+        return {
+            "runtime_boot_id": self.runtime_boot_id,
+            "client_id_hash": self.client_id_hash,
+            "scopes": list(self.scopes),
+            "issued_at_epoch": self.issued_at_epoch,
+            "expires_at_epoch": self.expires_at_epoch,
+            "binding_source": self.binding_source,
+        }
 
 
 @dataclass(frozen=True)
@@ -111,7 +140,16 @@ def _token_digest(token: str) -> str:
 
 
 def _client_hash(client_instance_id: str) -> str:
-    return hashlib.sha256(client_instance_id.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(client_instance_id.encode("utf-8")).hexdigest()
+
+
+def _binding_source(origin: str) -> str:
+    candidate = str(origin or "").strip().casefold()
+    if candidate in PACKAGED_ORIGINS:
+        return "packaged_desktop"
+    if candidate in DEVELOPMENT_ORIGINS:
+        return "development_web"
+    return "loopback_web"
 
 
 def _is_loopback(host: str) -> bool:
@@ -293,6 +331,14 @@ class RuntimeAccessAuthority:
                 client_id_hash=grant.client_id_hash,
                 expires_in_seconds=max(0.0, grant.expires_at_epoch - now),
                 nonce_digest=grant.nonce_digest,
+                principal=RuntimeAccessPrincipal(
+                    runtime_boot_id=grant.runtime_boot_id,
+                    client_id_hash=grant.client_id_hash,
+                    scopes=grant.scopes,
+                    issued_at_epoch=grant.issued_at_epoch,
+                    expires_at_epoch=grant.expires_at_epoch,
+                    binding_source=_binding_source(origin),
+                ),
             )
 
     def revoke_client(self, client_instance_id: str) -> int:
@@ -459,6 +505,7 @@ def create_websocket_authorizer(
                         + decision.expires_in_seconds
                     ),
                 }
+                socket_scope["javis.runtime_principal"] = decision.principal
             return True
         await websocket.close(
             code=decision.close_code,
@@ -475,6 +522,14 @@ def websocket_access_context(websocket: Any) -> dict[str, Any] | None:
         return None
     value = socket_scope.get("javis.runtime_access")
     return dict(value) if isinstance(value, Mapping) else None
+
+
+def websocket_runtime_principal(websocket: Any) -> RuntimeAccessPrincipal | None:
+    socket_scope = getattr(websocket, "scope", None)
+    if not isinstance(socket_scope, Mapping):
+        return None
+    value = socket_scope.get("javis.runtime_principal")
+    return value if isinstance(value, RuntimeAccessPrincipal) else None
 
 
 def websocket_access_remaining(websocket: Any) -> float | None:
@@ -508,13 +563,16 @@ __all__ = [
     "DEVELOPMENT_ORIGINS",
     "ENVIRONMENT_RUNTIME_ACCESS_SCOPES",
     "IssuedRuntimeCapability",
+    "MEMORY_RUNTIME_ACCESS_SCOPES",
     "PACKAGED_ORIGINS",
     "RUNTIME_ACCESS_SCOPES",
     "RuntimeAccessAuthority",
     "RuntimeAccessDecision",
+    "RuntimeAccessPrincipal",
     "capability_from_websocket_protocols",
     "create_http_authorizer",
     "create_websocket_authorizer",
     "websocket_access_context",
     "websocket_access_remaining",
+    "websocket_runtime_principal",
 ]
