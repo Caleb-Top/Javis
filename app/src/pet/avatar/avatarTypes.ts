@@ -108,16 +108,16 @@ export type AvatarExpressionState =
   | "offline";
 
 export type AvatarGazeTarget = "none" | "user" | "content" | "task";
-export type AvatarBlinkRate = "slow" | "normal" | "fast";
+export type AvatarBlinkRate = "off" | "slow" | "normal" | "fast";
 export type AvatarPosture =
   | "neutral"
   | "attentive"
-  | "reflective"
+  | "focused"
   | "active"
   | "cautious"
-  | "offline";
-export type AvatarColorIntent = "cyan" | "violet" | "amber" | "red" | "muted";
-export type AvatarGesture = "none" | "acknowledge" | "explain" | "execute";
+  | "retracted";
+export type AvatarColorIntent = "cyan" | "violet" | "amber" | "red" | "dim";
+export type AvatarGesture = "none" | "working";
 
 export type ExpressionTarget = Readonly<{
   state: AvatarExpressionState;
