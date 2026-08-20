@@ -92,6 +92,9 @@ export type CreateAvatarSurfaceOptions = Readonly<{
   height?: number;
   pixelRatio?: number;
   resources?: AvatarSurfaceResources;
+  onFrame?(durationMs: number): void;
+  onContextLost?(): void;
+  onContextRestored?(): void;
 }>;
 
 function createDefaultResources(): AvatarSurfaceResources {
@@ -214,9 +217,11 @@ export async function createAvatarSurface(
 
   const renderFrame = (): void => {
     if (disposed || contextLost) return;
-    model?.update?.(clock.getDelta(), expressionTarget);
+    const deltaSeconds = clock.getDelta();
+    model?.update?.(deltaSeconds, expressionTarget);
     renderer.render(scene.scene, scene.camera);
     frameCount += 1;
+    options.onFrame?.(Math.max(0, deltaSeconds * 1_000));
   };
 
   const scheduleFrame = (): void => {
@@ -238,12 +243,14 @@ export async function createAvatarSurface(
     event.preventDefault();
     contextLost = true;
     cancelFrame();
+    options.onContextLost?.();
   };
   const handleContextRestored: EventListener = () => {
     if (disposed) return;
     contextLost = false;
     clock.start?.();
     scheduleFrame();
+    options.onContextRestored?.();
   };
 
   renderer.setClearColor(0x000000, 0);

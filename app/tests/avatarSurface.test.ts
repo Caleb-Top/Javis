@@ -123,10 +123,15 @@ test("resizes, renders once and reports the current semantic target", async () =
 
 test("stops on context loss, prevents default and removes context listeners", async () => {
   const fixture = createAvatarResourceFixture();
+  const lifecycle: string[] = [];
+  const frameDurations: number[] = [];
   const surface = await createAvatarSurface({
     host: createAvatarHostFixture(),
     manifest: proceduralManifestFixture(),
     resources: fixture.resources,
+    onFrame: (durationMs) => frameDurations.push(durationMs),
+    onContextLost: () => lifecycle.push("lost"),
+    onContextRestored: () => lifecycle.push("restored"),
   });
   let prevented = false;
   const lostEvent = {
@@ -141,9 +146,13 @@ test("stops on context loss, prevents default and removes context listeners", as
   assert.equal(prevented, true);
   assert.equal(surface.diagnostics().contextLost, true);
   assert.equal(surface.diagnostics().rendering, false);
+  assert.deepEqual(lifecycle, ["lost"]);
   fixture.canvas.dispatch("webglcontextrestored", {} as Event);
   assert.equal(surface.diagnostics().contextLost, false);
   assert.equal(surface.diagnostics().rendering, true);
+  assert.deepEqual(lifecycle, ["lost", "restored"]);
+  fixture.runNextFrame();
+  assert.deepEqual(frameDurations, [1000 / 60]);
 
   surface.dispose();
   assert.equal(fixture.canvas.listenerCount("webglcontextlost"), 0);

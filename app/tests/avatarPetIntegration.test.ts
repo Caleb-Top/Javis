@@ -64,7 +64,7 @@ test("dispose invalidates pending generations and production releases mounted re
 test("3d mounting uses manifest fallback, controller capabilities and current intent only", () => {
   assert.match(petSource, /avatarAssetRegistry\.get\(skin\.manifestId\)/);
   assert.match(petSource, /avatarAssetRegistry\.resolveFallback\(skin\.manifestId\)/);
-  assert.match(petSource, /applySkin\(terminalFallback, false\)/);
+  assert.match(petSource, /applySkin\(fallbackSkinFor\(skin\), false\)/);
   assert.match(petSource, /skinLoads\.accept\(generation, mountedSurface\)/);
   assert.match(petSource, /createAvatarController\(\{[\s\S]*?sink:\s*mountedSurface,[\s\S]*?capabilities:\s*manifest\.capabilities/);
   assert.match(petSource, /isUnexpiredIntent\(latestIntent\)/);
@@ -94,4 +94,19 @@ test("the original button remains the only pointer, drag, click and context-menu
   assert.match(cssSource, /\.pet-avatar-host \.avatar-canvas[\s\S]*?background:\s*transparent !important[\s\S]*?pointer-events:\s*none !important/);
   assert.match(cssSource, /\.pet-sprite-button[\s\S]*?z-index:\s*2/);
   assert.match(cssSource, /\.pet-status[\s\S]*?z-index:\s*3/);
+});
+
+test("production mounting wires performance samples and bounded context recovery", () => {
+  assert.match(petSource, /new PerformanceGovernor\(\{/);
+  assert.match(petSource, /new AvatarFallbackCoordinator\(\{ initialTier: avatarTier \}\)/);
+  assert.match(petSource, /onFrame: \(durationMs\) => handleAvatarFrame\(skin, generation, durationMs\)/);
+  assert.match(petSource, /onContextLost: \(\) => handleAvatarContextLost\(skin, generation\)/);
+  assert.match(petSource, /onContextRestored: \(\) => handleAvatarContextRestored\(skin, generation\)/);
+  assert.match(petSource, /fallbackCoordinator\.onContextLost\(\)/);
+  assert.match(petSource, /coordinator\.requestContextRecovery\(\)/);
+  assert.match(petSource, /coordinator\.onContextRestored\(latestIntent \|\| undefined\)/);
+  assert.match(petSource, /fallbackCoordinator\.onRecoverySucceeded\(latestIntent \|\| undefined\)/);
+  assert.match(petSource, /showVisualFallback\(skin\)/);
+  assert.match(petSource, /if \(recovery\.canAttemptRecovery\) scheduleRecoveryRetry\(skin, generation\)/);
+  assert.match(petSource, /cancelRecoveryTimer\(\)/);
 });

@@ -11,8 +11,13 @@ import {
   createAvatarController,
   type AvatarController,
 } from "./avatar/AvatarController.ts";
+import { AvatarFallbackCoordinator } from "./avatar/AvatarFallbackCoordinator.ts";
+import { PerformanceGovernor } from "./avatar/PerformanceGovernor.ts";
 import { SpeakingEnvelope } from "./avatar/SpeakingEnvelope.ts";
-import type { AvatarSurfaceController } from "./avatar/AvatarSurface.ts";
+import type {
+  AvatarSurfaceController,
+  AvatarSurfaceTier,
+} from "./avatar/AvatarSurface.ts";
 import {
   parsePetPreferences,
   readPetPreferences,
@@ -50,6 +55,10 @@ function isUnexpiredIntent(intent: ExpressionIntent, now = Date.now()): boolean 
   return Number.isFinite(expiry) && expiry > now;
 }
 
+function initialTierForSkin(skin: PetThreeDimensionalSkin): AvatarSurfaceTier {
+  return skin.kind === "procedural3d" ? "procedural3d" : "3d-high";
+}
+
 export function createPetSurface(options: PetSurfaceOptions): PetSurfaceController {
   let currentSkin = getDefaultPetSkin();
   let currentState: LiveState = "idle";
@@ -58,7 +67,12 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
   let avatarSurface: AvatarSurfaceController | null = null;
   let avatarController: AvatarController | null = null;
   let latestIntent: ExpressionIntent | null = null;
+  let visualFallbackSkin: PetSkin | null = null;
+  let performanceGovernor: PerformanceGovernor | null = null;
+  let fallbackCoordinator: AvatarFallbackCoordinator | null = null;
+  let avatarTier: AvatarSurfaceTier = "procedural3d";
   let avatarFrameId: number | null = null;
+  let recoveryTimerId: number | null = null;
   const avatarLoader = options.avatarLoader || defaultAvatarLoader;
   const skinLoads = new PetSkinLoadGeneration();
   const speakingEnvelope = new SpeakingEnvelope();
@@ -87,6 +101,12 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
     avatarFrameId = null;
   }
 
+  function cancelRecoveryTimer(): void {
+    if (recoveryTimerId === null) return;
+    window.clearTimeout(recoveryTimerId);
+    recoveryTimerId = null;
+  }
+
   function stopSpeakingEnvelope(): void {
     speakingEnvelope.stop();
     avatarController?.setSpeakingLevel(0);
@@ -108,6 +128,7 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
   function releaseAvatar(): void {
     stopSpeakingEnvelope();
     cancelAvatarFrame();
+    cancelRecoveryTimer();
     const controller = avatarController;
     avatarController = null;
     controller?.dispose();
@@ -119,21 +140,23 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
   }
 
   function renderAsset(): void {
-    if (currentSkin.kind !== "sprite2d") {
-      sprite.dataset.assetMode = currentSkin.kind;
+    const displaySkin = visualFallbackSkin || currentSkin;
+    if (displaySkin.kind !== "sprite2d") {
+      sprite.dataset.assetMode = displaySkin.kind;
       sprite.style.backgroundImage = "none";
       return;
     }
     const animate = currentState !== "idle"
       && currentState !== "offline"
-      && Boolean(currentSkin.sourceAtlasAsset);
-    const asset = animate ? currentSkin.sourceAtlasAsset : currentSkin.idleAsset;
+      && Boolean(displaySkin.sourceAtlasAsset);
+    const asset = animate ? displaySkin.sourceAtlasAsset : displaySkin.idleAsset;
     sprite.dataset.assetMode = animate ? "atlas" : "idle";
     sprite.style.backgroundImage = asset ? `url("${asset}")` : "none";
   }
 
   function renderSkin(skin: PetSkin, persist: boolean): void {
     currentSkin = skin;
+    visualFallbackSkin = null;
     surface.dataset.skin = skin.id;
     surface.dataset.skinKind = skin.kind;
     surface.dataset.petRenderer = isThreeDimensionalSkin(skin) ? "loading" : skin.kind;
@@ -154,7 +177,7 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
     avatarController?.applyIntent(latestIntent);
   }
 
-  function fallbackFrom(skin: PetThreeDimensionalSkin): void {
+  function fallbackSkinFor(skin: PetThreeDimensionalSkin): PetSkin {
     let fallbackId = "javis-orb";
     try {
       fallbackId = avatarAssetRegistry.resolveFallback(skin.manifestId)?.id || fallbackId;
@@ -164,15 +187,104 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
     const fallbackSkin = petSkinRegistry.find((candidate) =>
       candidate.id === fallbackId || candidate.manifestId === fallbackId
     );
-    const terminalFallback = fallbackSkin && fallbackSkin.id !== skin.id
+    return fallbackSkin && fallbackSkin.id !== skin.id
       ? fallbackSkin
       : petSkinRegistry.find((candidate) => candidate.kind === "orb") || petSkinRegistry[0];
-    applySkin(terminalFallback, false);
+  }
+
+  function showVisualFallback(skin: PetThreeDimensionalSkin): void {
+    const fallback = fallbackSkinFor(skin);
+    visualFallbackSkin = fallback;
+    surface.dataset.petRenderer = fallback.kind;
+    sprite.className = `pet-sprite ${fallback.fallbackClass}${fallback.kind === "sprite2d" ? " has-asset" : ""}`;
+    sprite.style.setProperty("--pet-accent", fallback.accent);
+    sprite.setAttribute("aria-label", fallback.name);
+    sprite.textContent = fallback.kind === "sprite2d" ? "" : "J";
+    renderAsset();
+    avatarHost.hidden = true;
+  }
+
+  function fallbackFrom(skin: PetThreeDimensionalSkin): void {
+    applySkin(fallbackSkinFor(skin), false);
+  }
+
+  function handleAvatarFrame(
+    skin: PetThreeDimensionalSkin,
+    generation: number,
+    durationMs: number,
+  ): void {
+    if (!skinLoads.isCurrent(generation) || !performanceGovernor) return;
+    const decision = performanceGovernor.recordFrame(durationMs);
+    surface.dataset.avatarTier = decision.tier;
+    if (
+      decision.action === "downgrade"
+      && (decision.tier === "3d-high" || decision.tier === "3d-low" || decision.tier === "procedural3d")
+    ) {
+      const nextTier = decision.tier;
+      queueMicrotask(() => {
+        if (!disposed && skinLoads.isCurrent(generation)) applySkin(skin, false, nextTier);
+      });
+    }
+  }
+
+  function handleAvatarContextLost(
+    skin: PetThreeDimensionalSkin,
+    generation: number,
+  ): void {
+    if (!skinLoads.isCurrent(generation) || !fallbackCoordinator) return;
+    if (latestIntent) fallbackCoordinator.acceptIntent(latestIntent);
+    performanceGovernor?.reportFailure("context");
+    const decision = fallbackCoordinator.onContextLost();
+    surface.dataset.avatarFallbackStatus = decision.status;
+    avatarSurface?.setVisible(false);
+    showVisualFallback(skin);
+  }
+
+  function handleAvatarContextRestored(
+    skin: PetThreeDimensionalSkin,
+    generation: number,
+  ): void {
+    const coordinator = fallbackCoordinator;
+    if (!skinLoads.isCurrent(generation) || !coordinator) return;
+    coordinator.requestContextRecovery();
+    const decision = coordinator.onContextRestored(latestIntent || undefined);
+    surface.dataset.avatarFallbackStatus = decision.status;
+    if (!decision.reloadAssets) return;
+
+    const targetTier = decision.recoveryTarget;
+    if (targetTier !== "3d-high" && targetTier !== "3d-low" && targetTier !== "procedural3d") return;
+    avatarTier = targetTier;
+    const nextGeneration = skinLoads.next();
+    releaseAvatar();
+    showVisualFallback(skin);
+    void mountAvatarSkin(skin, nextGeneration, true);
+  }
+
+  function scheduleRecoveryRetry(
+    skin: PetThreeDimensionalSkin,
+    generation: number,
+  ): void {
+    cancelRecoveryTimer();
+    recoveryTimerId = window.setTimeout(() => {
+      recoveryTimerId = null;
+      const coordinator = fallbackCoordinator;
+      if (disposed || !skinLoads.isCurrent(generation) || !coordinator) return;
+      const attempt = coordinator.requestContextRecovery();
+      if (attempt.action !== "attempt-context-recovery") return;
+      const decision = coordinator.onContextRestored(latestIntent || undefined);
+      surface.dataset.avatarFallbackStatus = decision.status;
+      if (!decision.reloadAssets) return;
+      const nextGeneration = skinLoads.next();
+      releaseAvatar();
+      showVisualFallback(skin);
+      void mountAvatarSkin(skin, nextGeneration, true);
+    }, 250);
   }
 
   async function mountAvatarSkin(
     skin: PetThreeDimensionalSkin,
     generation: number,
+    recovering = false,
   ): Promise<void> {
     const manifest = avatarAssetRegistry.get(skin.manifestId);
     if (!manifest || manifest.kind !== skin.kind) {
@@ -185,6 +297,10 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
         host: avatarHost,
         manifest,
         mode: "pet",
+        tier: avatarTier,
+        onFrame: (durationMs) => handleAvatarFrame(skin, generation, durationMs),
+        onContextLost: () => handleAvatarContextLost(skin, generation),
+        onContextRestored: () => handleAvatarContextRestored(skin, generation),
       });
       if (!skinLoads.accept(generation, mountedSurface)) return;
 
@@ -193,8 +309,15 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
         sink: mountedSurface,
         capabilities: manifest.capabilities,
       });
+      renderSkin(skin, false);
       avatarHost.hidden = false;
       surface.dataset.petRenderer = "3d";
+      surface.dataset.avatarTier = avatarTier;
+      if (recovering && fallbackCoordinator) {
+        const recovery = fallbackCoordinator.onRecoverySucceeded(latestIntent || undefined);
+        surface.dataset.avatarFallbackStatus = recovery.status;
+        if (recovery.expressionIntent) latestIntent = recovery.expressionIntent;
+      }
       applyLatestIntent();
 
       if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
@@ -204,15 +327,49 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
         driveAvatarController();
       }
     } catch {
-      if (!disposed && skinLoads.isCurrent(generation)) fallbackFrom(skin);
+      if (!disposed && skinLoads.isCurrent(generation)) {
+        performanceGovernor?.reportFailure("load");
+        if (recovering && fallbackCoordinator) {
+          const recovery = fallbackCoordinator.onRecoveryFailed();
+          surface.dataset.avatarFallbackStatus = recovery.status;
+          showVisualFallback(skin);
+          if (recovery.canAttemptRecovery) scheduleRecoveryRetry(skin, generation);
+        } else {
+          fallbackCoordinator?.onLoadFailure();
+          fallbackFrom(skin);
+        }
+      }
     }
   }
 
-  function applySkin(skin: PetSkin, persist = true): void {
+  function applySkin(
+    skin: PetSkin,
+    persist = true,
+    requestedTier?: AvatarSurfaceTier,
+  ): void {
     const generation = skinLoads.next();
     releaseAvatar();
     renderSkin(skin, persist);
-    if (isThreeDimensionalSkin(skin)) void mountAvatarSkin(skin, generation);
+    if (isThreeDimensionalSkin(skin)) {
+      const reducedMotion = Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+      performanceGovernor = new PerformanceGovernor({
+        initialTier: requestedTier || initialTierForSkin(skin),
+        reducedMotion,
+      });
+      const governedTier = performanceGovernor.tier();
+      avatarTier = governedTier === "3d-high" || governedTier === "3d-low" || governedTier === "procedural3d"
+        ? governedTier
+        : "procedural3d";
+      fallbackCoordinator = new AvatarFallbackCoordinator({ initialTier: avatarTier });
+      surface.dataset.avatarTier = avatarTier;
+      surface.dataset.avatarFallbackStatus = "ready";
+      void mountAvatarSkin(skin, generation);
+      return;
+    }
+    performanceGovernor = null;
+    fallbackCoordinator = null;
+    delete surface.dataset.avatarTier;
+    delete surface.dataset.avatarFallbackStatus;
   }
 
   function setPreferences(next: PetPreferences): void {
