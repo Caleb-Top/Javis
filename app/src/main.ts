@@ -374,6 +374,9 @@ const client = createBackendClient({
                 return;
               }
               activeVoicePlayback = identity;
+              document.dispatchEvent(new CustomEvent("javis:playback-envelope-start", {
+                detail: { durationMs: playback.duration_ms },
+              }));
               runtimeStateCoordinator.signal({
                 source: "voice",
                 state: "speaking",

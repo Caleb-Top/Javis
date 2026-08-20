@@ -88,6 +88,15 @@ export class ExpressionMixer {
     this.#transitionFromMouth = 0;
   }
 
+  setSpeakingLevel(level: number): void {
+    if (this.#interrupted || this.#target.state !== "speaking") {
+      this.#current = { ...this.#current, mouth: 0 };
+      return;
+    }
+    const safeLevel = Number.isFinite(level) ? Math.min(0.65, Math.max(0, level)) : 0;
+    this.#current = { ...this.#current, mouth: safeLevel };
+  }
+
   snapshot(): ExpressionMixerSnapshot {
     return { ...this.#current };
   }

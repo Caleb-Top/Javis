@@ -19,6 +19,7 @@ export type AvatarControllerOptions = {
 export type AvatarController = {
   applyIntent(intent: ExpressionIntent): boolean;
   tick(now?: number): void;
+  setSpeakingLevel(level: number): void;
   interrupt(): void;
   dispose(): void;
   revision(): number;
@@ -64,11 +65,17 @@ export function createAvatarController(options: AvatarControllerOptions): Avatar
     publish();
   }
 
+  function setSpeakingLevel(level: number): void {
+    if (disposed) return;
+    mixer.setSpeakingLevel(level);
+    publish();
+  }
+
   function dispose(): void {
     if (disposed) return;
     interrupt();
     disposed = true;
   }
 
-  return { applyIntent, tick, interrupt, dispose, revision: () => latestRevision };
+  return { applyIntent, tick, setSpeakingLevel, interrupt, dispose, revision: () => latestRevision };
 }
