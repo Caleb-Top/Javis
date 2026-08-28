@@ -6,10 +6,10 @@ assistant. Call ``create_runtime`` to assemble the runtime explicitly.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
-import hashlib
 import os
 import platform
 import pkgutil
@@ -28,6 +28,8 @@ from core.events import EventBus
 from core.llm_client import LLMClient
 from core.life.paths import resolve_data_root
 from core.life.l8.layout import ContinuityLayout
+from core.life.memory.access import AccessContextFactory, MemoryServiceAccessView
+from core.life.memory.service import MemoryService
 from core.life.service import LifeService
 from core.middleware import MiddlewarePipeline
 from core.skill_catalog import SkillCatalog, SkillGovernanceError
@@ -63,6 +65,8 @@ class JarvisRuntime:
     conversation_store: ConversationStore
     conversation_hub: ConversationHub
     life: LifeService
+    memory_service: MemoryService
+    memory_access_factory: AccessContextFactory | None = None
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
     skill_list: list[dict[str, Any]] = field(default_factory=list)
@@ -250,6 +254,7 @@ class JarvisRuntime:
                 **self.conversation_store.stats(),
                 **self.conversation_hub.stats(),
             },
+            "memory": self.memory_service.status(),
         }
 
     def _event_store_status(self) -> dict[str, Any]:
@@ -262,6 +267,10 @@ class JarvisRuntime:
 
     def close(self) -> None:
         """Release owned subsystem and persistence resources."""
+        try:
+            self.memory_service.shutdown(timeout=5.0, drain=True)
+        except Exception as exc:
+            logger.debug("Memory service shutdown skipped: %s", exc)
         for subsystem in reversed(list(self.subsystems.values())):
             stop = getattr(subsystem, "stop", None)
             if callable(stop):
@@ -270,7 +279,12 @@ class JarvisRuntime:
                 except Exception as exc:
                     logger.debug("Subsystem stop skipped: %s", exc)
         closed: set[int] = set()
-        for resource in (self.event_store, self.agent_runs, self.skill_catalog):
+        for resource in (
+            self.event_store,
+            self.conversation_store,
+            self.agent_runs,
+            self.skill_catalog,
+        ):
             if resource is None or id(resource) in closed:
                 continue
             close = getattr(resource, "close", None)
@@ -470,6 +484,22 @@ def create_runtime(
     conversation_store = ConversationStore(
         resolved_data_root / "conversations" / "conversations.sqlite3"
     )
+    environment_fingerprint = "|".join(
+        (
+            os.name,
+            sys.platform,
+            platform.machine().casefold() or "unknown-machine",
+            str(root),
+        )
+    )
+    life = LifeService(
+        resolved_data_root,
+        environment_fingerprint=environment_fingerprint,
+    )
+    memory_service = MemoryService(
+        resolved_data_root,
+        conversation_store=conversation_store,
+    )
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
     agent = Agent(
@@ -486,18 +516,7 @@ def create_runtime(
         agent_runs,
         resolve_confirmation=agent.resolve_confirm,
         event_bus=event_bus,
-    )
-    environment_fingerprint = "|".join(
-        (
-            os.name,
-            sys.platform,
-            platform.machine().casefold() or "unknown-machine",
-            str(root),
-        )
-    )
-    life = LifeService(
-        resolved_data_root,
-        environment_fingerprint=environment_fingerprint,
+        terminal_wakeup=memory_service.wake_reconcile,
     )
 
     runtime = JarvisRuntime(
@@ -519,6 +538,7 @@ def create_runtime(
         conversation_store=conversation_store,
         conversation_hub=conversation_hub,
         life=life,
+        memory_service=memory_service,
     )
     runtime.register_always_on_tools()
     _discover_external_skill_imports(runtime)
@@ -532,6 +552,11 @@ def create_runtime(
         runtime.load_skill("全功能")
 
     runtime.register_subsystem(life)
+    memory_service.start()
+    runtime.memory_access_factory = AccessContextFactory(
+        MemoryServiceAccessView(memory_service),
+        runtime_boot_id=str(life.status().get("boot_id") or "runtime-boot-unavailable"),
+    )
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     return runtime
 

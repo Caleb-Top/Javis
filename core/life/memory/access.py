@@ -622,6 +622,56 @@ class AccessContextFactory:
         return value
 
 
+class MemoryServiceAccessView:
+    """Bounded synchronous read view over the MemoryService read lane."""
+
+    def __init__(self, service: Any, *, timeout: float = 2.0) -> None:
+        if service is None:
+            raise TypeError("service is required")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be positive and finite")
+        self._service = service
+        self._timeout = float(timeout)
+
+    def status(self) -> Mapping[str, Any]:
+        try:
+            value = self._service.status()
+            store = value.get("store", {}) if isinstance(value, Mapping) else {}
+        except Exception:
+            return {"state": "unavailable", "read_only": True}
+        return dict(store) if isinstance(store, Mapping) else {
+            "state": "unavailable",
+            "read_only": True,
+        }
+
+    def metadata(self) -> Mapping[str, Any]:
+        status = self.status()
+        return {
+            "acl_epoch": _nonnegative_int(status.get("acl_epoch")),
+            "index_generation": _nonnegative_int(status.get("index_generation")),
+            "terminal_cursor": _nonnegative_int(status.get("terminal_cursor")),
+        }
+
+    def get_subject(self, subject_id: str) -> Subject | None:
+        return self._resolve(self._service.get_subject(subject_id))
+
+    def active_session_participants(
+        self, session_id: str
+    ) -> tuple[SessionParticipant, ...]:
+        value = self._resolve(self._service.active_session_participants(session_id))
+        return tuple(value or ())
+
+    def _resolve(self, future: Any) -> Any:
+        result = getattr(future, "result", None)
+        if not callable(result):
+            raise RuntimeError("memory_service_read_contract_invalid")
+        return result(timeout=self._timeout)
+
+
+def _nonnegative_int(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
 def safe_access_projection(context: AccessContext) -> dict[str, Any]:
     """Return the E0 projection stored with ``request.accepted``."""
 
@@ -649,6 +699,7 @@ def safe_access_projection(context: AccessContext) -> dict[str, Any]:
 __all__ = [
     "AccessBindingError",
     "AccessContextFactory",
+    "MemoryServiceAccessView",
     "MemorySubjectBinder",
     "PrimarySessionBinding",
     "PrincipalBindingSource",
