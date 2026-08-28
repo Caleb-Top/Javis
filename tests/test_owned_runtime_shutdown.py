@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib
 from types import SimpleNamespace
 from pathlib import Path
@@ -9,7 +10,12 @@ from fastapi import HTTPException
 
 def _load_main(tmp_path, monkeypatch):
     monkeypatch.setenv("JAVIS_TEST_MODE", "1")
-    monkeypatch.setenv("JAVIS_DATA_ROOT", str(tmp_path / "runtime-data"))
+    workspace = Path(__file__).resolve().parents[1]
+    isolated = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:16]
+    monkeypatch.setenv(
+        "JAVIS_DATA_ROOT",
+        str(workspace.parent / ".javis-test-data" / isolated),
+    )
     monkeypatch.setenv(
         "JAVIS_EVENT_STORE_PATH",
         str(tmp_path / "session-events.sqlite3"),
@@ -259,8 +265,9 @@ def test_sidecar_shutdown_is_loopback_only_and_uses_user_data_root():
     assert "SocketAddr::from(([127, 0, 0, 1], port))" in source
     assert "POST /api/runtime/shutdown HTTP/1.1" in source
     assert "X-Javis-Sidecar-Ownership: {token}" in source
-    assert ".app_data_dir()" in source
-    assert '.env("JAVIS_DATA_ROOT", &data_root)' in source
+    assert "self.data_root.is_absolute()" in source
+    assert '.env("JAVIS_DATA_ROOT", &self.data_root)' in source
+    assert "runtime-data" not in source
     assert '.env("JAVIS_DATA_ROOT", &root)' not in source
 
 

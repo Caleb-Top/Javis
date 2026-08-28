@@ -99,6 +99,7 @@ impl Default for SidecarRuntime {
 pub struct SidecarManager {
     runtime: Arc<Mutex<SidecarRuntime>>,
     packaged_root: Option<PathBuf>,
+    data_root: PathBuf,
     ollama: Arc<BundledOllama>,
 }
 
@@ -107,20 +108,18 @@ impl Default for SidecarManager {
         Self {
             runtime: Arc::new(Mutex::new(SidecarRuntime::default())),
             packaged_root: None,
+            data_root: PathBuf::new(),
             ollama: Arc::new(BundledOllama::new(PathBuf::new())),
         }
     }
 }
 
 impl SidecarManager {
-    pub fn with_root(packaged_root: PathBuf) -> Self {
-        let data_root = packaged_root
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
+    pub fn with_roots(packaged_root: PathBuf, data_root: PathBuf) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(SidecarRuntime::default())),
             packaged_root: Some(packaged_root),
+            data_root: data_root.clone(),
             ollama: Arc::new(BundledOllama::new(data_root)),
         }
     }
@@ -265,13 +264,9 @@ impl SidecarManager {
         }
         let (stdout, stderr) = app_log::runtime_log_files(app)?;
         let token = ownership_token()?;
-        let data_root = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("failed to resolve Javis data root: {error}"))?
-            .join("runtime-data");
-        fs::create_dir_all(&data_root)
-            .map_err(|error| format!("failed to create Javis data root: {error}"))?;
+        if self.data_root.as_os_str().is_empty() || !self.data_root.is_absolute() {
+            return Err("canonical Javis data root is unavailable".to_string());
+        }
         let mut command = Command::new(&python);
         command
             .arg("-u")
@@ -279,7 +274,7 @@ impl SidecarManager {
             .current_dir(&root)
             .env("PORT", PORT.to_string())
             .env("JAVIS_SIDECAR_OWNERSHIP", &token)
-            .env("JAVIS_DATA_ROOT", &data_root)
+            .env("JAVIS_DATA_ROOT", &self.data_root)
             .env("JAVIS_BUNDLED_OLLAMA_URL", self.ollama.openai_base_url())
             .env("OLLAMA_MODELS", self.ollama.model_root())
             .stdout(Stdio::from(stdout))

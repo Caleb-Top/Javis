@@ -78,7 +78,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             should_exclude(Path("app/tools/python-runtime-3.11/python.exe"), is_python=False)
         )
 
-    def test_runtime_bootstrap_binds_to_package_version_and_preserves_state(self):
+    def test_runtime_bootstrap_binds_to_package_version_without_copying_state_into_code(self):
         runtime = self.read("app/src-tauri/src/runtime_bundle.rs")
         sidecar = self.read("app/src-tauri/src/sidecar.rs")
         for contract in (
@@ -87,13 +87,10 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "runtime.new",
             "runtime.previous",
             "run_import_probe",
-            "migrate_persistent_state",
-            "brain_data",
-            "workspace",
-            "config.yaml",
-            "skills",
         ):
             self.assertIn(contract, runtime)
+        self.assertNotIn("migrate_persistent_state", runtime)
+        self.assertNotIn("JAVIS_APP_DATA_ROOT", runtime)
         self.assertIn("packaged_root", sidecar)
         self.assertIn("JAVIS_DATA_ROOT", sidecar)
 
@@ -119,7 +116,7 @@ class AppV3IntegratedReleaseTests(unittest.TestCase):
             "runtime_is_ready",
             "activate_incoming",
             "stop_stale_packaged_python",
-            "JAVIS_APP_DATA_ROOT",
+            "JAVIS_DATA_ROOT",
             "JAVIS_RUNTIME_ROOT",
             "ExecutablePath",
             "runtime.new",

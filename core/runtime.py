@@ -9,10 +9,12 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import hashlib
 import os
 import platform
 import pkgutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ from core.engine import InferenceEngine
 from core.events import EventBus
 from core.llm_client import LLMClient
 from core.life.paths import resolve_data_root
+from core.life.l8.layout import ContinuityLayout
 from core.life.service import LifeService
 from core.middleware import MiddlewarePipeline
 from core.skill_catalog import SkillCatalog, SkillGovernanceError
@@ -44,6 +47,7 @@ class JarvisRuntime:
 
     root: Path
     data_root: Path
+    continuity_layout: ContinuityLayout
     startup_side_effects: bool
     brain: Brain
     learner: Learner
@@ -413,7 +417,20 @@ def create_runtime(
     data_root: str | Path | None = None,
 ) -> JarvisRuntime:
     root = Path(root).resolve()
+    if (
+        data_root is None
+        and not os.environ.get("JAVIS_DATA_ROOT", "").strip()
+        and not startup_side_effects
+    ):
+        root_hash = hashlib.sha256(str(root).casefold().encode("utf-8")).hexdigest()[:16]
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        drive_root = Path(root.anchor or temp_root.anchor)
+        data_root = drive_root / ".javis-test-data" / "runtime" / root_hash
     resolved_data_root = resolve_data_root(root, explicit=data_root)
+    continuity_layout = ContinuityLayout.from_roots(
+        resolved_data_root,
+        source_root=root,
+    ).ensure_directories()
     if startup_side_effects:
         _run_tool_setup()
 
@@ -486,6 +503,7 @@ def create_runtime(
     runtime = JarvisRuntime(
         root=root,
         data_root=resolved_data_root,
+        continuity_layout=continuity_layout,
         startup_side_effects=startup_side_effects,
         brain=brain,
         learner=learner,

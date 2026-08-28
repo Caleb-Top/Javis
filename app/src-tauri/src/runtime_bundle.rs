@@ -1,6 +1,7 @@
 use std::{
     env,
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
 };
 use tauri::{AppHandle, Manager};
@@ -13,25 +14,55 @@ const MANIFEST_NAME: &str = "javis-runtime-manifest.json";
 const CHECKSUM_NAME: &str = "javis-runtime.sha256";
 const VERSION_MARKER: &str = "runtime-version.json";
 
-fn app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Some(configured) = env::var_os("JAVIS_APP_DATA_ROOT") {
+pub fn canonical_data_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let requested = if let Some(configured) = env::var_os("JAVIS_DATA_ROOT") {
         let path = PathBuf::from(configured);
-        if !path.as_os_str().is_empty() && path.is_absolute() {
-            return Ok(path);
+        if path.as_os_str().is_empty() || !path.is_absolute() {
+            return Err("JAVIS_DATA_ROOT must be an absolute path".to_string());
         }
-        return Err("JAVIS_APP_DATA_ROOT must be an absolute path".to_string());
+        path
+    } else {
+        app.path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+    };
+    fs::create_dir_all(&requested).map_err(|error| error.to_string())?;
+    reject_reparse_chain(&requested)?;
+    let canonical = fs::canonicalize(&requested).map_err(|error| error.to_string())?;
+    if !canonical.is_absolute() {
+        return Err("canonical Javis data root must be absolute".to_string());
     }
+    let probe = canonical.join(format!(".javis-write-probe-{}", std::process::id()));
+    let mut stream = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+        .map_err(|_| "JAVIS_DATA_ROOT must be writable".to_string())?;
+    let result = stream
+        .write_all(b"javis")
+        .and_then(|_| stream.sync_all())
+        .map_err(|_| "JAVIS_DATA_ROOT must be writable".to_string());
+    drop(stream);
+    let _ = fs::remove_file(&probe);
+    result?;
+    Ok(canonical)
+}
+
+fn runtime_slot_root(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
         .map_err(|error| error.to_string())
 }
 
 pub fn runtime_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_root(app)?.join("runtime"))
+    Ok(runtime_slot_root(app)?.join("runtime"))
 }
 
 pub fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
-    let resources = app.path().resource_dir().map_err(|error| error.to_string())?;
+    let resources = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
     let archive = resources.join("resources").join(ARCHIVE_NAME);
     let manifest = resources.join("resources").join(MANIFEST_NAME);
     let checksum = resources.join("resources").join(CHECKSUM_NAME);
@@ -42,22 +73,22 @@ pub fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
         ));
     }
 
-    let data_root = app_data_root(app)?;
-    fs::create_dir_all(&data_root).map_err(|error| error.to_string())?;
-    let runtime = data_root.join("runtime");
+    let slot_root = runtime_slot_root(app)?;
+    fs::create_dir_all(&slot_root).map_err(|error| error.to_string())?;
+    let runtime = slot_root.join("runtime");
     let packaged_manifest = fs::read_to_string(&manifest).map_err(|error| error.to_string())?;
     if runtime_is_ready(&runtime, &packaged_manifest) {
         return Ok(runtime);
     }
 
-    let incoming = data_root.join("runtime.new");
+    let incoming = slot_root.join("runtime.new");
     if runtime_is_ready(&incoming, &packaged_manifest) {
-        activate_incoming(&data_root, &runtime, &incoming)?;
+        activate_incoming(&slot_root, &runtime, &incoming)?;
         return Ok(runtime);
     }
 
     verify_checksum(&archive, &checksum)?;
-    remove_generated_dir(&incoming, &data_root)?;
+    remove_generated_dir(&incoming, &slot_root)?;
     fs::create_dir_all(&incoming).map_err(|error| error.to_string())?;
 
     let output = hidden_command("tar.exe")
@@ -80,7 +111,7 @@ pub fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     fs::write(incoming.join(VERSION_MARKER), &packaged_manifest)
         .map_err(|error| error.to_string())?;
 
-    activate_incoming(&data_root, &runtime, &incoming)?;
+    activate_incoming(&slot_root, &runtime, &incoming)?;
     Ok(runtime)
 }
 
@@ -91,18 +122,14 @@ fn runtime_is_ready(root: &Path, packaged_manifest: &str) -> bool {
         && validate_runtime(root).is_ok()
 }
 
-fn activate_incoming(data_root: &Path, runtime: &Path, incoming: &Path) -> Result<(), String> {
+fn activate_incoming(slot_root: &Path, runtime: &Path, incoming: &Path) -> Result<(), String> {
     stop_stale_packaged_python(runtime)?;
-    if runtime.is_dir() {
-        migrate_persistent_state(runtime, incoming)?;
-    }
 
-    let previous = data_root.join("runtime.previous");
-    remove_generated_dir(&previous, &data_root)?;
+    let previous = slot_root.join("runtime.previous");
+    remove_generated_dir(&previous, slot_root)?;
     if runtime.exists() {
-        fs::rename(&runtime, &previous).map_err(|error| {
-            format!("failed to preserve previous runtime: {error}")
-        })?;
+        fs::rename(&runtime, &previous)
+            .map_err(|error| format!("failed to preserve previous runtime: {error}"))?;
     }
     if let Err(error) = fs::rename(&incoming, &runtime) {
         if previous.exists() && !runtime.exists() {
@@ -165,7 +192,11 @@ fn verify_checksum(archive: &Path, checksum_file: &Path) -> Result<(), String> {
     }
     let actual = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .map(|line| line.chars().filter(|ch| ch.is_ascii_hexdigit()).collect::<String>())
+        .map(|line| {
+            line.chars()
+                .filter(|ch| ch.is_ascii_hexdigit())
+                .collect::<String>()
+        })
         .find(|line| line.len() == 64)
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -199,7 +230,10 @@ fn validate_runtime(root: &Path) -> Result<(), String> {
     ];
     for path in required {
         if !path.is_file() {
-            return Err(format!("packaged runtime is incomplete: {}", path.display()));
+            return Err(format!(
+                "packaged runtime is incomplete: {}",
+                path.display()
+            ));
         }
     }
     Ok(())
@@ -229,76 +263,37 @@ fn run_import_probe(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn migrate_persistent_state(current: &Path, incoming: &Path) -> Result<(), String> {
-    let current_app = current.join("app");
-    let incoming_app = incoming.join("app");
-    for relative in ["brain_data", "data", "workspace", "uploads", "logs", "output"] {
-        copy_tree_if_present(&current_app.join(relative), &incoming_app.join(relative))?;
-    }
-    copy_file_if_present(
-        &current_app.join("config.yaml"),
-        &incoming_app.join("config.yaml"),
-    )?;
-    copy_tree_if_present(
-        &current_app.join("memory").join("sessions"),
-        &incoming_app.join("memory").join("sessions"),
-    )?;
-    if let Ok(entries) = fs::read_dir(current_app.join("memory")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
-            if path.is_file()
-                && (name.ends_with(".sqlite")
-                    || name.ends_with(".sqlite-wal")
-                    || name.ends_with(".sqlite-shm"))
-            {
-                copy_file_if_present(&path, &incoming_app.join("memory").join(name))?;
-            }
-        }
-    }
-    copy_tree_if_present(
-        &current_app.join("skills").join("generated"),
-        &incoming_app.join("skills").join("generated"),
-    )?;
-    Ok(())
-}
-
-fn copy_tree_if_present(source: &Path, target: &Path) -> Result<(), String> {
-    if !source.is_dir() {
-        return Ok(());
-    }
-    fs::create_dir_all(target).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_tree_if_present(&source_path, &target_path)?;
-        } else if source_path.is_file() {
-            fs::copy(&source_path, &target_path).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_file_if_present(source: &Path, target: &Path) -> Result<(), String> {
-    if !source.is_file() {
-        return Ok(());
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::copy(source, target).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn remove_generated_dir(path: &Path, data_root: &Path) -> Result<(), String> {
+fn remove_generated_dir(path: &Path, slot_root: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
     let resolved_parent = path.parent().unwrap_or(Path::new(""));
-    if resolved_parent != data_root {
-        return Err(format!("refusing to remove path outside app data: {}", path.display()));
+    if resolved_parent != slot_root {
+        return Err(format!(
+            "refusing to remove path outside runtime slots: {}",
+            path.display()
+        ));
     }
     fs::remove_dir_all(path).map_err(|error| error.to_string())
+}
+
+fn reject_reparse_chain(path: &Path) -> Result<(), String> {
+    for ancestor in path.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() || is_windows_reparse(&metadata) {
+            return Err("JAVIS_DATA_ROOT must not traverse a symlink or reparse point".to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_reparse(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse(_metadata: &fs::Metadata) -> bool {
+    false
 }

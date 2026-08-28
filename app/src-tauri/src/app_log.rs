@@ -1,5 +1,4 @@
 use std::{
-    env,
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
@@ -10,10 +9,7 @@ use tauri::{AppHandle, Manager};
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 pub fn logs_directory(app: &AppHandle) -> Result<PathBuf, String> {
-    let root = match env::var_os("JAVIS_APP_DATA_ROOT") {
-        Some(value) if PathBuf::from(&value).is_absolute() => PathBuf::from(value),
-        _ => app.path().app_data_dir().map_err(|error| error.to_string())?,
-    };
+    let root = crate::runtime_bundle::canonical_data_root(app)?;
     let directory = root.join("logs");
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory)

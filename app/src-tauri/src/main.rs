@@ -185,9 +185,14 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let runtime_root = runtime_bundle::runtime_path(app.handle())
-                .map_err(std::io::Error::other)?;
-            app.manage(AppState::new(SidecarManager::with_root(runtime_root)));
+            let runtime_root =
+                runtime_bundle::runtime_path(app.handle()).map_err(std::io::Error::other)?;
+            let data_root =
+                runtime_bundle::canonical_data_root(app.handle()).map_err(std::io::Error::other)?;
+            app.manage(AppState::new(SidecarManager::with_roots(
+                runtime_root,
+                data_root,
+            )));
             install_tray(app)?;
             app_log::append(app.handle(), "info", "app", "Javis desktop shell started")
                 .map_err(std::io::Error::other)?;
@@ -212,12 +217,7 @@ fn main() {
                                 );
                             }
                             Err(error) => {
-                                let _ = app_log::append(
-                                    &runtime_app,
-                                    "error",
-                                    "sidecar",
-                                    &error,
-                                );
+                                let _ = app_log::append(&runtime_app, "error", "sidecar", &error);
                             }
                         }
                         let _ = runtime_app.emit("javis://runtime-ready", ());

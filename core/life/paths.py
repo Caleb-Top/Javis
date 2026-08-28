@@ -11,7 +11,13 @@ def _normalize_root(value: str | Path, *, field_name: str) -> Path:
     if isinstance(value, str) and not value.strip():
         raise ValueError(f"{field_name} must not be empty")
     try:
-        return Path(value).expanduser().resolve()
+        path = Path(value).expanduser()
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid {field_name}: {value!r}") from exc
+    if not path.is_absolute():
+        raise ValueError(f"{field_name} must be absolute")
+    try:
+        return Path(os.path.abspath(path))
     except (OSError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid {field_name}: {value!r}") from exc
 
@@ -22,11 +28,7 @@ def resolve_data_root(
     explicit: str | Path | None = None,
     environ: Mapping[str, str] = os.environ,
 ) -> Path:
-    """Resolve the writable data root without creating or probing it.
-
-    Precedence is explicit value, non-empty ``JAVIS_DATA_ROOT``, then the
-    compatibility ``<code-root>/data`` location.
-    """
+    """Resolve the one writable data root without creating or probing it."""
 
     code_root = _normalize_root(root, field_name="root")
     if explicit is not None:
@@ -36,7 +38,7 @@ def resolve_data_root(
     if configured is not None and configured.strip():
         return _normalize_root(configured, field_name="JAVIS_DATA_ROOT")
 
-    return (code_root / "data").resolve()
+    raise ValueError("JAVIS_DATA_ROOT is required when data_root is not explicit")
 
 
 __all__ = ["resolve_data_root"]

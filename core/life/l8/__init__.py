@@ -21,12 +21,14 @@ from core.life.l8.contracts import (
     validate_relative_path,
     verify_content_hash,
 )
+from core.life.l8.layout import ContinuityLayout
 
 __all__ = [
     "BranchHeadV1",
     "BranchSyncRunV1",
     "ContinuityEntryV1",
     "ContinuityManifestV1",
+    "ContinuityLayout",
     "LineageOpV1",
     "MigrationPhaseReceiptV1",
     "MigrationReceiptV1",
