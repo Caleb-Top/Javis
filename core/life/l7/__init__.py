@@ -31,6 +31,19 @@ from .contracts import (
     canonical_json_bytes,
 )
 from .layout import DataRootLayout
+from .growth_store import (
+    CandidateHead,
+    CandidateSnapshot,
+    DeploymentGate,
+    GrowthIntegrityReport,
+    GrowthStore,
+    GrowthStoreAuthorizationError,
+    GrowthStoreCASMismatchError,
+    GrowthStoreClosedError,
+    GrowthStoreConflictError,
+    GrowthStoreError,
+    GrowthStoreIntegrityError,
+)
 
 __all__ = [
     "ArtifactKind",
@@ -45,6 +58,14 @@ __all__ = [
     "GrowthCandidateV1",
     "GrowthDecisionKind",
     "GrowthDecisionV1",
+    "GrowthIntegrityReport",
+    "GrowthStore",
+    "GrowthStoreAuthorizationError",
+    "GrowthStoreCASMismatchError",
+    "GrowthStoreClosedError",
+    "GrowthStoreConflictError",
+    "GrowthStoreError",
+    "GrowthStoreIntegrityError",
     "NetworkPolicy",
     "RendererKind",
     "RiskLevel",
@@ -60,6 +81,9 @@ __all__ = [
     "SleepRunV1",
     "SleepTriggerKind",
     "TimingSource",
+    "CandidateHead",
+    "CandidateSnapshot",
+    "DeploymentGate",
     "canonical_content_hash",
     "canonical_json_bytes",
 ]
