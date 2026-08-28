@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import sqlite3
 import threading
 import time
@@ -174,6 +175,85 @@ def test_queue_pressure_rejects_critical_mutation_explicitly(tmp_path: Path):
     assert service.shutdown()
 
 
+def test_priority_queue_runs_critical_command_before_queued_normal_work(tmp_path: Path):
+    entered = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    class RecordingStore(MemoryStore):
+        def put_subject(self, value, *, writer_token):
+            if value.subject_id == "subject-blocking":
+                order.append("blocking")
+                entered.set()
+                assert release.wait(2)
+            else:
+                order.append("normal")
+            return super().put_subject(value, writer_token=writer_token)
+
+        def delete_item(self, item_kind, item_id, *, writer_token):
+            order.append("critical")
+            return super().delete_item(
+                item_kind,
+                item_id,
+                writer_token=writer_token,
+            )
+
+    service = MemoryService(tmp_path, store_factory=RecordingStore).start()
+    try:
+        blocking = service.put_subject(subject("subject-blocking"))
+        assert entered.wait(1)
+        normal = service.put_subject(subject("subject-normal"))
+        critical = service.delete_item("journal_entry", "missing-journal")
+        release.set()
+
+        assert blocking.result(timeout=2) is True
+        assert critical.result(timeout=2) is False
+        assert normal.result(timeout=2) is True
+        assert order == ["blocking", "critical", "normal"]
+    finally:
+        assert service.shutdown()
+
+
+def test_shutdown_cannot_overtake_an_admitted_command(tmp_path: Path):
+    put_entered = threading.Event()
+    allow_put = threading.Event()
+    shutdown_finished = threading.Event()
+    accepted: list[object] = []
+    shutdown_results: list[bool] = []
+
+    class GatedQueue(queue.PriorityQueue):
+        def put(self, item, block=True, timeout=None):
+            put_entered.set()
+            assert allow_put.wait(2)
+            return super().put(item, block=block, timeout=timeout)
+
+    service = MemoryService(tmp_path, queue_capacity=4)
+    service._queue = GatedQueue(maxsize=4)
+    service.start()
+
+    submitter = threading.Thread(
+        target=lambda: accepted.append(service.put_subject(subject("subject-race")))
+    )
+
+    def stop_service():
+        shutdown_results.append(service.shutdown(timeout=2))
+        shutdown_finished.set()
+
+    submitter.start()
+    assert put_entered.wait(1)
+    stopper = threading.Thread(target=stop_service)
+    stopper.start()
+    assert shutdown_finished.wait(0.05) is False
+
+    allow_put.set()
+    submitter.join(2)
+    stopper.join(2)
+    assert not submitter.is_alive()
+    assert not stopper.is_alive()
+    assert shutdown_results == [True]
+    assert accepted[0].result(timeout=0) is True
+
+
 def test_shutdown_stops_admission_and_drains_accepted_critical_work(tmp_path: Path):
     service = MemoryService(tmp_path, queue_capacity=4).start()
     first = service.put_subject(subject("subject-1"))
@@ -182,6 +262,13 @@ def test_shutdown_stops_admission_and_drains_accepted_critical_work(tmp_path: Pa
     assert service.shutdown(timeout=3, drain=True)
     assert first.result(timeout=0) is True
     assert second.result(timeout=0) is True
+    assert service.status()["state"] == "stopped"
+
+
+def test_shutdown_without_drain_reports_success_when_writer_stops(tmp_path: Path):
+    service = MemoryService(tmp_path).start()
+
+    assert service.shutdown(timeout=2, drain=False) is True
     assert service.status()["state"] == "stopped"
 
 
@@ -314,6 +401,48 @@ def test_deletion_worker_cache_deduplicates_and_remains_bounded(tmp_path: Path):
         assert second.result(timeout=2) is True
         assert service.status()["deletion_cache_size"] == 1
     finally:
+        assert service.shutdown()
+
+
+def test_concurrent_deletion_submission_reuses_one_cached_future(tmp_path: Path):
+    mutation_entered = threading.Event()
+    allow_mutation_return = threading.Event()
+    futures: list[object] = []
+
+    class GatedService(MemoryService):
+        gate_first_deletion = True
+
+        def _submit_store_mutation(self, method_name, *args, **kwargs):
+            future = super()._submit_store_mutation(method_name, *args, **kwargs)
+            if method_name == "put_deletion_request" and self.gate_first_deletion:
+                self.gate_first_deletion = False
+                mutation_entered.set()
+                assert allow_mutation_return.wait(2)
+            return future
+
+    service = GatedService(tmp_path).start()
+    try:
+        assert service.put_subject(subject("subject-user")).result(timeout=2) is True
+        request = deletion_request()
+        first = threading.Thread(target=lambda: futures.append(service.submit_deletion(request)))
+        second = threading.Thread(target=lambda: futures.append(service.submit_deletion(request)))
+
+        first.start()
+        assert mutation_entered.wait(1)
+        second.start()
+        time.sleep(0.05)
+        assert len(futures) == 0
+        allow_mutation_return.set()
+        first.join(2)
+        second.join(2)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert len(futures) == 2
+        assert futures[0] is futures[1]
+        assert futures[0].result(timeout=2) is True
+    finally:
+        allow_mutation_return.set()
         assert service.shutdown()
 
 

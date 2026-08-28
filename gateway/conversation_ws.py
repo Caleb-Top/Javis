@@ -28,6 +28,7 @@ from core.life.l1.contracts import (
 from core.life.l1.wake import DETERMINISTIC_LOCAL_LANE, PresenceResponder
 from core.life.memory.access import PrincipalBindingSource, ServerPrincipal
 from core.life.memory.contracts import AccessPurpose
+from core.life.memory.recall import build_recall_query
 from core.runtime_access import websocket_access_remaining, websocket_runtime_principal
 from gateway.conversation_stall_harness import ConversationStallHarness, StallMode
 
@@ -336,6 +337,23 @@ class ConversationWebSocketGateway:
                 async for event in self.stall_harness.run(stall_mode, token):
                     yield event
                 return
+            recall_bundle = None
+            if active_request.interaction_mode != "live":
+                memory_service = getattr(self.runtime, "memory_service", None)
+                recall = getattr(memory_service, "recall", None)
+                if callable(recall):
+                    try:
+                        recall_query = build_recall_query(
+                            active_request.access_context,
+                            active_request.text,
+                        )
+                        recall_result = recall(recall_query)
+                        if inspect.isawaitable(recall_result):
+                            recall_bundle = await recall_result
+                        else:
+                            recall_bundle = await asyncio.wrap_future(recall_result)
+                    except Exception:
+                        recall_bundle = None
             engine = getattr(self.runtime, "engine", None)
             use_route = getattr(engine, "use_route", None)
             if callable(use_route):
@@ -353,13 +371,15 @@ class ConversationWebSocketGateway:
                 )
                 if card.get("request_id") != active_request.request_id
             ]
-            async for event in self.runtime.agent.chat(
-                active_request.text,
-                session_id=active_request.session_id,
-                conversation_cards=history,
-                interaction_mode=active_request.interaction_mode,
-                cancellation=token,
-            ):
+            chat_kwargs = {
+                "session_id": active_request.session_id,
+                "conversation_cards": history,
+                "interaction_mode": active_request.interaction_mode,
+                "cancellation": token,
+            }
+            if recall_bundle is not None and recall_bundle.items:
+                chat_kwargs["recall_bundle"] = recall_bundle
+            async for event in self.runtime.agent.chat(active_request.text, **chat_kwargs):
                 yield event
 
         try:

@@ -432,7 +432,7 @@ class Agent:
             selected_names.add(name)
         return selected
 
-    def _build_system_prompt(self, force: bool = False) -> str:
+    def _build_system_prompt(self, force: bool = False, recall_bundle=None) -> str:
         """构建完整 System Prompt（三层架构: 身份 + 记忆 + 阶段）
 
         P0-8: 使用 PromptBuilder 组装三层 Prompt:
@@ -447,6 +447,7 @@ class Agent:
             phase=self.state.phase,
             step=self.state.step,
             force_rebuild=force,
+            recall_bundle=recall_bundle,
         )
 
         # 保持旧缓存的兼容性
@@ -462,6 +463,7 @@ class Agent:
         conversation_cards: list[dict] | None = None,
         interaction_mode: str = "",
         cancellation: CancellationToken | None = None,
+        recall_bundle=None,
     ) -> AsyncGenerator[dict, None]:
         token = cancellation or CancellationToken()
         self._action_history = []
@@ -563,14 +565,7 @@ class Agent:
         except Exception:
             self._current_episode = None
 
-        # 跨会话记忆: 使用统一控制器多通道检索
         context = ""
-        try:
-            from memory.controller import get_controller
-            ctrl = get_controller(self.brain)
-            context = ctrl.context_block(user_input)
-        except Exception:
-            pass
 
         # 优化: 轻量请求跳过规划
         if _is_quick_request(user_input):
@@ -626,7 +621,7 @@ class Agent:
                 return
 
             # 每轮使用动态 System Prompt（含经验注入 + 阶段指引）
-            sys_prompt = self._build_system_prompt()
+            sys_prompt = self._build_system_prompt(recall_bundle=recall_bundle)
 
             resp = None
             if self.engine:

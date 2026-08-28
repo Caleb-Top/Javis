@@ -669,17 +669,27 @@ class MemoryStore:
             parameters.append(query.occurred_before_utc)
         fts_phrase = '"' + query.query_text.replace('"', '""') + '"'
         parameters.extend((fts_phrase, query.limit))
-        sql = (
-            "WITH visible AS MATERIALIZED ("
-            "SELECT i.item_id, i.item_kind, i.payload_json FROM memory_items AS i WHERE "
+        visible_sql = (
+            "INSERT INTO visible_memory_ids(item_id, item_kind) "
+            "SELECT i.item_id, i.item_kind FROM memory_items AS i WHERE "
             + " AND ".join(filters)
-            + ") SELECT v.item_kind, v.payload_json FROM visible AS v "
+        )
+        rank_sql = (
+            "SELECT v.item_kind, i.payload_json FROM visible_memory_ids AS v "
             "JOIN memory_fts AS f ON f.item_id = v.item_id "
+            "JOIN memory_items AS i ON i.item_id = v.item_id "
             "WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts), v.item_id LIMIT ?"
         )
         try:
-            with self._read_connection() as db:
-                rows = db.execute(sql, parameters).fetchall()
+            with self._search_connection() as db:
+                db.execute("BEGIN")
+                db.execute(
+                    "CREATE TEMP TABLE visible_memory_ids ("
+                    "item_id TEXT PRIMARY KEY, item_kind TEXT NOT NULL) WITHOUT ROWID"
+                )
+                db.execute(visible_sql, parameters[:-2])
+                rows = db.execute(rank_sql, parameters[-2:]).fetchall()
+                db.rollback()
         except sqlite3.OperationalError:
             return ()
         return tuple(self._decode_item(row["item_kind"], row["payload_json"]) for row in rows)
@@ -849,6 +859,21 @@ class MemoryStore:
         try:
             db.execute("PRAGMA foreign_keys = ON")
             db.execute("PRAGMA query_only = ON")
+            yield db
+        finally:
+            db.close()
+
+    @contextmanager
+    def _search_connection(self) -> Iterator[sqlite3.Connection]:
+        """Open a read-only main database that may write only to TEMP tables."""
+
+        if not self.path.is_file():
+            raise MemoryStoreReadOnlyError("memory database is unavailable")
+        uri = self.path.resolve().as_uri() + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=5.0)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA foreign_keys = ON")
             yield db
         finally:
             db.close()

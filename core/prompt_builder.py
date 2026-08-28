@@ -19,6 +19,8 @@ import hashlib, json, logging, time
 from typing import Optional
 from core.memory_kernel import get_core_memory_kernel
 from core.life.l1.contracts import InnerStateSnapshot
+from core.life.memory.contracts import RecallBundle
+from core.life.memory.recall import format_recall_prompt
 
 logger = logging.getLogger("prompt_builder")
 
@@ -499,7 +501,8 @@ class PromptBuilder:
     # ── 完整组装 ──
 
     def build(self, phase: str = "planning", step: int = 0,
-              force_rebuild: bool = False) -> str:
+              force_rebuild: bool = False,
+              recall_bundle: RecallBundle | None = None) -> str:
         """组装完整的三层 System Prompt。
 
         Args:
@@ -511,11 +514,12 @@ class PromptBuilder:
         if (not force_rebuild
                 and self._cached_full
                 and step - self._cached_step < self._rebuild_every_n_steps
-                and self._runtime_state_provider is None):
+                and self._runtime_state_provider is None
+                and recall_bundle is None):
             return self._cached_full
 
         layer1 = self.build_layer1()
-        layer2 = self.build_layer2(force=force_rebuild)
+        layer2 = format_recall_prompt(recall_bundle)
         runtime_state = self.build_runtime_state(force=force_rebuild)
         layer3 = self.build_layer3(phase, force=force_rebuild)
 
@@ -527,8 +531,9 @@ class PromptBuilder:
         parts.append(layer3)
 
         full = "\n".join(parts)
-        self._cached_full = full
-        self._cached_step = step
+        if recall_bundle is None:
+            self._cached_full = full
+            self._cached_step = step
         self._build_count += 1
 
         total_chars = len(full)

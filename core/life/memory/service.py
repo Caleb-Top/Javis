@@ -19,6 +19,7 @@ from .contracts import (
     ExperienceEpisode,
     JournalEntry,
     MemoryItemKind,
+    RecallBundle,
     RecallQuery,
     RelationshipEvent,
     SessionParticipant,
@@ -28,6 +29,7 @@ from .contracts import (
 )
 from .extraction import EpisodeExtractor, JournalProjection
 from .projection import TerminalProjector
+from .recall import RecallEngine, empty_recall_bundle
 from .store import MemoryStore
 
 
@@ -106,6 +108,7 @@ class MemoryService:
         store_factory: Callable[..., MemoryStore] = MemoryStore,
         terminal_projector: TerminalProjector | None = None,
         episode_extractor: EpisodeExtractor | None = None,
+        recall_cache_capacity: int = 128,
     ) -> None:
         if type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError("queue_capacity must be a positive integer")
@@ -141,6 +144,7 @@ class MemoryService:
         self._store_factory = store_factory
         self._terminal_projector = terminal_projector or TerminalProjector()
         self._episode_extractor = episode_extractor or EpisodeExtractor()
+        self._recall_engine = RecallEngine(cache_capacity=recall_cache_capacity)
 
         self._lock = threading.RLock()
         self._writer_token = object()
@@ -283,12 +287,11 @@ class MemoryService:
             if cached is not None:
                 self._deletion_cache.move_to_end(key)
                 return cached  # type: ignore[return-value]
-        future = self._submit_store_mutation(
-            "put_deletion_request",
-            request,
-            priority=MemoryCommandPriority.CRITICAL,
-        )
-        with self._lock:
+            future = self._submit_store_mutation(
+                "put_deletion_request",
+                request,
+                priority=MemoryCommandPriority.CRITICAL,
+            )
             self._deletion_cache[key] = future
             self._deletion_cache.move_to_end(key)
             while len(self._deletion_cache) > self._deletion_cache_capacity:
@@ -349,6 +352,15 @@ class MemoryService:
 
         return self._submit_read("search_items", (), query)
 
+    def recall(self, query: RecallQuery) -> Future[RecallBundle]:
+        if not isinstance(query, RecallQuery):
+            raise TypeError("query must be a RecallQuery")
+        fallback = empty_recall_bundle(query, "memory_unavailable")
+        return self._submit_read_operation(
+            lambda store: self._recall_engine.recall(store, query),
+            fallback,
+        )
+
     def reconcile_once(self) -> Future[dict[str, int]]:
         """Run one durable terminal scan on the writer thread."""
 
@@ -395,7 +407,7 @@ class MemoryService:
                 return True
             self._accepting = False
             self._state = "stopping"
-        drained = self.drain(timeout=timeout) if drain else False
+        drained = self.drain(timeout=timeout) if drain else True
         self._stop_requested.set()
         writer = self._writer_thread
         if writer is not None:
@@ -403,6 +415,7 @@ class MemoryService:
         executor = self._read_executor
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        self._recall_engine.clear()
         stopped = writer is None or not writer.is_alive()
         with self._lock:
             if stopped:
@@ -454,30 +467,39 @@ class MemoryService:
             state = self._state
             accepting = self._accepting
             reason = self._reason_code
-        if state in _STOPPED_STATES:
-            raise MemoryServiceStoppedError()
-        if not accepting:
-            raise MemoryServiceUnavailable(reason)
-        future: Future[_T] = Future()
-        command = _QueuedCommand(
-            int(priority), next(self._sequence), name, operation, future
-        )
-        try:
-            self._queue.put(
-                command,
-                block=critical,
-                timeout=self._critical_enqueue_timeout if critical else None,
+            if state in _STOPPED_STATES:
+                raise MemoryServiceStoppedError()
+            if not accepting:
+                raise MemoryServiceUnavailable(reason)
+            future: Future[_T] = Future()
+            command = _QueuedCommand(
+                int(priority), next(self._sequence), name, operation, future
             )
-        except queue.Full as exc:
-            with self._lock:
+            try:
+                self._queue.put(
+                    command,
+                    block=critical,
+                    timeout=self._critical_enqueue_timeout if critical else None,
+                )
+            except queue.Full as exc:
                 metric = "critical_rejected" if critical else "background_dropped"
                 self._metrics[metric] += 1
-            if critical:
-                raise MemoryQueueFullError() from exc
-            raise MemoryServiceError("background_queue_full") from exc
+                if critical:
+                    raise MemoryQueueFullError() from exc
+                raise MemoryServiceError("background_queue_full") from exc
         return future
 
     def _submit_read(self, method_name: str, fallback: _T, *args: Any) -> Future[_T]:
+        return self._submit_read_operation(
+            lambda store: getattr(store, method_name)(*args),
+            fallback,
+        )
+
+    def _submit_read_operation(
+        self,
+        operation: Callable[[MemoryStore], _T],
+        fallback: _T,
+    ) -> Future[_T]:
         with self._lock:
             store = self._store
             executor = self._read_executor
@@ -493,8 +515,7 @@ class MemoryService:
 
         def read() -> _T:
             try:
-                method = getattr(store, method_name)
-                return method(*args)
+                return operation(store)
             except Exception:
                 with self._lock:
                     self._last_error_reason = "memory_read_failed"
@@ -585,7 +606,11 @@ class MemoryService:
                     next_reconcile = time.monotonic() + self._reconcile_interval
         finally:
             if store is not None:
-                store.close()
+                try:
+                    store.close()
+                except Exception:
+                    with self._lock:
+                        self._last_error_reason = "store_close_failed"
             with self._lock:
                 self._accepting = False
                 if self._state != "degraded" or self._stop_requested.is_set():
