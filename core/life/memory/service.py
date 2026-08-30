@@ -14,14 +14,18 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, TypeVar
 
 from .contracts import (
+    ConfirmSharedMemory,
     DeletionRequest,
     DerivationEdge,
     ExperienceEpisode,
     JournalEntry,
     MemoryItemKind,
+    ProposeSharedMemory,
     RecallBundle,
     RecallQuery,
+    RejectSharedMemory,
     RelationshipEvent,
+    RevokeSharedMemory,
     SessionParticipant,
     SharedMemory,
     Subject,
@@ -265,6 +269,18 @@ class MemoryService:
         frozen_acl = None if acl is None else {str(key): tuple(value) for key, value in acl.items()}
         return self._submit_store_mutation("put_item", item, acl=frozen_acl)
 
+    def propose_shared_memory(self, command: ProposeSharedMemory) -> Future[SharedMemory]:
+        return self._submit_shared_transition("propose_shared_memory", command)
+
+    def confirm_shared_memory(self, command: ConfirmSharedMemory) -> Future[SharedMemory]:
+        return self._submit_shared_transition("confirm_shared_memory", command)
+
+    def reject_shared_memory(self, command: RejectSharedMemory) -> Future[SharedMemory]:
+        return self._submit_shared_transition("reject_shared_memory", command)
+
+    def revoke_shared_memory(self, command: RevokeSharedMemory) -> Future[SharedMemory]:
+        return self._submit_shared_transition("revoke_shared_memory", command)
+
     def delete_item(self, item_kind: MemoryItemKind | str, item_id: str) -> Future[bool]:
         return self._submit_store_mutation(
             "delete_item",
@@ -443,6 +459,19 @@ class MemoryService:
             method_name,
             operation,
             priority=priority,
+            critical=True,
+        )
+
+    def _submit_shared_transition(self, method_name: str, command: Any) -> Future[SharedMemory]:
+        def operation(store: MemoryStore, writer_token: object) -> SharedMemory:
+            result = getattr(store, method_name)(command, writer_token=writer_token)
+            self._recall_engine.clear()
+            return result
+
+        return self._submit_write(
+            method_name,
+            operation,
+            priority=MemoryCommandPriority.CRITICAL,
             critical=True,
         )
 

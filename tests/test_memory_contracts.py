@@ -24,6 +24,8 @@ from core.life.memory.contracts import (
     ProposeSharedMemory,
     RecallBundle,
     RecallQuery,
+    RejectSharedMemory,
+    RevokeSharedMemory,
     RelationshipEvent,
     SessionParticipant,
     SharedMemory,
@@ -337,6 +339,30 @@ COMMAND_RESULT_CASES = (
         },
     ),
     (
+        RejectSharedMemory,
+        {
+            "schema_version": 1,
+            "command_id": "command-reject",
+            "access_context": _access_context("manage"),
+            "shared_memory_id": "shared-1",
+            "proposal_revision": 1,
+            "idempotency_key": "reject-shared-1",
+            "issued_at_utc": NOW,
+        },
+    ),
+    (
+        RevokeSharedMemory,
+        {
+            "schema_version": 1,
+            "command_id": "command-revoke",
+            "access_context": _access_context("manage"),
+            "shared_memory_id": "shared-1",
+            "expected_revision": 2,
+            "idempotency_key": "revoke-shared-1",
+            "issued_at_utc": NOW,
+        },
+    ),
+    (
         CorrectMemory,
         {
             "schema_version": 1,
@@ -536,7 +562,9 @@ def test_deletion_selector_and_access_purpose_fail_closed():
     with pytest.raises(ValueError, match="target_selector"):
         DeletionRequest.from_dict(deletion)
 
-    forget = copy.deepcopy(COMMAND_RESULT_CASES[5][1])
+    forget = copy.deepcopy(
+        next(wire for contract, wire in COMMAND_RESULT_CASES if contract is ForgetMemory)
+    )
     forget["access_context"] = _access_context("manage")
     with pytest.raises(ValueError, match="delete purpose"):
         ForgetMemory.from_dict(forget)
@@ -588,6 +616,8 @@ def test_memory_package_exports_the_required_task_one_surface():
         "CreateJournalEntry",
         "ProposeSharedMemory",
         "ConfirmSharedMemory",
+        "RejectSharedMemory",
+        "RevokeSharedMemory",
         "CorrectMemory",
         "ForgetMemory",
         "MigrateLegacyBatch",

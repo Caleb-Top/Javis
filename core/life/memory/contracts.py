@@ -1341,6 +1341,54 @@ class ConfirmSharedMemory(_WireContract):
 
 
 @dataclass(frozen=True)
+class RejectSharedMemory(_WireContract):
+    schema_version: int
+    command_id: str
+    access_context: AccessContext
+    shared_memory_id: str
+    proposal_revision: int
+    idempotency_key: str
+    issued_at_utc: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        _id(self.command_id, "command_id")
+        object.__setattr__(
+            self, "access_context", _contract(self.access_context, AccessContext, "access_context")
+        )
+        if self.access_context.purpose is not AccessPurpose.MANAGE:
+            raise _field_error("access_context", "shared rejection requires manage purpose")
+        _id(self.shared_memory_id, "shared_memory_id")
+        _positive_int(self.proposal_revision, "proposal_revision")
+        _id(self.idempotency_key, "idempotency_key")
+        _timestamp(self.issued_at_utc, "issued_at_utc")
+
+
+@dataclass(frozen=True)
+class RevokeSharedMemory(_WireContract):
+    schema_version: int
+    command_id: str
+    access_context: AccessContext
+    shared_memory_id: str
+    expected_revision: int
+    idempotency_key: str
+    issued_at_utc: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        _id(self.command_id, "command_id")
+        object.__setattr__(
+            self, "access_context", _contract(self.access_context, AccessContext, "access_context")
+        )
+        if self.access_context.purpose is not AccessPurpose.MANAGE:
+            raise _field_error("access_context", "shared revocation requires manage purpose")
+        _id(self.shared_memory_id, "shared_memory_id")
+        _positive_int(self.expected_revision, "expected_revision")
+        _id(self.idempotency_key, "idempotency_key")
+        _timestamp(self.issued_at_utc, "issued_at_utc")
+
+
+@dataclass(frozen=True)
 class CorrectMemory(_WireContract):
     schema_version: int
     command_id: str
@@ -1610,10 +1658,12 @@ __all__ = [
     "RecallItem",
     "RecallOwnerLabel",
     "RecallQuery",
+    "RejectSharedMemory",
     "RelationshipEvent",
     "RelationshipEventKind",
     "RelationshipEventStatus",
     "RetentionClass",
+    "RevokeSharedMemory",
     "SessionParticipant",
     "SharedConfirmationReceipt",
     "SharedMemory",

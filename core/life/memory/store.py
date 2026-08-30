@@ -23,25 +23,38 @@ from core.life.memory.contracts import (
     ActorKind,
     Audience,
     ClaimStatus,
+    ConfirmSharedMemory,
     DeletionRequest,
     DerivationEdge,
+    DerivationRelation,
     ExperienceEpisode,
+    IdentityAssurance,
     JournalEntry,
     MemoryItemKind,
     MemoryItemStatus,
+    ParticipantRole,
+    ParticipantStatus,
+    PrivacyClass,
+    ProposeSharedMemory,
     RecallQuery,
+    RejectSharedMemory,
     RelationshipEvent,
     RelationshipEventStatus,
+    RetentionClass,
+    RevokeSharedMemory,
     SessionParticipant,
+    SharedConfirmationReceipt,
     SharedMemory,
     SharedMemoryStatus,
     Subject,
+    SubjectKind,
+    SubjectStatus,
     UserModelClaim,
 )
 
 
 DATABASE_RELATIVE_PATH = Path("memory") / "autobiographical.sqlite3"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _READ_PERMISSIONS = frozenset({"read", "manage", "delete"})
 _PROJECTION_STATES = frozenset({"pending", "excluded", "not_selected", "projected"})
 _TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -87,6 +100,7 @@ _REQUIRED_V2_TABLES = _REQUIRED_V1_TABLES | {
     "memory_fts",
     "memory_fts_rebuilds",
 }
+_REQUIRED_V3_TABLES = _REQUIRED_V2_TABLES | {"shared_decisions"}
 
 
 class MemoryStoreError(RuntimeError):
@@ -454,6 +468,20 @@ _MIGRATION_2 = (
     "CREATE INDEX idx_fts_rebuild_state ON memory_fts_rebuilds(state, updated_at_utc)",
 )
 
+_MIGRATION_3 = (
+    """
+    CREATE TABLE shared_decisions (
+        decision_id TEXT PRIMARY KEY,
+        shared_memory_id TEXT NOT NULL REFERENCES shared_memories(shared_memory_id) ON DELETE CASCADE,
+        actor_subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE RESTRICT,
+        decision TEXT NOT NULL CHECK (decision IN ('reject', 'revoke')),
+        expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+        decided_at_utc TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_shared_decisions_memory ON shared_decisions(shared_memory_id, decision)",
+)
+
 
 class MemoryStore:
     """Versioned, single-writer storage rooted below the runtime data root."""
@@ -716,6 +744,42 @@ class MemoryStore:
 
     upsert_item = put_item
 
+    def propose_shared_memory(
+        self,
+        command: ProposeSharedMemory,
+        *,
+        writer_token: object,
+    ) -> SharedMemory:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.propose_shared_memory(command)
+
+    def confirm_shared_memory(
+        self,
+        command: ConfirmSharedMemory,
+        *,
+        writer_token: object,
+    ) -> SharedMemory:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.confirm_shared_memory(command)
+
+    def reject_shared_memory(
+        self,
+        command: RejectSharedMemory,
+        *,
+        writer_token: object,
+    ) -> SharedMemory:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.reject_shared_memory(command)
+
+    def revoke_shared_memory(
+        self,
+        command: RevokeSharedMemory,
+        *,
+        writer_token: object,
+    ) -> SharedMemory:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.revoke_shared_memory(command)
+
     def delete_item(
         self,
         item_kind: MemoryItemKind | str,
@@ -909,6 +973,10 @@ class MemoryStore:
             if version == 1:
                 self._validate_v1_schema(db)
                 self._apply_migration(db, 2, _MIGRATION_2)
+                version = 2
+            if version == 2:
+                self._validate_v2_schema(db)
+                self._apply_migration(db, 3, _MIGRATION_3)
             self._validate_schema(db)
             mode = str(db.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             if mode != "wal":
@@ -983,7 +1051,7 @@ class MemoryStore:
             raise sqlite3.DatabaseError("v1 migration receipt is missing")
 
     @staticmethod
-    def _validate_schema(db: sqlite3.Connection) -> None:
+    def _validate_v2_schema(db: sqlite3.Connection, expected_version: int = 2) -> None:
         rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
         names = {str(row["name"]) for row in rows}
         missing = _REQUIRED_V2_TABLES - names
@@ -994,6 +1062,19 @@ class MemoryStore:
         ).fetchone()
         if row is None or "fts5" not in str(row["sql"]).casefold():
             raise sqlite3.DatabaseError("memory_fts is not an FTS5 virtual table")
+        meta = db.execute(
+            "SELECT schema_version FROM memory_meta WHERE singleton = 1"
+        ).fetchone()
+        if meta is None or int(meta["schema_version"]) != expected_version:
+            raise sqlite3.DatabaseError("v2 memory metadata schema version is inconsistent")
+
+    @staticmethod
+    def _validate_schema(db: sqlite3.Connection) -> None:
+        MemoryStore._validate_v2_schema(db, SCHEMA_VERSION)
+        rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+        names = {str(row["name"]) for row in rows}
+        if _REQUIRED_V3_TABLES - names:
+            raise sqlite3.DatabaseError("required memory schema objects are missing")
         meta = db.execute(
             "SELECT schema_version FROM memory_meta WHERE singleton = 1"
         ).fetchone()
@@ -1212,6 +1293,371 @@ class _MemoryWriter:
             )
         self._bump_meta(acl=True, index=True)
         return True
+
+    def propose_shared_memory(self, command: ProposeSharedMemory) -> SharedMemory:
+        if not isinstance(command, ProposeSharedMemory):
+            raise TypeError("command must be ProposeSharedMemory")
+        context = self._require_shared_actor(command.access_context, command.issued_at_utc)
+        source_rows = self._live_source_episodes(
+            command.source_episode_ids,
+            context,
+            command.issued_at_utc,
+        )
+        shared_memory_id = "shared-" + hashlib.sha256(
+            f"{context.actor_subject_id}\0{command.idempotency_key}".encode("utf-8")
+        ).hexdigest()[:40]
+        existing = self._shared_memory(shared_memory_id)
+        source_digest = hashlib.sha256(
+            _json(
+                {
+                    "source": [
+                        (str(row["item_id"]), str(row["content_hash"]))
+                        for row in source_rows
+                    ],
+                    "text": command.proposed_text,
+                    "participants": list(context.participant_subject_ids),
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        proposed = SharedMemory(
+            schema_version=1,
+            shared_memory_id=shared_memory_id,
+            revision=1,
+            proposal_revision=1,
+            owner_subject_id=context.actor_subject_id,
+            audience=Audience.EXPLICIT_SHARED,
+            privacy_class=PrivacyClass.USER_PRIVATE,
+            source_episode_ids=tuple(command.source_episode_ids),
+            proposed_text=command.proposed_text,
+            participant_subject_ids=tuple(sorted(context.participant_subject_ids)),
+            confirmation_receipts=(),
+            status=SharedMemoryStatus.PROPOSED,
+            confirmed_at_utc=None,
+            revoked_at_utc=None,
+            audience_subject_ids=tuple(sorted(context.participant_subject_ids)),
+            source_digest=source_digest,
+            retention_class=RetentionClass.MEMORY_CANDIDATE,
+            expires_at_utc=None,
+            created_at_utc=command.issued_at_utc,
+            updated_at_utc=command.issued_at_utc,
+        )
+        if existing is not None:
+            if existing == proposed:
+                return existing
+            raise MemoryStoreConflictError("shared proposal idempotency conflict")
+        self.put_item(proposed)
+        for row in source_rows:
+            edge_id = "edge-" + hashlib.sha256(
+                f"{row['item_id']}\0{shared_memory_id}\0derived_from".encode("utf-8")
+            ).hexdigest()[:40]
+            self.put_derivation_edge(
+                DerivationEdge(
+                    schema_version=1,
+                    edge_id=edge_id,
+                    source_kind=MemoryItemKind.EXPERIENCE_EPISODE,
+                    source_id=str(row["item_id"]),
+                    target_kind=MemoryItemKind.SHARED_MEMORY,
+                    target_id=shared_memory_id,
+                    relation=DerivationRelation.DERIVED_FROM,
+                    extractor="deterministic.shared.v1",
+                    extractor_version="1",
+                    source_digest=str(row["source_digest"]),
+                    created_at_utc=command.issued_at_utc,
+                    active=True,
+                )
+            )
+        return proposed
+
+    def confirm_shared_memory(self, command: ConfirmSharedMemory) -> SharedMemory:
+        if not isinstance(command, ConfirmSharedMemory):
+            raise TypeError("command must be ConfirmSharedMemory")
+        context = self._require_shared_actor(command.access_context, command.issued_at_utc)
+        current = self._shared_memory(command.shared_memory_id)
+        if current is None:
+            raise MemoryStoreConflictError("shared proposal not found")
+        receipt_id = "shared-confirm-" + hashlib.sha256(
+            f"{context.actor_subject_id}\0{command.idempotency_key}".encode("utf-8")
+        ).hexdigest()[:40]
+        receipt_row = self.__db.execute(
+            "SELECT shared_memory_id, subject_id, proposal_revision FROM shared_confirmations "
+            "WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        if receipt_row is not None:
+            if (
+                str(receipt_row["shared_memory_id"]) == command.shared_memory_id
+                and str(receipt_row["subject_id"]) == context.actor_subject_id
+                and int(receipt_row["proposal_revision"]) == command.proposal_revision
+                and current.status in {SharedMemoryStatus.CONFIRMED, SharedMemoryStatus.REVOKED}
+            ):
+                return current
+            raise MemoryStoreConflictError("shared confirmation idempotency conflict")
+        self._require_shared_transition(current, context, command.proposal_revision)
+        self._live_source_episodes(
+            current.source_episode_ids,
+            context,
+            command.issued_at_utc,
+        )
+        receipt = SharedConfirmationReceipt(
+            receipt_id=receipt_id,
+            subject_id=context.actor_subject_id,
+            proposal_revision=current.proposal_revision,
+            confirmed_at_utc=command.issued_at_utc,
+        )
+        confirmed = SharedMemory.from_dict(
+            {
+                **current.to_dict(),
+                "revision": current.revision + 1,
+                "confirmation_receipts": [receipt.to_dict()],
+                "status": SharedMemoryStatus.CONFIRMED.value,
+                "confirmed_at_utc": command.issued_at_utc,
+                "updated_at_utc": command.issued_at_utc,
+            }
+        )
+        self.put_item(confirmed)
+        return confirmed
+
+    def reject_shared_memory(self, command: RejectSharedMemory) -> SharedMemory:
+        if not isinstance(command, RejectSharedMemory):
+            raise TypeError("command must be RejectSharedMemory")
+        context = self._require_shared_actor(command.access_context, command.issued_at_utc)
+        current = self._shared_memory(command.shared_memory_id)
+        if current is None:
+            raise MemoryStoreConflictError("shared proposal not found")
+        decision_id = self._shared_decision_id(context.actor_subject_id, command.idempotency_key)
+        replay = self._shared_decision_replay(
+            decision_id,
+            command.shared_memory_id,
+            context.actor_subject_id,
+            "reject",
+            command.proposal_revision,
+        )
+        if replay:
+            if current.status is SharedMemoryStatus.REJECTED:
+                return current
+            raise MemoryStoreConflictError("shared rejection replay state mismatch")
+        self._require_shared_transition(current, context, command.proposal_revision)
+        rejected = SharedMemory.from_dict(
+            {
+                **current.to_dict(),
+                "revision": current.revision + 1,
+                "proposed_text": "[rejected]",
+                "status": SharedMemoryStatus.REJECTED.value,
+                "updated_at_utc": command.issued_at_utc,
+            }
+        )
+        self.put_item(rejected)
+        self.__db.execute(
+            "INSERT INTO shared_decisions (decision_id, shared_memory_id, actor_subject_id, "
+            "decision, expected_revision, decided_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                decision_id,
+                command.shared_memory_id,
+                context.actor_subject_id,
+                "reject",
+                command.proposal_revision,
+                command.issued_at_utc,
+            ),
+        )
+        return rejected
+
+    def revoke_shared_memory(self, command: RevokeSharedMemory) -> SharedMemory:
+        if not isinstance(command, RevokeSharedMemory):
+            raise TypeError("command must be RevokeSharedMemory")
+        context = self._require_shared_actor(command.access_context, command.issued_at_utc)
+        current = self._shared_memory(command.shared_memory_id)
+        if current is None:
+            raise MemoryStoreConflictError("shared memory not found")
+        decision_id = self._shared_decision_id(context.actor_subject_id, command.idempotency_key)
+        replay = self._shared_decision_replay(
+            decision_id,
+            command.shared_memory_id,
+            context.actor_subject_id,
+            "revoke",
+            command.expected_revision,
+        )
+        if replay:
+            if current.status is SharedMemoryStatus.REVOKED:
+                return current
+            raise MemoryStoreConflictError("shared revocation replay state mismatch")
+        if current.owner_subject_id != context.actor_subject_id:
+            raise MemoryStoreAuthorizationError("shared memory owner mismatch")
+        if command.expected_revision != current.revision:
+            raise MemoryStoreConflictError("shared memory revision is stale")
+        if current.status is SharedMemoryStatus.REVOKED:
+            return current
+        if current.status is not SharedMemoryStatus.CONFIRMED:
+            raise MemoryStoreConflictError("only confirmed shared memory can be revoked")
+        revoked = SharedMemory.from_dict(
+            {
+                **current.to_dict(),
+                "revision": current.revision + 1,
+                "status": SharedMemoryStatus.REVOKED.value,
+                "revoked_at_utc": command.issued_at_utc,
+                "updated_at_utc": command.issued_at_utc,
+            }
+        )
+        self.put_item(revoked)
+        self.__db.execute(
+            "INSERT INTO shared_decisions (decision_id, shared_memory_id, actor_subject_id, "
+            "decision, expected_revision, decided_at_utc) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                decision_id,
+                command.shared_memory_id,
+                context.actor_subject_id,
+                "revoke",
+                command.expected_revision,
+                command.issued_at_utc,
+            ),
+        )
+        return revoked
+
+    @staticmethod
+    def _shared_decision_id(actor_subject_id: str, idempotency_key: str) -> str:
+        return "shared-decision-" + hashlib.sha256(
+            f"{actor_subject_id}\0{idempotency_key}".encode("utf-8")
+        ).hexdigest()
+
+    def _shared_decision_replay(
+        self,
+        decision_id: str,
+        shared_memory_id: str,
+        actor_subject_id: str,
+        decision: str,
+        expected_revision: int,
+    ) -> bool:
+        row = self.__db.execute(
+            "SELECT shared_memory_id, actor_subject_id, decision, expected_revision "
+            "FROM shared_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if (
+            str(row["shared_memory_id"]) != shared_memory_id
+            or str(row["actor_subject_id"]) != actor_subject_id
+            or str(row["decision"]) != decision
+            or int(row["expected_revision"]) != expected_revision
+        ):
+            raise MemoryStoreConflictError("shared decision idempotency conflict")
+        return True
+
+    def _require_shared_actor(
+        self,
+        context: AccessContext,
+        issued_at_utc: str,
+    ) -> AccessContext:
+        if not isinstance(context, AccessContext):
+            raise MemoryStoreAuthorizationError("access context is required")
+        if (
+            context.purpose is not AccessPurpose.MANAGE
+            or "memory.manage" not in context.capability_scopes
+            or context.actor_kind is not ActorKind.PRIMARY_USER
+            or context.identity_assurance
+            not in {IdentityAssurance.DESKTOP_CONFIRMED, IdentityAssurance.VERIFIED}
+            or context.audience_ceiling is not Audience.EXPLICIT_SHARED
+            or not (context.issued_at_utc <= issued_at_utc < context.expires_at_utc)
+        ):
+            raise MemoryStoreAuthorizationError("shared memory access denied")
+        participant_ids = tuple(sorted(context.participant_subject_ids))
+        if context.actor_subject_id not in participant_ids or len(participant_ids) != 2:
+            raise MemoryStoreAuthorizationError("shared memory participants invalid")
+        placeholders = ",".join("?" for _ in participant_ids)
+        rows = self.__db.execute(
+            "SELECT p.subject_id, p.participant_role, p.identity_assurance, "
+            "p.server_binding_source, p.status, "
+            "s.subject_kind, s.status AS subject_status "
+            "FROM session_participants AS p JOIN subjects AS s ON s.subject_id = p.subject_id "
+            f"WHERE p.session_id = ? AND p.subject_id IN ({placeholders})",
+            (context.session_id, *participant_ids),
+        ).fetchall()
+        if len(rows) != 2 or {str(row["subject_id"]) for row in rows} != set(participant_ids):
+            raise MemoryStoreAuthorizationError("shared memory participant binding missing")
+        primary = tuple(
+            row
+            for row in rows
+            if str(row["subject_id"]) == context.actor_subject_id
+            and str(row["participant_role"]) == ParticipantRole.PRIMARY.value
+            and str(row["subject_kind"]) == SubjectKind.PRIMARY_USER.value
+        )
+        javis = tuple(
+            row
+            for row in rows
+            if str(row["participant_role"]) == ParticipantRole.JAVIS.value
+            and str(row["subject_kind"]) == SubjectKind.JAVIS.value
+        )
+        if len(primary) != 1 or len(javis) != 1 or any(
+            str(row["status"]) != ParticipantStatus.ACTIVE.value
+            or str(row["subject_status"]) != SubjectStatus.ACTIVE.value
+            or str(row["server_binding_source"]) != "packaged_desktop"
+            for row in rows
+        ) or str(primary[0]["identity_assurance"]) not in {
+            IdentityAssurance.DESKTOP_CONFIRMED.value,
+            IdentityAssurance.VERIFIED.value,
+        } or str(javis[0]["identity_assurance"]) != IdentityAssurance.VERIFIED.value:
+            raise MemoryStoreAuthorizationError("shared memory participant binding invalid")
+        return context
+
+    def _live_source_episodes(
+        self,
+        source_episode_ids: tuple[str, ...],
+        context: AccessContext,
+        issued_at_utc: str,
+    ) -> tuple[sqlite3.Row, ...]:
+        ids = tuple(source_episode_ids)
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.__db.execute(
+            "SELECT i.item_id, i.owner_subject_id, i.status, i.deletion_fenced, "
+            "i.expires_at_utc, i.content_hash, i.source_digest, e.payload_json "
+            "FROM memory_items AS i JOIN experience_episodes AS e ON e.episode_id = i.item_id "
+            f"WHERE i.item_kind = ? AND i.item_id IN ({placeholders})",
+            (MemoryItemKind.EXPERIENCE_EPISODE.value, *ids),
+        ).fetchall()
+        by_id = {str(row["item_id"]): row for row in rows}
+        if set(by_id) != set(ids):
+            raise MemoryStoreConflictError("shared memory source is unavailable")
+        ordered = tuple(by_id[item_id] for item_id in ids)
+        for row in ordered:
+            episode = ExperienceEpisode.from_dict(json.loads(row["payload_json"]))
+            if (
+                str(row["owner_subject_id"]) != context.actor_subject_id
+                or str(row["status"]) != MemoryItemStatus.ACTIVE.value
+                or int(row["deletion_fenced"]) != 0
+                or (
+                    row["expires_at_utc"] is not None
+                    and str(row["expires_at_utc"]) <= issued_at_utc
+                )
+                or tuple(sorted(episode.participant_subject_ids))
+                != tuple(sorted(context.participant_subject_ids))
+            ):
+                raise MemoryStoreConflictError("shared memory source is not live")
+        return ordered
+
+    def _shared_memory(self, shared_memory_id: str) -> SharedMemory | None:
+        row = self.__db.execute(
+            "SELECT payload_json FROM memory_items WHERE item_id = ? AND item_kind = ?",
+            (shared_memory_id, MemoryItemKind.SHARED_MEMORY.value),
+        ).fetchone()
+        return None if row is None else SharedMemory.from_dict(json.loads(row["payload_json"]))
+
+    @staticmethod
+    def _require_shared_transition(
+        current: SharedMemory,
+        context: AccessContext,
+        proposal_revision: int,
+    ) -> None:
+        if current.owner_subject_id != context.actor_subject_id:
+            raise MemoryStoreAuthorizationError("shared memory owner mismatch")
+        if context.actor_subject_id not in current.participant_subject_ids:
+            raise MemoryStoreAuthorizationError("shared memory actor is not a participant")
+        if tuple(sorted(context.participant_subject_ids)) != tuple(
+            sorted(current.participant_subject_ids)
+        ):
+            raise MemoryStoreAuthorizationError("shared memory participant set changed")
+        if proposal_revision != current.proposal_revision:
+            raise MemoryStoreConflictError("shared proposal revision is stale")
+        if current.status is not SharedMemoryStatus.PROPOSED:
+            raise MemoryStoreConflictError("shared proposal is not pending")
 
     def delete_item(self, item_kind: MemoryItemKind | str, item_id: str) -> bool:
         kind = self._store._item_kind_value(item_kind)

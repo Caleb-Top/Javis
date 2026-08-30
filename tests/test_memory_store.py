@@ -224,18 +224,20 @@ def test_empty_database_and_reopen_are_idempotent_with_complete_schema(tmp_path:
             "projection_suppressions",
             "memory_acl",
             "shared_confirmations",
+            "shared_decisions",
             "memory_fts",
             "memory_fts_rebuilds",
         } <= names
         assert raw_rows(reopened.path, "SELECT version FROM schema_migrations ORDER BY version") == [
             (1,),
             (2,),
+            (3,),
         ]
     finally:
         reopened.close()
 
 
-def test_v1_database_upgrades_to_v2_and_reopen_does_not_repeat_migration(tmp_path: Path):
+def test_v1_database_upgrades_to_latest_and_reopen_does_not_repeat_migration(tmp_path: Path):
     token = object()
     initial = MemoryStore(tmp_path, writer_token=token)
     path = initial.path
@@ -245,7 +247,8 @@ def test_v1_database_upgrades_to_v2_and_reopen_does_not_repeat_migration(tmp_pat
     try:
         db.execute("DROP TABLE memory_fts")
         db.execute("DROP TABLE memory_fts_rebuilds")
-        db.execute("DELETE FROM schema_migrations WHERE version = 2")
+        db.execute("DROP TABLE shared_decisions")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (2, 3)")
         db.execute("UPDATE memory_meta SET schema_version = 1")
         db.execute("PRAGMA user_version = 1")
         db.commit()
@@ -256,14 +259,51 @@ def test_v1_database_upgrades_to_v2_and_reopen_does_not_repeat_migration(tmp_pat
     try:
         assert upgraded.status()["state"] == "ready"
         assert upgraded.fts_available is True
-        assert upgraded.metadata()["schema_version"] == 2
+        assert upgraded.metadata()["schema_version"] == SCHEMA_VERSION
     finally:
         upgraded.close()
     reopened = MemoryStore(tmp_path, writer_token=token)
     try:
         assert raw_rows(path, "SELECT COUNT(*) FROM schema_migrations WHERE version = 2") == [(1,)]
+        assert raw_rows(path, "SELECT COUNT(*) FROM schema_migrations WHERE version = 3") == [(1,)]
     finally:
         reopened.close()
+
+
+def test_v2_database_adds_content_free_shared_decision_receipts(tmp_path: Path):
+    token = object()
+    initial = MemoryStore(tmp_path, writer_token=token)
+    path = initial.path
+    initial.close()
+
+    db = sqlite3.connect(path)
+    try:
+        db.execute("DROP TABLE shared_decisions")
+        db.execute("DELETE FROM schema_migrations WHERE version = 3")
+        db.execute("UPDATE memory_meta SET schema_version = 2")
+        db.execute("PRAGMA user_version = 2")
+        db.commit()
+    finally:
+        db.close()
+
+    upgraded = MemoryStore(tmp_path, writer_token=token)
+    try:
+        assert upgraded.status()["state"] == "ready"
+        assert upgraded.metadata()["schema_version"] == SCHEMA_VERSION
+        columns = {
+            row[1]
+            for row in raw_rows(path, "PRAGMA table_info(shared_decisions)")
+        }
+        assert columns == {
+            "decision_id",
+            "shared_memory_id",
+            "actor_subject_id",
+            "decision",
+            "expected_revision",
+            "decided_at_utc",
+        }
+    finally:
+        upgraded.close()
 
 
 def test_non_fts_search_table_forces_degraded_without_legacy_fallback(tmp_path: Path):
