@@ -64,6 +64,21 @@ def _reject_reparse_chain(path: Path) -> None:
             raise ValueError("data_root must not traverse a symlink or reparse point")
 
 
+def _reject_reparse_below(path: Path, boundary: Path) -> None:
+    if not _is_within(path, boundary):
+        raise ValueError("path must remain within runtime.data_root")
+    members: list[Path] = []
+    current = path
+    while _path_key(current) != _path_key(boundary):
+        members.append(current)
+        if current == current.parent:
+            raise ValueError("path must remain within runtime.data_root")
+        current = current.parent
+    for member in reversed(members):
+        if _is_reparse(member):
+            raise ValueError("data_root child must not be a symlink or reparse point")
+
+
 def _packaged_roots(runtime: Any) -> tuple[Path, ...]:
     roots: list[Path] = []
     for name in ("package_root", "runtime_root", "bundle_root"):
@@ -113,9 +128,6 @@ class DataRootLayout:
                 raise ValueError("data_root must be outside source and packaged runtime roots")
 
         _reject_reparse_chain(requested_root)
-        resolved = requested_root.resolve(strict=False)
-        if _path_key(resolved) != _path_key(requested_root):
-            raise ValueError("data_root must not traverse a symlink or reparse point")
 
         growth = requested_root / "growth"
         body = requested_root / "body"
@@ -145,21 +157,18 @@ class DataRootLayout:
             if _is_within(candidate, boundary):
                 raise ValueError("path must be outside source and packaged runtime roots")
         _reject_reparse_chain(candidate)
-        resolved = candidate.resolve(strict=False)
-        if _path_key(resolved) != _path_key(candidate):
-            raise ValueError("path must not traverse a symlink or reparse point")
         return candidate
 
     def ensure_directories(self) -> "DataRootLayout":
-        self.assert_safe_path(self.data_root)
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.assert_safe_path(self.data_root)
         for field in fields(self):
             if field.name in {"data_root", "_forbidden_roots"}:
                 continue
-            path = self.assert_safe_path(getattr(self, field.name))
+            path = _absolute_path(getattr(self, field.name), field.name)
+            _reject_reparse_below(path, self.data_root)
             path.mkdir(parents=True, exist_ok=True)
-            self.assert_safe_path(path)
+            _reject_reparse_below(path, self.data_root)
         return self
 
 

@@ -31,6 +31,22 @@ from .contracts import (
     canonical_json_bytes,
 )
 from .layout import DataRootLayout
+from .legacy import (
+    LegacySleepLearningQuarantine,
+    LegacySleepMigrationHint,
+    LegacySleepQuarantinedError,
+)
+from .supervisor import (
+    AuthorityReference,
+    AuthoritySpec,
+    L7Supervisor,
+    L7SupervisorClosedError,
+    L7SupervisorConflictError,
+    L7SupervisorError,
+    RuntimeAuthorityAdapter,
+    UpstreamAuthorityError,
+    ValidatedUpstreamRecord,
+)
 from .growth_store import (
     CandidateHead,
     CandidateSnapshot,
@@ -53,6 +69,18 @@ __all__ = [
     "CandidateTransitionV1",
     "CatalogStatus",
     "DataRootLayout",
+    "LegacySleepLearningQuarantine",
+    "LegacySleepMigrationHint",
+    "LegacySleepQuarantinedError",
+    "AuthorityReference",
+    "AuthoritySpec",
+    "L7Supervisor",
+    "L7SupervisorClosedError",
+    "L7SupervisorConflictError",
+    "L7SupervisorError",
+    "RuntimeAuthorityAdapter",
+    "UpstreamAuthorityError",
+    "ValidatedUpstreamRecord",
     "ExpressionPlanV1",
     "GrowthActorKind",
     "GrowthCandidateV1",

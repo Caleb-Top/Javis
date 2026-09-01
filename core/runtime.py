@@ -28,6 +28,7 @@ from core.events import EventBus
 from core.llm_client import LLMClient
 from core.life.paths import resolve_data_root
 from core.life.l8.layout import ContinuityLayout
+from core.life.l7.supervisor import L7Supervisor
 from core.life.memory.access import AccessContextFactory, MemoryServiceAccessView
 from core.life.memory.service import MemoryService
 from core.life.service import LifeService
@@ -66,6 +67,7 @@ class JarvisRuntime:
     conversation_hub: ConversationHub
     life: LifeService
     memory_service: MemoryService
+    l7: L7Supervisor
     memory_access_factory: AccessContextFactory | None = None
     subsystems: dict[str, Any] = field(default_factory=dict)
     event_store: Any | None = None
@@ -206,10 +208,18 @@ class JarvisRuntime:
 
     def register_subsystem(self, subsystem: Any) -> None:
         name = getattr(subsystem, "name", subsystem.__class__.__name__)
+        existing = self.subsystems.get(name)
+        if existing is not None and existing is not subsystem:
+            raise RuntimeError(f"subsystem {name!r} is already registered")
         self.subsystems[name] = subsystem
         start = getattr(subsystem, "start", None)
-        if callable(start):
-            start(self)
+        try:
+            if callable(start):
+                start(self)
+        except BaseException:
+            if existing is None and self.subsystems.get(name) is subsystem:
+                self.subsystems.pop(name, None)
+            raise
         self.event_bus.publish(
             "subsystem.registered",
             {"name": name},
@@ -267,10 +277,6 @@ class JarvisRuntime:
 
     def close(self) -> None:
         """Release owned subsystem and persistence resources."""
-        try:
-            self.memory_service.shutdown(timeout=5.0, drain=True)
-        except Exception as exc:
-            logger.debug("Memory service shutdown skipped: %s", exc)
         for subsystem in reversed(list(self.subsystems.values())):
             stop = getattr(subsystem, "stop", None)
             if callable(stop):
@@ -278,6 +284,10 @@ class JarvisRuntime:
                     stop()
                 except Exception as exc:
                     logger.debug("Subsystem stop skipped: %s", exc)
+        try:
+            self.memory_service.shutdown(timeout=5.0, drain=True)
+        except Exception as exc:
+            logger.debug("Memory service shutdown skipped: %s", exc)
         closed: set[int] = set()
         for resource in (
             self.event_store,
@@ -452,7 +462,7 @@ def create_runtime(
     if not startup_side_effects:
         os.environ["JAVIS_DISABLE_BRAIN_AUTO_FLUSH"] = "1"
     try:
-        brain = Brain()
+        brain = Brain(data_root=resolved_data_root, read_only=True)
     finally:
         if not startup_side_effects:
             if previous_auto_flush is None:
@@ -488,7 +498,9 @@ def create_runtime(
         (
             os.name,
             sys.platform,
-            platform.machine().casefold() or "unknown-machine",
+            os.environ.get("PROCESSOR_ARCHITECTURE", "").casefold()
+            or platform.machine().casefold()
+            or "unknown-machine",
             str(root),
         )
     )
@@ -500,6 +512,7 @@ def create_runtime(
         resolved_data_root,
         conversation_store=conversation_store,
     )
+    l7 = L7Supervisor()
     llm = LLMClient(str(root / "config.yaml"))
     engine = InferenceEngine(llm)
     agent = Agent(
@@ -511,6 +524,7 @@ def create_runtime(
         tool_catalog=tool_catalog,
     )
     agent.set_confirm_handler()
+    memory_service.register_prompt_invalidator(agent.invalidate_memory_context)
     conversation_hub = ConversationHub(
         conversation_store,
         agent_runs,
@@ -539,6 +553,7 @@ def create_runtime(
         conversation_hub=conversation_hub,
         life=life,
         memory_service=memory_service,
+        l7=l7,
     )
     runtime.register_always_on_tools()
     _discover_external_skill_imports(runtime)
@@ -551,7 +566,9 @@ def create_runtime(
         runtime.discover_skills()
         runtime.load_skill("全功能")
 
+    life.attach_l7_supervisor(l7)
     runtime.register_subsystem(life)
+    runtime.register_subsystem(l7)
     memory_service.start()
     runtime.memory_access_factory = AccessContextFactory(
         MemoryServiceAccessView(memory_service),

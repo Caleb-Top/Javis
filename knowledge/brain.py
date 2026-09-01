@@ -7,7 +7,21 @@ from typing import Optional
 
 logger = logging.getLogger("brain")
 
-BRAIN_DIR = Path(__file__).parent.parent / "brain_data"
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+LEGACY_BRAIN_DIR = _SOURCE_ROOT / "brain_data"
+
+
+def _configured_brain_dir(data_root: str | Path | None = None) -> Path:
+    raw_root = data_root if data_root is not None else os.environ.get("JAVIS_DATA_ROOT", "")
+    if raw_root is None or not str(raw_root).strip():
+        return LEGACY_BRAIN_DIR
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    return Path(os.path.abspath(root)) / "memory" / "legacy-brain"
+
+
+BRAIN_DIR = _configured_brain_dir()
 FACTS_DIR = BRAIN_DIR / "facts"
 EXPERIENCES_DIR = BRAIN_DIR / "experiences"
 PAPERS_DIR = BRAIN_DIR / "papers"
@@ -56,14 +70,33 @@ class Experience:
 class Brain:
     """Javis 的大脑 v2 — 层次化记忆管理"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        data_root: str | Path | None = None,
+        *,
+        legacy_read: bool = False,
+        read_only: bool = False,
+    ):
+        self._brain_dir = _configured_brain_dir(data_root)
+        self._facts_dir = self._brain_dir / "facts"
+        self._experiences_dir = self._brain_dir / "experiences"
+        self._papers_dir = self._brain_dir / "papers"
+        self._read_only = bool(read_only)
+        self._persistence_enabled = self._brain_dir != LEGACY_BRAIN_DIR and not self._read_only
+        self._legacy_read = bool(legacy_read)
+        if not self._persistence_enabled and not _env_flag("JAVIS_TEST_MODE"):
+            raise RuntimeError("JAVIS_DATA_ROOT is required before Brain can persist state")
         self._ensure_dirs()
         self._facts: list[Fact] = []
         self._experiences: list[Experience] = []
         self._load()
         self._dirty = False
         self._save_timer = 0
-        auto_flush_enabled = not _env_flag("JAVIS_TEST_MODE") and not _env_flag("JAVIS_DISABLE_BRAIN_AUTO_FLUSH")
+        auto_flush_enabled = (
+            not self._read_only
+            and not _env_flag("JAVIS_TEST_MODE")
+            and not _env_flag("JAVIS_DISABLE_BRAIN_AUTO_FLUSH")
+        )
         if auto_flush_enabled:
             self._start_auto_flush()
             atexit.register(self._flush)
@@ -85,12 +118,17 @@ class Brain:
         t.start()
 
     def _ensure_dirs(self):
-        for d in [FACTS_DIR, EXPERIENCES_DIR, PAPERS_DIR]:
+        if not self._persistence_enabled:
+            return
+        for d in [self._facts_dir, self._experiences_dir, self._papers_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
     def _load(self):
-        facts_files = sorted(FACTS_DIR.glob("*.json"))
-        exp_files = sorted(EXPERIENCES_DIR.glob("*.json"))
+        facts_files = sorted(self._facts_dir.glob("*.json"))
+        exp_files = sorted(self._experiences_dir.glob("*.json"))
+        if self._legacy_read and self._brain_dir != LEGACY_BRAIN_DIR:
+            facts_files += sorted((LEGACY_BRAIN_DIR / "facts").glob("*.json"))
+            exp_files += sorted((LEGACY_BRAIN_DIR / "experiences").glob("*.json"))
         loaded_f, skipped_f = 0, 0
         loaded_e, skipped_e = 0, 0
         for f in facts_files:
@@ -149,7 +187,7 @@ class Brain:
 
     def learn_style(self, user_msg: str, assistant_msg: str = ""):
         """从一轮对话中学习风格 — 原生大脑能力"""
-        if not user_msg:
+        if self._read_only or not user_msg:
             return
         try:
             u = self.extract_style(user_msg)
@@ -177,6 +215,8 @@ class Brain:
     def learn_fact(self, content: str, category: str = "general",
                    source: str = "conversation", priority: int = 1):
         """学习一个新知识点，带优先级"""
+        if self._read_only:
+            return
         now = time.time()
         fact_id = hashlib.md5(content.encode()).hexdigest()[:12]
         existing = [f for f in self._facts if f.id == fact_id]
@@ -203,6 +243,8 @@ class Brain:
                           priority: int = 1, domain: str = "general",
                           error_category: str = ""):
         """记录经验，带优先级和领域"""
+        if self._read_only:
+            return
         now = time.time()
         exp = Experience(
             id=hashlib.md5(f"{intent}{action}{now}".encode()).hexdigest()[:12],
@@ -295,7 +337,7 @@ class Brain:
 
     def _flush(self):
         """批量刷盘（不再每次 learn_fact 都写）"""
-        if not self._dirty:
+        if self._read_only or not self._dirty:
             return
         for fact in self._facts:
             self._save_fact(fact)
@@ -326,7 +368,7 @@ class Brain:
         return {
             "facts_count": len(self._facts),
             "experiences_count": len(self._experiences),
-            "papers_count": len(list(PAPERS_DIR.glob("*.md"))),
+            "papers_count": len(list(self._papers_dir.glob("*.md"))),
             "categories": categories,
             "priority_distribution": priority_dist,
             "domain_distribution": domain_dist,
@@ -336,6 +378,8 @@ class Brain:
 
     def compress(self):
         """压缩低优先级知识：不删除，合并为摘要"""
+        if self._read_only:
+            return
         self._flush()
         groups = {}
         for f in self._facts:
@@ -374,9 +418,13 @@ class Brain:
         self.compress()
 
     def _save_fact(self, fact: Fact):
-        (FACTS_DIR / f"{fact.id}.json").write_text(
+        if not self._persistence_enabled:
+            return
+        (self._facts_dir / f"{fact.id}.json").write_text(
             json.dumps(asdict(fact), ensure_ascii=False), encoding="utf-8")
 
     def _save_experience(self, exp: Experience):
-        (EXPERIENCES_DIR / f"{exp.id}.json").write_text(
+        if not self._persistence_enabled:
+            return
+        (self._experiences_dir / f"{exp.id}.json").write_text(
             json.dumps(asdict(exp), ensure_ascii=False), encoding="utf-8")

@@ -7,6 +7,7 @@
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -29,9 +30,24 @@ _DEFAULT_SCHEDULE = {
     "check_interval_seconds": 120,       # 每 2 分钟检查一次
 }
 
-_EPISODES_DIR = Path("brain_data/episodes")
-_FACTS_DIR = Path("brain_data/facts")
-_SLEEP_META_FILE = Path("brain_data/sleep_meta.json")
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_LEGACY_BRAIN_DIR = _SOURCE_ROOT / "brain_data"
+
+
+def _sleep_paths(data_root: str | Path | None = None) -> tuple[Path, Path, Path]:
+    raw_root = data_root if data_root is not None else os.environ.get("JAVIS_DATA_ROOT", "")
+    if raw_root is None or not str(raw_root).strip():
+        brain = _LEGACY_BRAIN_DIR
+        return brain / "episodes", brain / "facts", brain / "sleep_meta.json"
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    root = Path(os.path.abspath(root))
+    brain = root / "memory" / "legacy-brain"
+    return brain / "episodes", brain / "facts", root / "growth" / "sleep" / "meta.json"
+
+
+_EPISODES_DIR, _FACTS_DIR, _SLEEP_META_FILE = _sleep_paths()
 
 
 class SleepLearning:
@@ -41,8 +57,10 @@ class SleepLearning:
     使用进化质量控制防止退化。
     """
 
-    def __init__(self, training_engine: TrainingEngine):
+    def __init__(self, training_engine: TrainingEngine, data_root: str | Path | None = None):
         self.training_engine = training_engine
+        self._episodes_dir, self._facts_dir, self._sleep_meta_file = _sleep_paths(data_root)
+        self._persistence_enabled = self._episodes_dir != _LEGACY_BRAIN_DIR / "episodes"
         self.is_sleeping = False
         self.schedule = dict(_DEFAULT_SCHEDULE)
         self._last_sleep_time = 0
@@ -52,9 +70,9 @@ class SleepLearning:
 
     def _load_meta(self):
         """加载睡眠学习元数据"""
-        if _SLEEP_META_FILE.exists():
+        if self._sleep_meta_file.exists():
             try:
-                meta = json.loads(_SLEEP_META_FILE.read_text("utf-8"))
+                meta = json.loads(self._sleep_meta_file.read_text("utf-8"))
                 self._last_sleep_time = meta.get("last_sleep_time", 0)
                 logger.info(f"睡眠学习: 上次睡眠 {self._last_sleep_time}")
             except Exception:
@@ -62,8 +80,10 @@ class SleepLearning:
 
     def _save_meta(self):
         """保存睡眠学习元数据"""
-        _SLEEP_META_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SLEEP_META_FILE.write_text(json.dumps(
+        if not self._persistence_enabled:
+            raise RuntimeError("JAVIS_DATA_ROOT is required before writing sleep state")
+        self._sleep_meta_file.parent.mkdir(parents=True, exist_ok=True)
+        self._sleep_meta_file.write_text(json.dumps(
             {"last_sleep_time": self._last_sleep_time}, ensure_ascii=False
         ), encoding="utf-8")
 
@@ -80,10 +100,10 @@ class SleepLearning:
 
     def _count_unconsolidated(self) -> int:
         """统计未巩固的 episode 数量"""
-        if not _EPISODES_DIR.exists():
+        if not self._episodes_dir.exists():
             return 0
         count = 0
-        for f in sorted(_EPISODES_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime):
+        for f in sorted(self._episodes_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
             try:
                 data = json.loads(f.read_text("utf-8"))
                 # 检查是否包含视觉/音频数据
@@ -108,11 +128,11 @@ class SleepLearning:
         visual_data = []
         meta = {"total": 0, "visual_samples": 0, "auditory_samples": 0}
 
-        if not _EPISODES_DIR.exists():
+        if not self._episodes_dir.exists():
             return {"visual": [], "auditory": [], "meta": meta}
 
         # 获取最近 100 个未巩固的 episode
-        episodes = sorted(_EPISODES_DIR.glob("*.json"),
+        episodes = sorted(self._episodes_dir.glob("*.json"),
                           key=lambda p: p.stat().st_mtime, reverse=True)[:100]
 
         for ep_path in episodes:
@@ -190,7 +210,9 @@ class SleepLearning:
 
     def _mark_consolidated(self):
         """标记最近的 episode 为已巩固（写个标记文件）"""
-        marker = _EPISODES_DIR / ".consolidated"
+        if not self._persistence_enabled:
+            raise RuntimeError("JAVIS_DATA_ROOT is required before marking sleep consolidation")
+        marker = self._episodes_dir / ".consolidated"
         marker.write_text(str(time.time()), encoding="utf-8")
 
     def _background_loop(self):

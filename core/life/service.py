@@ -154,6 +154,15 @@ class LifeService:
         self._expiry_generation = 0
         self._expiry_sequence = 0
         self._last_error: str | None = None
+        self._l7_supervisor: Any | None = None
+
+    def attach_l7_supervisor(self, supervisor: Any) -> None:
+        if getattr(supervisor, "name", None) != "l7":
+            raise TypeError("supervisor must be the L7 subsystem")
+        with self._lock:
+            if self._l7_supervisor not in (None, supervisor):
+                raise RuntimeError("LifeService already has an L7 supervisor")
+            self._l7_supervisor = supervisor
 
     def verify_runtime(self, runtime: Any) -> None:
         runtime_root = Path(getattr(runtime, "data_root", "")).expanduser().resolve()
@@ -298,6 +307,13 @@ class LifeService:
             return True
 
     def stop(self, timeout: float = 2.0) -> bool:
+        supervisor = self._l7_supervisor
+        begin_l7_shutdown = getattr(supervisor, "begin_shutdown", None)
+        if callable(begin_l7_shutdown):
+            try:
+                begin_l7_shutdown()
+            except Exception as exc:
+                logger.warning("L7 shutdown notification failed: %s", type(exc).__name__)
         with self._lock:
             if self._state == "stopped":
                 return True
@@ -468,6 +484,7 @@ class LifeService:
                 "read_only_recovery": self._read_only_recovery,
                 "handler_installed": self._handler_installed,
                 "accepting": self._accepting,
+                "l7_attached": self._l7_supervisor is not None,
                 "last_error": (
                     self._last_error
                     or journal_status["last_error"]

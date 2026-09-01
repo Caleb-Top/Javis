@@ -4,6 +4,8 @@
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -20,6 +22,19 @@ logger = logging.getLogger("kernel")
 
 logger = logging.getLogger("kernel")
 
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+_LEGACY_BRAIN_DIR = _SOURCE_ROOT / "brain_data"
+
+
+def _brain_dir(data_root: str | Path | None = None) -> Path:
+    raw_root = data_root if data_root is not None else os.environ.get("JAVIS_DATA_ROOT", "")
+    if raw_root is None or not str(raw_root).strip():
+        return _LEGACY_BRAIN_DIR
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    return Path(os.path.abspath(root)) / "memory" / "legacy-brain"
+
 
 class JavisKernel:
     """Javis 内核 — 统一入口
@@ -28,7 +43,8 @@ class JavisKernel:
     在 main.py 中作为一个全局实例初始化。
     """
 
-    def __init__(self):
+    def __init__(self, data_root: str | Path | None = None):
+        self._brain_dir = _brain_dir(data_root)
         # ── 设备 ──
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"内核初始化: device={self.device}")
@@ -52,7 +68,10 @@ class JavisKernel:
         logger.info("训练引擎已创建")
 
         # ── 睡眠学习 ──
-        self.sleep_learning = SleepLearning(training_engine=self.training_engine)
+        self.sleep_learning = SleepLearning(
+            training_engine=self.training_engine,
+            data_root=data_root,
+        )
         logger.info("睡眠学习控制器已创建")
 
         # ── 文本嵌入器（将文字转 1536 维，供训练配对）──
@@ -66,10 +85,8 @@ class JavisKernel:
         """启动所有后台服务"""
         if self._started:
             return
-        self.training_engine.start()
-        self.sleep_learning.start()
         self._started = True
-        logger.info("内核后台服务已启动 (训练引擎 + 睡眠学习)")
+        logger.info("Legacy training and sleep learning remain quarantined; L7 owns growth runs")
 
     def stop(self):
         """停止所有后台服务"""
@@ -207,7 +224,7 @@ class JavisKernel:
         import json
         from pathlib import Path
 
-        eps_dir = Path("brain_data/episodes")
+        eps_dir = self._brain_dir / "episodes"
         if not eps_dir.exists():
             return {"visual_samples": 0, "auditory_samples": 0, "semantic_rules": 0}
 
@@ -248,7 +265,7 @@ class JavisKernel:
         from pathlib import Path
         import torch.nn.functional as F
 
-        sem_dir = Path("brain_data/semantic")
+        sem_dir = self._brain_dir / "semantic"
         if not sem_dir.exists():
             return 0
 
