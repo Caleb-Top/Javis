@@ -372,6 +372,13 @@ class Agent:
     def reset(self):
         self.state = AgentState()
         self._action_history = []
+        self.invalidate_memory_context()
+
+    def invalidate_memory_context(self) -> None:
+        """Drop every assembled prompt that could contain recalled memory."""
+
+        self._cached_prompt = ""
+        self._cached_prompt_step = -1
         if hasattr(self, 'prompt_builder'):
             self.prompt_builder.invalidate_cache()
 

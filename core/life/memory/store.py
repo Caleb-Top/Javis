@@ -24,10 +24,14 @@ from core.life.memory.contracts import (
     Audience,
     ClaimStatus,
     ConfirmSharedMemory,
+    CorrectMemory,
     DeletionRequest,
+    DeletionScope,
+    DeletionState,
     DerivationEdge,
     DerivationRelation,
     ExperienceEpisode,
+    ForgetMemory,
     IdentityAssurance,
     JournalEntry,
     MemoryItemKind,
@@ -46,6 +50,7 @@ from core.life.memory.contracts import (
     SharedConfirmationReceipt,
     SharedMemory,
     SharedMemoryStatus,
+    SourceHandling,
     Subject,
     SubjectKind,
     SubjectStatus,
@@ -54,7 +59,7 @@ from core.life.memory.contracts import (
 
 
 DATABASE_RELATIVE_PATH = Path("memory") / "autobiographical.sqlite3"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _READ_PERMISSIONS = frozenset({"read", "manage", "delete"})
 _PROJECTION_STATES = frozenset({"pending", "excluded", "not_selected", "projected"})
 _TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -101,6 +106,7 @@ _REQUIRED_V2_TABLES = _REQUIRED_V1_TABLES | {
     "memory_fts_rebuilds",
 }
 _REQUIRED_V3_TABLES = _REQUIRED_V2_TABLES | {"shared_decisions"}
+_REQUIRED_V4_TABLES = _REQUIRED_V3_TABLES | {"correction_receipts", "deletion_audits"}
 
 
 class MemoryStoreError(RuntimeError):
@@ -482,6 +488,38 @@ _MIGRATION_3 = (
     "CREATE INDEX idx_shared_decisions_memory ON shared_decisions(shared_memory_id, decision)",
 )
 
+_MIGRATION_4 = (
+    """
+    CREATE TABLE correction_receipts (
+        correction_id TEXT PRIMARY KEY,
+        actor_subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE RESTRICT,
+        target_kind TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+        corrected_kind TEXT NOT NULL,
+        corrected_id TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        UNIQUE (target_kind, target_id, corrected_id)
+    )
+    """,
+    "CREATE INDEX idx_correction_target ON correction_receipts(target_kind, target_id)",
+    """
+    CREATE TABLE deletion_audits (
+        deletion_request_id TEXT PRIMARY KEY
+            REFERENCES deletion_requests(deletion_request_id) ON DELETE CASCADE,
+        actor_subject_hash TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        source_handling TEXT NOT NULL,
+        selector_hash TEXT NOT NULL,
+        target_count INTEGER NOT NULL CHECK (target_count >= 0),
+        source_count INTEGER NOT NULL CHECK (source_count >= 0),
+        reason_code TEXT NOT NULL,
+        completed_at_utc TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_deletion_audits_completed ON deletion_audits(completed_at_utc)",
+)
+
 
 class MemoryStore:
     """Versioned, single-writer storage rooted below the runtime data root."""
@@ -614,6 +652,83 @@ class MemoryStore:
                 (source_store_id, session_id, request_id),
             ).fetchone()
         return None if row is None else dict(row)
+
+    def get_projection_suppression(
+        self, source_store_id: str, session_id: str, request_id: str
+    ) -> dict[str, Any] | None:
+        for name, value in (
+            ("source_store_id", source_store_id),
+            ("session_id", session_id),
+            ("request_id", request_id),
+        ):
+            _require_text(value, name)
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT suppression_id, source_store_id, session_id, request_id, "
+                "reason_code, created_at_utc FROM projection_suppressions "
+                "WHERE source_store_id = ? AND session_id = ? AND request_id = ?",
+                (source_store_id, session_id, request_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def deletion_status(self, deletion_request_id: str) -> dict[str, Any] | None:
+        _require_text(deletion_request_id, "deletion_request_id")
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT deletion_request_id, scope, source_handling, state, attempt, "
+                "last_reason_code, created_at_utc, updated_at_utc, completed_at_utc "
+                "FROM deletion_requests WHERE deletion_request_id = ?",
+                (deletion_request_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            audit = db.execute(
+                "SELECT target_count, source_count, reason_code FROM deletion_audits "
+                "WHERE deletion_request_id = ?",
+                (deletion_request_id,),
+            ).fetchone()
+            target_count = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ?",
+                    (deletion_request_id,),
+                ).fetchone()[0]
+            )
+            source_count = int(
+                db.execute(
+                    "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ? "
+                    "AND session_id IS NOT NULL AND request_id IS NOT NULL",
+                    (deletion_request_id,),
+                ).fetchone()[0]
+            )
+        result = dict(row)
+        if audit is not None:
+            target_count = int(audit["target_count"])
+            source_count = int(audit["source_count"])
+            result["completion_reason_code"] = str(audit["reason_code"])
+        result["target_count"] = target_count
+        result["source_count"] = source_count
+        return result
+
+    def pending_deletion_ids(self) -> tuple[str, ...]:
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT deletion_request_id FROM deletion_requests "
+                "WHERE state != ? ORDER BY created_at_utc, deletion_request_id",
+                (DeletionState.VERIFIED.value,),
+            ).fetchall()
+        return tuple(str(row["deletion_request_id"]) for row in rows)
+
+    def deletion_sources(self, deletion_request_id: str) -> tuple[dict[str, str], ...]:
+        _require_text(deletion_request_id, "deletion_request_id")
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT DISTINCT source_store_id, session_id, request_id "
+                "FROM deletion_targets WHERE deletion_request_id = ? "
+                "AND source_store_id IS NOT NULL AND session_id IS NOT NULL "
+                "AND request_id IS NOT NULL ORDER BY source_store_id, session_id, request_id",
+                (deletion_request_id,),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
 
     def get_item(
         self,
@@ -780,6 +895,12 @@ class MemoryStore:
         with self._writer_transaction(writer_token) as writer:
             return writer.revoke_shared_memory(command)
 
+    def correct_memory(
+        self, command: CorrectMemory, *, writer_token: object
+    ) -> ExperienceEpisode | JournalEntry:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.correct_memory(command)
+
     def delete_item(
         self,
         item_kind: MemoryItemKind | str,
@@ -799,6 +920,63 @@ class MemoryStore:
     ) -> bool:
         with self._writer_transaction(writer_token) as writer:
             return writer.put_deletion_request(request)
+
+    def prepare_deletion(
+        self, command: ForgetMemory, *, writer_token: object
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.prepare_deletion(command)
+
+    def fence_deletion(
+        self, deletion_request_id: str, *, writer_token: object
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.fence_deletion(deletion_request_id)
+
+    def advance_deletion_state(
+        self,
+        deletion_request_id: str,
+        *,
+        expected: DeletionState,
+        target: DeletionState,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.advance_deletion_state(deletion_request_id, expected, target)
+
+    def delete_deletion_primary_rows(
+        self, deletion_request_id: str, *, writer_token: object
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.delete_deletion_primary_rows(deletion_request_id)
+
+    def delete_deletion_derivations(
+        self, deletion_request_id: str, *, writer_token: object
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.delete_deletion_derivations(deletion_request_id)
+
+    def delete_deletion_fts(
+        self, deletion_request_id: str, *, writer_token: object
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.delete_deletion_fts(deletion_request_id)
+
+    def verify_deletion(
+        self, deletion_request_id: str, *, writer_token: object
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.verify_deletion(deletion_request_id)
+
+    def record_deletion_failure(
+        self,
+        deletion_request_id: str,
+        reason_code: str,
+        *,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.record_deletion_failure(deletion_request_id, reason_code)
 
     def record_terminal_receipt(self, *, writer_token: object, **values: Any) -> dict[str, Any]:
         with self._writer_transaction(writer_token) as writer:
@@ -977,6 +1155,10 @@ class MemoryStore:
             if version == 2:
                 self._validate_v2_schema(db)
                 self._apply_migration(db, 3, _MIGRATION_3)
+                version = 3
+            if version == 3:
+                self._validate_v3_schema(db)
+                self._apply_migration(db, 4, _MIGRATION_4)
             self._validate_schema(db)
             mode = str(db.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             if mode != "wal":
@@ -1070,10 +1252,10 @@ class MemoryStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
-        MemoryStore._validate_v2_schema(db, SCHEMA_VERSION)
+        MemoryStore._validate_v3_schema(db, SCHEMA_VERSION)
         rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
         names = {str(row["name"]) for row in rows}
-        if _REQUIRED_V3_TABLES - names:
+        if _REQUIRED_V4_TABLES - names:
             raise sqlite3.DatabaseError("required memory schema objects are missing")
         meta = db.execute(
             "SELECT schema_version FROM memory_meta WHERE singleton = 1"
@@ -1082,6 +1264,14 @@ class MemoryStore:
             raise sqlite3.DatabaseError("memory metadata schema version is inconsistent")
         if int(db.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
             raise sqlite3.DatabaseError("foreign key enforcement is unavailable")
+
+    @staticmethod
+    def _validate_v3_schema(db: sqlite3.Connection, expected_version: int = 3) -> None:
+        MemoryStore._validate_v2_schema(db, expected_version)
+        rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+        names = {str(row["name"]) for row in rows}
+        if _REQUIRED_V3_TABLES - names:
+            raise sqlite3.DatabaseError("required v3 memory schema objects are missing")
 
     def _assert_writer(self, writer_token: object) -> None:
         if writer_token is not self._writer_token:
@@ -1512,6 +1702,200 @@ class _MemoryWriter:
         )
         return revoked
 
+    def correct_memory(self, command: CorrectMemory) -> ExperienceEpisode | JournalEntry:
+        if not isinstance(command, CorrectMemory):
+            raise TypeError("command must be CorrectMemory")
+        context = self._require_memory_manager(command.access_context, command.issued_at_utc)
+        if command.target_kind not in {
+            MemoryItemKind.EXPERIENCE_EPISODE,
+            MemoryItemKind.JOURNAL_ENTRY,
+        }:
+            raise MemoryStoreConflictError(
+                "this memory kind requires a governed replacement workflow"
+            )
+        correction_id = "correction-" + hashlib.sha256(
+            f"{context.actor_subject_id}\0{command.idempotency_key}".encode("utf-8")
+        ).hexdigest()
+        receipt = self.__db.execute(
+            "SELECT actor_subject_id, target_kind, target_id, expected_revision, "
+            "corrected_kind, corrected_id FROM correction_receipts WHERE correction_id = ?",
+            (correction_id,),
+        ).fetchone()
+        if receipt is not None:
+            if (
+                str(receipt["actor_subject_id"]) != context.actor_subject_id
+                or str(receipt["target_kind"]) != command.target_kind.value
+                or str(receipt["target_id"]) != command.target_id
+                or int(receipt["expected_revision"]) != command.expected_revision
+            ):
+                raise MemoryStoreConflictError("correction idempotency conflict")
+            corrected = self.__db.execute(
+                "SELECT payload_json FROM memory_items WHERE item_kind = ? AND item_id = ?",
+                (str(receipt["corrected_kind"]), str(receipt["corrected_id"])),
+            ).fetchone()
+            if corrected is None:
+                raise MemoryStoreConflictError("corrected memory is no longer available")
+            return self._store._decode_item(
+                str(receipt["corrected_kind"]), str(corrected["payload_json"])
+            )
+        row = self.__db.execute(
+            "SELECT owner_subject_id, revision, status, deletion_fenced, payload_json, "
+            "source_digest FROM memory_items WHERE item_kind = ? AND item_id = ?",
+            (command.target_kind.value, command.target_id),
+        ).fetchone()
+        if row is None:
+            raise MemoryStoreConflictError("correction target is unavailable")
+        if str(row["owner_subject_id"]) != context.actor_subject_id:
+            raise MemoryStoreAuthorizationError("correction target owner mismatch")
+        if int(row["revision"]) != command.expected_revision:
+            raise MemoryStoreConflictError("correction target revision is stale")
+        if str(row["status"]) != MemoryItemStatus.ACTIVE.value or int(row["deletion_fenced"]):
+            raise MemoryStoreConflictError("correction target is not active")
+        original = self._store._decode_item(
+            command.target_kind.value, str(row["payload_json"])
+        )
+        corrected_id = "corrected-" + hashlib.sha256(
+            f"{correction_id}\0{command.target_kind.value}\0{command.target_id}".encode("utf-8")
+        ).hexdigest()[:40]
+        source_digest = hashlib.sha256(
+            _json(
+                {
+                    "original_source_digest": str(row["source_digest"]),
+                    "corrected_text": command.corrected_text,
+                    "source_evidence_ids": list(command.source_evidence_ids),
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        if isinstance(original, ExperienceEpisode):
+            superseded = ExperienceEpisode.from_dict(
+                {
+                    **original.to_dict(),
+                    "revision": original.revision + 1,
+                    "status": MemoryItemStatus.SUPERSEDED.value,
+                    "updated_at_utc": command.issued_at_utc,
+                }
+            )
+            corrected = ExperienceEpisode.from_dict(
+                {
+                    **original.to_dict(),
+                    "episode_id": corrected_id,
+                    "revision": 1,
+                    "what_happened": command.corrected_text,
+                    "javis_attention": "The user explicitly corrected this governed memory.",
+                    "intent_summary": command.corrected_text,
+                    "action_summary": "Javis recorded the explicit correction.",
+                    "verified_result_summary": "The correction command passed governance checks.",
+                    "meaning_for_user": "",
+                    "meaning_for_javis": "",
+                    "source_terminal_event_id": correction_id,
+                    "source_sequence_domain": f"memory_correction:{original.episode_id}",
+                    "source_event_ids": sorted(
+                        set(original.source_event_ids) | set(command.source_evidence_ids)
+                    ),
+                    "source_digest": source_digest,
+                    "extractor_version": "deterministic.correction.v1",
+                    "confidence": 1.0,
+                    "status": MemoryItemStatus.ACTIVE.value,
+                    "created_at_utc": command.issued_at_utc,
+                    "updated_at_utc": command.issued_at_utc,
+                }
+            )
+        else:
+            assert isinstance(original, JournalEntry)
+            superseded = JournalEntry.from_dict(
+                {
+                    **original.to_dict(),
+                    "revision": original.revision + 1,
+                    "status": MemoryItemStatus.SUPERSEDED.value,
+                    "updated_at_utc": command.issued_at_utc,
+                }
+            )
+            corrected = JournalEntry.from_dict(
+                {
+                    **original.to_dict(),
+                    "entry_id": corrected_id,
+                    "revision": 1,
+                    "title": "Corrected memory",
+                    "body": command.corrected_text,
+                    "source_digest": source_digest,
+                    "status": MemoryItemStatus.ACTIVE.value,
+                    "created_at_utc": command.issued_at_utc,
+                    "updated_at_utc": command.issued_at_utc,
+                }
+            )
+        self.put_item(superseded)
+        self.put_item(corrected)
+        corrected_kind, actual_corrected_id = self._kind_and_id(corrected)
+        edge = DerivationEdge(
+            schema_version=1,
+            edge_id="edge-" + hashlib.sha256(
+                f"{command.target_kind.value}\0{command.target_id}\0{actual_corrected_id}\0corrects".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:40],
+            source_kind=command.target_kind,
+            source_id=command.target_id,
+            target_kind=MemoryItemKind(corrected_kind),
+            target_id=actual_corrected_id,
+            relation=DerivationRelation.CORRECTS,
+            extractor="deterministic.correction.v1",
+            extractor_version="1",
+            source_digest=str(row["source_digest"]),
+            created_at_utc=command.issued_at_utc,
+            active=True,
+        )
+        self.put_derivation_edge(edge)
+        self.__db.execute(
+            "INSERT INTO correction_receipts (correction_id, actor_subject_id, target_kind, "
+            "target_id, expected_revision, corrected_kind, corrected_id, created_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                correction_id,
+                context.actor_subject_id,
+                command.target_kind.value,
+                command.target_id,
+                command.expected_revision,
+                corrected_kind,
+                actual_corrected_id,
+                command.issued_at_utc,
+            ),
+        )
+        return corrected
+
+    def _require_memory_manager(
+        self, context: AccessContext, issued_at_utc: str
+    ) -> AccessContext:
+        if (
+            not isinstance(context, AccessContext)
+            or context.purpose is not AccessPurpose.MANAGE
+            or "memory.manage" not in context.capability_scopes
+            or context.actor_kind not in {ActorKind.PRIMARY_USER, ActorKind.KNOWN_PERSON}
+            or context.identity_assurance
+            not in {IdentityAssurance.DESKTOP_CONFIRMED, IdentityAssurance.VERIFIED}
+            or context.actor_subject_id not in context.participant_subject_ids
+            or not (context.issued_at_utc <= issued_at_utc < context.expires_at_utc)
+        ):
+            raise MemoryStoreAuthorizationError("memory management access denied")
+        row = self.__db.execute(
+            "SELECT p.status, p.identity_assurance, p.server_binding_source, s.status AS subject_status "
+            "FROM session_participants AS p JOIN subjects AS s ON s.subject_id = p.subject_id "
+            "WHERE p.session_id = ? AND p.subject_id = ? AND p.participant_role = 'primary'",
+            (context.session_id, context.actor_subject_id),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["status"]) != ParticipantStatus.ACTIVE.value
+            or str(row["subject_status"]) != SubjectStatus.ACTIVE.value
+            or str(row["server_binding_source"]) != "packaged_desktop"
+            or str(row["identity_assurance"])
+            not in {
+                IdentityAssurance.DESKTOP_CONFIRMED.value,
+                IdentityAssurance.VERIFIED.value,
+            }
+        ):
+            raise MemoryStoreAuthorizationError("memory management identity binding invalid")
+        return context
+
     @staticmethod
     def _shared_decision_id(actor_subject_id: str, idempotency_key: str) -> str:
         return "shared-decision-" + hashlib.sha256(
@@ -1767,6 +2151,562 @@ class _MemoryWriter:
             ),
         )
         return True
+
+    def prepare_deletion(self, command: ForgetMemory) -> dict[str, Any]:
+        if not isinstance(command, ForgetMemory):
+            raise TypeError("command must be ForgetMemory")
+        context = self._require_delete_actor(command)
+        existing = self.__db.execute(
+            "SELECT actor_subject_id, actor_subject_hash, scope, target_selector_json, "
+            "source_handling, state "
+            "FROM deletion_requests WHERE deletion_request_id = ?",
+            (command.deletion_request_id,),
+        ).fetchone()
+        selector_json = _json(command.target_selector.to_dict())
+        if existing is not None:
+            actor_hash = hashlib.sha256(context.actor_subject_id.encode("utf-8")).hexdigest()
+            selector_matches = str(existing["target_selector_json"]) == selector_json
+            if str(existing["state"]) == DeletionState.VERIFIED.value:
+                audit = self.__db.execute(
+                    "SELECT selector_hash FROM deletion_audits WHERE deletion_request_id = ?",
+                    (command.deletion_request_id,),
+                ).fetchone()
+                selector_matches = (
+                    audit is not None
+                    and str(audit["selector_hash"])
+                    == hashlib.sha256(selector_json.encode("utf-8")).hexdigest()
+                )
+            if (
+                str(existing["actor_subject_hash"]) != actor_hash
+                or str(existing["scope"]) != command.scope.value
+                or not selector_matches
+                or str(existing["source_handling"]) != command.source_handling.value
+            ):
+                raise MemoryStoreConflictError("deletion idempotency conflict")
+            return self._deletion_status(command.deletion_request_id)
+        request = DeletionRequest(
+            schema_version=1,
+            deletion_request_id=command.deletion_request_id,
+            revision=1,
+            actor_subject_id=context.actor_subject_id,
+            scope=command.scope,
+            target_selector=command.target_selector,
+            source_handling=command.source_handling,
+            state=DeletionState.ACCEPTED,
+            progress_cursor=None,
+            attempt=0,
+            last_reason_code=command.reason_code,
+            created_at_utc=command.issued_at_utc,
+            updated_at_utc=command.issued_at_utc,
+            completed_at_utc=None,
+        )
+        self.put_deletion_request(request)
+        return self.fence_deletion(command.deletion_request_id)
+
+    def fence_deletion(self, deletion_request_id: str) -> dict[str, Any]:
+        row = self._deletion_row(deletion_request_id)
+        state = DeletionState(str(row["state"]))
+        if state is not DeletionState.ACCEPTED:
+            return self._deletion_status(deletion_request_id)
+        request = DeletionRequest.from_dict(json.loads(row["payload_json"]))
+        initial = self._select_deletion_items(request)
+        if not initial:
+            raise MemoryStoreConflictError("deletion target is unavailable")
+        primary = set(initial)
+        if request.source_handling is SourceHandling.SOURCE_AND_DERIVED:
+            primary.update(self._reverse_derivation_closure(primary))
+        closure = self._forward_derivation_closure(primary)
+        all_targets = primary | closure
+        if len(all_targets) > 10000:
+            raise MemoryStoreConflictError("deletion closure is too large")
+        actor = request.actor_subject_id
+        placeholders = ",".join("?" for _ in all_targets)
+        owners = self.__db.execute(
+            f"SELECT item_kind, item_id, owner_subject_id FROM memory_items "
+            f"WHERE item_id IN ({placeholders})",
+            tuple(item_id for _, item_id in sorted(all_targets)),
+        ).fetchall()
+        if len(owners) != len(all_targets) or any(
+            str(item["owner_subject_id"]) != actor for item in owners
+        ):
+            raise MemoryStoreAuthorizationError("deletion closure owner mismatch")
+        source_store_row = self.__db.execute(
+            "SELECT source_store_id FROM memory_meta WHERE singleton = 1"
+        ).fetchone()
+        source_store_id = (
+            None
+            if source_store_row is None or source_store_row["source_store_id"] is None
+            else str(source_store_row["source_store_id"])
+        )
+        now = _utc_now()
+        for kind, item_id in sorted(all_targets):
+            target_state = "fenced_primary" if (kind, item_id) in primary else "fenced_derived"
+            session_id = request_id = None
+            if kind == MemoryItemKind.EXPERIENCE_EPISODE.value:
+                episode = self.__db.execute(
+                    "SELECT session_id, request_id FROM experience_episodes WHERE episode_id = ?",
+                    (item_id,),
+                ).fetchone()
+                if episode is not None:
+                    session_id = str(episode["session_id"])
+                    request_id = str(episode["request_id"])
+            target_id = "deletion-target-" + hashlib.sha256(
+                f"{deletion_request_id}\0{kind}\0{item_id}".encode("utf-8")
+            ).hexdigest()
+            self.__db.execute(
+                "INSERT OR IGNORE INTO deletion_targets (deletion_target_id, "
+                "deletion_request_id, item_kind, item_id, source_store_id, session_id, "
+                "request_id, target_state, created_at_utc, updated_at_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    target_id,
+                    deletion_request_id,
+                    kind,
+                    item_id,
+                    source_store_id if session_id is not None else None,
+                    session_id,
+                    request_id,
+                    target_state,
+                    now,
+                    now,
+                ),
+            )
+            self.__db.execute("DELETE FROM memory_fts WHERE item_id = ?", (item_id,))
+            self.__db.execute(
+                "UPDATE memory_items SET deletion_fenced = 1, status = ? WHERE item_id = ?",
+                (MemoryItemStatus.DELETION_FENCED.value, item_id),
+            )
+            if source_store_id and session_id and request_id:
+                suppression_id = "suppression-" + hashlib.sha256(
+                    f"{source_store_id}\0{session_id}\0{request_id}".encode("utf-8")
+                ).hexdigest()
+                self.__db.execute(
+                    "INSERT INTO projection_suppressions (suppression_id, source_store_id, "
+                    "session_id, request_id, deletion_request_id, reason_code, created_at_utc) "
+                    "VALUES (?, ?, ?, ?, ?, 'deletion_suppressed', ?) "
+                    "ON CONFLICT(source_store_id, session_id, request_id) DO UPDATE SET "
+                    "deletion_request_id=excluded.deletion_request_id, "
+                    "reason_code=excluded.reason_code",
+                    (
+                        suppression_id,
+                        source_store_id,
+                        session_id,
+                        request_id,
+                        deletion_request_id,
+                        now,
+                    ),
+                )
+                self.__db.execute(
+                    "UPDATE terminal_projection_receipts SET projection_state = 'excluded', "
+                    "reason_code = 'deletion_suppressed', episode_id = NULL, "
+                    "next_retry_at_utc = NULL, updated_at_utc = ? "
+                    "WHERE source_store_id = ? AND session_id = ? AND request_id = ?",
+                    (now, source_store_id, session_id, request_id),
+                )
+        self._bump_meta(acl=True, index=True)
+        return self._transition_deletion(
+            deletion_request_id,
+            DeletionState.ACCEPTED,
+            DeletionState.FENCED,
+        )
+
+    def advance_deletion_state(
+        self,
+        deletion_request_id: str,
+        expected: DeletionState,
+        target: DeletionState,
+    ) -> dict[str, Any]:
+        allowed = {
+            DeletionState.FENCED: DeletionState.SOURCE_PENDING,
+            DeletionState.SOURCE_PENDING: DeletionState.SOURCE_RETAINED,
+            DeletionState.FTS_DELETED: DeletionState.CACHES_INVALIDATED,
+            DeletionState.CACHES_INVALIDATED: DeletionState.PROMPT_INVALIDATED,
+        }
+        if allowed.get(expected) is not target:
+            raise MemoryStoreConflictError("invalid deletion state transition")
+        return self._transition_deletion(deletion_request_id, expected, target)
+
+    def delete_deletion_primary_rows(self, deletion_request_id: str) -> dict[str, Any]:
+        self._require_deletion_state(deletion_request_id, DeletionState.SOURCE_RETAINED)
+        self._delete_target_group(deletion_request_id, "fenced_primary")
+        return self._transition_deletion(
+            deletion_request_id,
+            DeletionState.SOURCE_RETAINED,
+            DeletionState.PRIMARY_ROWS_DELETED,
+        )
+
+    def delete_deletion_derivations(self, deletion_request_id: str) -> dict[str, Any]:
+        self._require_deletion_state(deletion_request_id, DeletionState.PRIMARY_ROWS_DELETED)
+        self._delete_target_group(deletion_request_id, "fenced_derived")
+        return self._transition_deletion(
+            deletion_request_id,
+            DeletionState.PRIMARY_ROWS_DELETED,
+            DeletionState.DERIVATIONS_DELETED,
+        )
+
+    def delete_deletion_fts(self, deletion_request_id: str) -> dict[str, Any]:
+        self._require_deletion_state(deletion_request_id, DeletionState.DERIVATIONS_DELETED)
+        self.__db.execute(
+            "DELETE FROM memory_fts WHERE item_id NOT IN (SELECT item_id FROM memory_items)"
+        )
+        return self._transition_deletion(
+            deletion_request_id,
+            DeletionState.DERIVATIONS_DELETED,
+            DeletionState.FTS_DELETED,
+        )
+
+    def verify_deletion(self, deletion_request_id: str) -> dict[str, Any]:
+        row = self._require_deletion_state(
+            deletion_request_id, DeletionState.PROMPT_INVALIDATED
+        )
+        remaining = int(
+            self.__db.execute(
+                "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ? "
+                "AND item_id IS NOT NULL",
+                (deletion_request_id,),
+            ).fetchone()[0]
+        )
+        if remaining:
+            raise MemoryStoreConflictError("deletion targets remain live")
+        self._rebuild_live_fts(f"deletion:{deletion_request_id}")
+        orphaned = int(
+            self.__db.execute(
+                "SELECT COUNT(*) FROM memory_fts AS f LEFT JOIN memory_items AS i "
+                "ON i.item_id = f.item_id WHERE i.item_id IS NULL "
+                "OR i.status != 'active' OR i.deletion_fenced != 0"
+            ).fetchone()[0]
+        )
+        if orphaned:
+            raise MemoryStoreConflictError("deletion verification found stale index rows")
+        target_count = int(
+            self.__db.execute(
+                "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ?",
+                (deletion_request_id,),
+            ).fetchone()[0]
+        )
+        source_count = int(
+            self.__db.execute(
+                "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ? "
+                "AND session_id IS NOT NULL AND request_id IS NOT NULL",
+                (deletion_request_id,),
+            ).fetchone()[0]
+        )
+        completed = _utc_now()
+        self.__db.execute(
+            "INSERT OR REPLACE INTO deletion_audits (deletion_request_id, actor_subject_hash, "
+            "scope, source_handling, selector_hash, target_count, source_count, reason_code, "
+            "completed_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, 'verified_absent', ?)",
+            (
+                deletion_request_id,
+                str(row["actor_subject_hash"]),
+                str(row["scope"]),
+                str(row["source_handling"]),
+                hashlib.sha256(str(row["target_selector_json"]).encode("utf-8")).hexdigest(),
+                target_count,
+                source_count,
+                completed,
+            ),
+        )
+        self.__db.execute(
+            "UPDATE deletion_requests SET revision = revision + 1, actor_subject_id = NULL, "
+            "target_selector_json = '{}', state = ?, progress_cursor = NULL, "
+            "last_reason_code = 'verified_absent', updated_at_utc = ?, completed_at_utc = ?, "
+            "payload_json = ? WHERE deletion_request_id = ?",
+            (
+                DeletionState.VERIFIED.value,
+                completed,
+                completed,
+                _json(
+                    {
+                        "schema_version": 1,
+                        "deletion_request_id": deletion_request_id,
+                        "state": DeletionState.VERIFIED.value,
+                        "target_count": target_count,
+                        "source_count": source_count,
+                        "reason_code": "verified_absent",
+                    }
+                ),
+                deletion_request_id,
+            ),
+        )
+        self.__db.execute(
+            "DELETE FROM deletion_targets WHERE deletion_request_id = ?",
+            (deletion_request_id,),
+        )
+        return self._deletion_status(deletion_request_id)
+
+    def record_deletion_failure(
+        self, deletion_request_id: str, reason_code: str
+    ) -> dict[str, Any]:
+        _require_text(reason_code, "reason_code")
+        self._deletion_row(deletion_request_id)
+        self.__db.execute(
+            "UPDATE deletion_requests SET revision = revision + 1, attempt = attempt + 1, "
+            "last_reason_code = ?, updated_at_utc = ? WHERE deletion_request_id = ?",
+            (reason_code[:96], _utc_now(), deletion_request_id),
+        )
+        return self._deletion_status(deletion_request_id)
+
+    def _require_delete_actor(self, command: ForgetMemory) -> AccessContext:
+        context = command.access_context
+        if (
+            context.purpose is not AccessPurpose.DELETE
+            or "memory.delete" not in context.capability_scopes
+            or context.actor_kind not in {ActorKind.PRIMARY_USER, ActorKind.KNOWN_PERSON}
+            or context.identity_assurance
+            not in {IdentityAssurance.DESKTOP_CONFIRMED, IdentityAssurance.VERIFIED}
+            or context.actor_subject_id not in context.participant_subject_ids
+            or not (context.issued_at_utc <= command.issued_at_utc < context.expires_at_utc)
+        ):
+            raise MemoryStoreAuthorizationError("memory deletion access denied")
+        if (
+            command.scope is DeletionScope.SUBJECT_OWNED
+            and command.target_selector.subject_id != context.actor_subject_id
+        ):
+            raise MemoryStoreAuthorizationError("subject-owned deletion actor mismatch")
+        row = self.__db.execute(
+            "SELECT s.status AS subject_status, p.status AS participant_status, "
+            "p.identity_assurance, p.server_binding_source "
+            "FROM subjects AS s JOIN session_participants AS p ON p.subject_id = s.subject_id "
+            "WHERE s.subject_id = ? AND p.session_id = ? AND p.participant_role = 'primary'",
+            (context.actor_subject_id, context.session_id),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["subject_status"]) != SubjectStatus.ACTIVE.value
+            or str(row["participant_status"]) != ParticipantStatus.ACTIVE.value
+            or str(row["server_binding_source"]) != "packaged_desktop"
+            or str(row["identity_assurance"])
+            not in {
+                IdentityAssurance.DESKTOP_CONFIRMED.value,
+                IdentityAssurance.VERIFIED.value,
+            }
+        ):
+            raise MemoryStoreAuthorizationError("memory deletion identity binding invalid")
+        return context
+
+    def _select_deletion_items(
+        self, request: DeletionRequest
+    ) -> set[tuple[str, str]]:
+        selector = request.target_selector
+        actor = request.actor_subject_id
+        if request.scope is DeletionScope.ITEM:
+            rows = self.__db.execute(
+                "SELECT item_kind, item_id FROM memory_items WHERE item_kind = ? "
+                "AND item_id = ? AND owner_subject_id = ?",
+                (selector.item_kind.value, selector.item_id, actor),
+            ).fetchall()
+        elif request.scope is DeletionScope.EPISODE:
+            rows = self.__db.execute(
+                "SELECT item_kind, item_id FROM memory_items WHERE item_kind = ? "
+                "AND item_id = ? AND owner_subject_id = ?",
+                (MemoryItemKind.EXPERIENCE_EPISODE.value, selector.item_id, actor),
+            ).fetchall()
+        elif request.scope is DeletionScope.SHARED_MEMORY:
+            rows = self.__db.execute(
+                "SELECT item_kind, item_id FROM memory_items WHERE item_kind = ? "
+                "AND item_id = ? AND owner_subject_id = ?",
+                (MemoryItemKind.SHARED_MEMORY.value, selector.item_id, actor),
+            ).fetchall()
+        elif request.scope is DeletionScope.SUBJECT_OWNED:
+            rows = self.__db.execute(
+                "SELECT item_kind, item_id FROM memory_items WHERE owner_subject_id = ?",
+                (actor,),
+            ).fetchall()
+        elif request.scope is DeletionScope.SESSION_DERIVED:
+            rows = self.__db.execute(
+                "SELECT i.item_kind, i.item_id FROM memory_items AS i "
+                "JOIN experience_episodes AS e ON e.episode_id = i.item_id "
+                "WHERE i.owner_subject_id = ? AND e.session_id = ?",
+                (actor, selector.session_id),
+            ).fetchall()
+        elif request.scope is DeletionScope.TIME_RANGE:
+            rows = self.__db.execute(
+                "SELECT item_kind, item_id FROM memory_items WHERE owner_subject_id = ? "
+                "AND occurred_at_utc >= ? AND occurred_at_utc <= ?",
+                (actor, selector.range_started_at_utc, selector.range_ended_at_utc),
+            ).fetchall()
+        else:
+            rows = self.__db.execute(
+                "SELECT item_kind, item_id FROM memory_items WHERE owner_subject_id = ?",
+                (actor,),
+            ).fetchall()
+        return {(str(row["item_kind"]), str(row["item_id"])) for row in rows}
+
+    def _reverse_derivation_closure(
+        self, targets: set[tuple[str, str]]
+    ) -> set[tuple[str, str]]:
+        found: set[tuple[str, str]] = set()
+        frontier = set(targets)
+        while frontier:
+            next_frontier: set[tuple[str, str]] = set()
+            for kind, item_id in frontier:
+                rows = self.__db.execute(
+                    "SELECT source_kind, source_id FROM derivation_edges "
+                    "WHERE target_kind = ? AND target_id = ? AND active = 1",
+                    (kind, item_id),
+                ).fetchall()
+                for row in rows:
+                    value = (str(row["source_kind"]), str(row["source_id"]))
+                    if value not in targets and value not in found:
+                        found.add(value)
+                        next_frontier.add(value)
+            frontier = next_frontier
+            if len(found) > 10000:
+                raise MemoryStoreConflictError("deletion source closure is too large")
+        return found
+
+    def _forward_derivation_closure(
+        self, sources: set[tuple[str, str]]
+    ) -> set[tuple[str, str]]:
+        found: set[tuple[str, str]] = set()
+        frontier = set(sources)
+        while frontier:
+            next_frontier: set[tuple[str, str]] = set()
+            for kind, item_id in frontier:
+                rows = self.__db.execute(
+                    "SELECT target_kind, target_id FROM derivation_edges "
+                    "WHERE source_kind = ? AND source_id = ? AND active = 1",
+                    (kind, item_id),
+                ).fetchall()
+                for row in rows:
+                    value = (str(row["target_kind"]), str(row["target_id"]))
+                    if value not in sources and value not in found:
+                        found.add(value)
+                        next_frontier.add(value)
+            frontier = next_frontier
+            if len(found) > 10000:
+                raise MemoryStoreConflictError("deletion derivation closure is too large")
+        return found
+
+    def _delete_target_group(self, deletion_request_id: str, target_state: str) -> None:
+        rows = self.__db.execute(
+            "SELECT item_id FROM deletion_targets WHERE deletion_request_id = ? "
+            "AND target_state = ? AND item_id IS NOT NULL",
+            (deletion_request_id, target_state),
+        ).fetchall()
+        for row in rows:
+            item_id = str(row["item_id"])
+            self.__db.execute("DELETE FROM memory_fts WHERE item_id = ?", (item_id,))
+            self.__db.execute("DELETE FROM memory_items WHERE item_id = ?", (item_id,))
+        self._bump_meta(acl=True, index=True)
+
+    def _rebuild_live_fts(self, reason_code: str) -> None:
+        meta = self.__db.execute(
+            "SELECT index_generation FROM memory_meta WHERE singleton = 1"
+        ).fetchone()
+        from_generation = int(meta["index_generation"])
+        target_generation = from_generation + 1
+        rebuild_id = "fts-rebuild-" + hashlib.sha256(
+            f"{target_generation}\0{reason_code}".encode("utf-8")
+        ).hexdigest()
+        now = _utc_now()
+        rows = self.__db.execute(
+            "SELECT item_kind, payload_json FROM memory_items "
+            "WHERE status = 'active' AND deletion_fenced = 0 ORDER BY item_id"
+        ).fetchall()
+        self.__db.execute(
+            "INSERT INTO memory_fts_rebuilds (rebuild_id, from_generation, "
+            "target_generation, state, reason_code, expected_item_count, indexed_item_count, "
+            "started_at_utc, updated_at_utc, completed_at_utc) "
+            "VALUES (?, ?, ?, 'building', ?, ?, 0, ?, ?, NULL)",
+            (rebuild_id, from_generation, target_generation, reason_code, len(rows), now, now),
+        )
+        self.__db.execute("DELETE FROM memory_fts")
+        indexed = 0
+        for row in rows:
+            item = self._store._decode_item(str(row["item_kind"]), str(row["payload_json"]))
+            item_id = self._kind_and_id(item)[1]
+            self.__db.execute(
+                "INSERT INTO memory_fts (item_id, item_kind, searchable_text) VALUES (?, ?, ?)",
+                (item_id, str(row["item_kind"]), self._searchable_text(item)),
+            )
+            indexed += 1
+        completed = _utc_now()
+        self.__db.execute(
+            "UPDATE memory_fts_rebuilds SET state = 'completed', indexed_item_count = ?, "
+            "updated_at_utc = ?, completed_at_utc = ? WHERE rebuild_id = ?",
+            (indexed, completed, completed, rebuild_id),
+        )
+        self.__db.execute(
+            "UPDATE memory_meta SET index_generation = ?, acl_epoch = acl_epoch + 1, "
+            "updated_at_utc = ? WHERE singleton = 1",
+            (target_generation, completed),
+        )
+
+    def _transition_deletion(
+        self,
+        deletion_request_id: str,
+        expected: DeletionState,
+        target: DeletionState,
+    ) -> dict[str, Any]:
+        row = self._require_deletion_state(deletion_request_id, expected)
+        now = _utc_now()
+        cursor = f"stage:{target.value}"
+        self.__db.execute(
+            "UPDATE deletion_requests SET revision = revision + 1, state = ?, "
+            "progress_cursor = ?, last_reason_code = NULL, updated_at_utc = ? "
+            "WHERE deletion_request_id = ?",
+            (target.value, cursor, now, deletion_request_id),
+        )
+        return self._deletion_status(deletion_request_id)
+
+    def _require_deletion_state(
+        self, deletion_request_id: str, expected: DeletionState
+    ) -> sqlite3.Row:
+        row = self._deletion_row(deletion_request_id)
+        if str(row["state"]) != expected.value:
+            raise MemoryStoreConflictError("deletion state is stale")
+        return row
+
+    def _deletion_row(self, deletion_request_id: str) -> sqlite3.Row:
+        _require_text(deletion_request_id, "deletion_request_id")
+        row = self.__db.execute(
+            "SELECT * FROM deletion_requests WHERE deletion_request_id = ?",
+            (deletion_request_id,),
+        ).fetchone()
+        if row is None:
+            raise MemoryStoreConflictError("deletion request not found")
+        return row
+
+    def _deletion_status(self, deletion_request_id: str) -> dict[str, Any]:
+        row = self._deletion_row(deletion_request_id)
+        audit = self.__db.execute(
+            "SELECT target_count, source_count, reason_code FROM deletion_audits "
+            "WHERE deletion_request_id = ?",
+            (deletion_request_id,),
+        ).fetchone()
+        target_count = int(
+            self.__db.execute(
+                "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ?",
+                (deletion_request_id,),
+            ).fetchone()[0]
+        )
+        source_count = int(
+            self.__db.execute(
+                "SELECT COUNT(*) FROM deletion_targets WHERE deletion_request_id = ? "
+                "AND session_id IS NOT NULL AND request_id IS NOT NULL",
+                (deletion_request_id,),
+            ).fetchone()[0]
+        )
+        result = {
+            "deletion_request_id": str(row["deletion_request_id"]),
+            "scope": str(row["scope"]),
+            "source_handling": str(row["source_handling"]),
+            "state": str(row["state"]),
+            "attempt": int(row["attempt"]),
+            "last_reason_code": row["last_reason_code"],
+            "created_at_utc": str(row["created_at_utc"]),
+            "updated_at_utc": str(row["updated_at_utc"]),
+            "completed_at_utc": row["completed_at_utc"],
+        }
+        if audit is not None:
+            target_count = int(audit["target_count"])
+            source_count = int(audit["source_count"])
+            result["completion_reason_code"] = str(audit["reason_code"])
+        result["target_count"] = target_count
+        result["source_count"] = source_count
+        return result
 
     def record_terminal_receipt(
         self,

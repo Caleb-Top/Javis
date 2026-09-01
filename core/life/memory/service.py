@@ -15,9 +15,11 @@ from typing import Any, Callable, Mapping, Protocol, TypeVar
 
 from .contracts import (
     ConfirmSharedMemory,
+    CorrectMemory,
     DeletionRequest,
     DerivationEdge,
     ExperienceEpisode,
+    ForgetMemory,
     JournalEntry,
     MemoryItemKind,
     ProposeSharedMemory,
@@ -31,6 +33,7 @@ from .contracts import (
     Subject,
     UserModelClaim,
 )
+from .deletion import DeletionWorker
 from .extraction import EpisodeExtractor, JournalProjection
 from .projection import TerminalProjector
 from .recall import RecallEngine, empty_recall_bundle
@@ -80,6 +83,10 @@ class _ConversationEvidenceStore(Protocol):
 
     def read_request_evidence(self, session_id: str, request_id: str) -> dict[str, Any]: ...
 
+    def redact_request_evidence(
+        self, session_id: str, request_id: str, deletion_id: str
+    ) -> Mapping[str, Any]: ...
+
 
 @dataclass(order=True, slots=True)
 class _QueuedCommand:
@@ -113,6 +120,7 @@ class MemoryService:
         terminal_projector: TerminalProjector | None = None,
         episode_extractor: EpisodeExtractor | None = None,
         recall_cache_capacity: int = 128,
+        deletion_stage_hook: Callable[[str, str], None] | None = None,
     ) -> None:
         if type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError("queue_capacity must be a positive integer")
@@ -149,6 +157,8 @@ class MemoryService:
         self._terminal_projector = terminal_projector or TerminalProjector()
         self._episode_extractor = episode_extractor or EpisodeExtractor()
         self._recall_engine = RecallEngine(cache_capacity=recall_cache_capacity)
+        self._deletion_stage_hook = deletion_stage_hook
+        self._prompt_invalidators: list[Callable[[], None]] = []
 
         self._lock = threading.RLock()
         self._writer_token = object()
@@ -172,6 +182,8 @@ class MemoryService:
             "terminal_projected": 0,
             "terminal_not_selected": 0,
             "reconcile_failures": 0,
+            "deletions_resumed": 0,
+            "deletions_verified": 0,
         }
 
     def start(self, *, timeout: float = 5.0) -> "MemoryService":
@@ -281,6 +293,26 @@ class MemoryService:
     def revoke_shared_memory(self, command: RevokeSharedMemory) -> Future[SharedMemory]:
         return self._submit_shared_transition("revoke_shared_memory", command)
 
+    def correct_memory(
+        self, command: CorrectMemory
+    ) -> Future[ExperienceEpisode | JournalEntry]:
+        if not isinstance(command, CorrectMemory):
+            raise TypeError("command must be CorrectMemory")
+
+        def operation(
+            store: MemoryStore, writer_token: object
+        ) -> ExperienceEpisode | JournalEntry:
+            result = store.correct_memory(command, writer_token=writer_token)
+            self._invalidate_memory_contexts()
+            return result
+
+        return self._submit_write(
+            "correct_memory",
+            operation,
+            priority=MemoryCommandPriority.CRITICAL,
+            critical=True,
+        )
+
     def delete_item(self, item_kind: MemoryItemKind | str, item_id: str) -> Future[bool]:
         return self._submit_store_mutation(
             "delete_item",
@@ -318,6 +350,34 @@ class MemoryService:
             )
         )
         return future
+
+    def forget_memory(self, command: ForgetMemory) -> Future[dict[str, Any]]:
+        if not isinstance(command, ForgetMemory):
+            raise TypeError("command must be ForgetMemory")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            result = self._deletion_worker(store, writer_token).execute(command)
+            if result.get("state") == "verified":
+                with self._lock:
+                    self._metrics["deletions_verified"] += 1
+            return result
+
+        return self._submit_write(
+            "forget_memory",
+            operation,
+            priority=MemoryCommandPriority.CRITICAL,
+            critical=True,
+        )
+
+    def deletion_status(self, deletion_request_id: str) -> Future[dict[str, Any] | None]:
+        return self._submit_read("deletion_status", None, deletion_request_id)
+
+    def register_prompt_invalidator(self, invalidator: Callable[[], None]) -> None:
+        if not callable(invalidator):
+            raise TypeError("invalidator must be callable")
+        with self._lock:
+            if invalidator not in self._prompt_invalidators:
+                self._prompt_invalidators.append(invalidator)
 
     def record_terminal_receipt(self, **values: Any) -> Future[dict[str, Any]]:
         frozen = dict(values)
@@ -475,6 +535,27 @@ class MemoryService:
             critical=True,
         )
 
+    def _deletion_worker(
+        self, store: MemoryStore, writer_token: object
+    ) -> DeletionWorker:
+        with self._lock:
+            invalidators = tuple(self._prompt_invalidators)
+        return DeletionWorker(
+            store,
+            writer_token,
+            conversation_store=self._conversation_store,
+            cache_invalidator=self._recall_engine.clear,
+            prompt_invalidators=invalidators,
+            after_stage=self._deletion_stage_hook,
+        )
+
+    def _invalidate_memory_contexts(self) -> None:
+        self._recall_engine.clear()
+        with self._lock:
+            invalidators = tuple(self._prompt_invalidators)
+        for invalidate in invalidators:
+            invalidate()
+
     def _discard_failed_deletion(
         self, deletion_id: str, completed: Future[Any]
     ) -> None:
@@ -573,12 +654,16 @@ class MemoryService:
                     writer_thread_id=threading.get_ident(),
                 )
                 store_status = store.status()
+                resumed = ()
+                if store_status.get("state") == "ready" and not store.read_only:
+                    resumed = self._deletion_worker(store, self._writer_token).resume_pending()
                 with self._lock:
                     self._store = store
                     if store_status.get("state") == "ready" and not store.read_only:
                         self._state = "ready"
                         self._reason_code = None
                         self._accepting = True
+                        self._metrics["deletions_resumed"] += len(resumed)
                     else:
                         self._state = "degraded"
                         self._reason_code = str(
@@ -669,6 +754,18 @@ class MemoryService:
                 if outcome == "completed"
                 else None
             )
+            suppression = store.get_projection_suppression(
+                source_store_id,
+                str(terminal["session_id"]),
+                str(terminal["request_id"]),
+            )
+            if evidence is not None and suppression is not None:
+                evidence = dict(evidence)
+                evidence["redacted"] = True
+                evidence["redaction_receipt"] = {
+                    "suppression_id": suppression["suppression_id"],
+                    "reason_code": suppression["reason_code"],
+                }
             existing = store.get_terminal_receipt(
                 source_store_id,
                 str(terminal["session_id"]),
