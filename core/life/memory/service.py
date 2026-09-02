@@ -22,6 +22,7 @@ from .contracts import (
     ForgetMemory,
     JournalEntry,
     MemoryItemKind,
+    MigrateLegacyBatch,
     ProposeSharedMemory,
     RecallBundle,
     RecallQuery,
@@ -34,6 +35,7 @@ from .contracts import (
     UserModelClaim,
 )
 from .deletion import DeletionWorker
+from .migration import LegacyMemoryCandidate
 from .extraction import EpisodeExtractor, JournalProjection
 from .projection import TerminalProjector
 from .recall import RecallEngine, empty_recall_bundle
@@ -371,6 +373,36 @@ class MemoryService:
 
     def deletion_status(self, deletion_request_id: str) -> Future[dict[str, Any] | None]:
         return self._submit_read("deletion_status", None, deletion_request_id)
+
+    def migrate_legacy_batch(
+        self,
+        command: MigrateLegacyBatch,
+        candidates: tuple[LegacyMemoryCandidate, ...] | list[LegacyMemoryCandidate],
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, MigrateLegacyBatch):
+            raise TypeError("command must be MigrateLegacyBatch")
+        frozen = tuple(candidates)
+        if not frozen or any(not isinstance(item, LegacyMemoryCandidate) for item in frozen):
+            raise TypeError("candidates must contain LegacyMemoryCandidate values")
+        wires = tuple(item.to_dict() for item in frozen)
+        return self._submit_store_mutation(
+            "migrate_legacy_batch",
+            command,
+            wires,
+            priority=MemoryCommandPriority.CRITICAL,
+        )
+
+    def legacy_migration_status(self, migration_id: str) -> Future[dict[str, Any]]:
+        fallback = {
+            "migration_id": migration_id,
+            "batch_count": 0,
+            "copied_count": 0,
+            "candidate_count": 0,
+            "quarantined_count": 0,
+            "active_count": 0,
+            "fts_visible_count": 0,
+        }
+        return self._submit_read("legacy_migration_status", fallback, migration_id)
 
     def register_prompt_invalidator(self, invalidator: Callable[[], None]) -> None:
         if not callable(invalidator):

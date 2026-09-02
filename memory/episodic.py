@@ -17,8 +17,33 @@ from typing import Optional
 
 logger = logging.getLogger("memory.episodic")
 
-EPISODES_DIR = Path(__file__).parent.parent / "brain_data" / "episodes"
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+LEGACY_EPISODES_DIR = _SOURCE_ROOT / "brain_data" / "episodes"
+
+
+def _configured_episodes_dir() -> Path:
+    raw_root = os.environ.get("JAVIS_DATA_ROOT", "").strip()
+    if not raw_root:
+        return LEGACY_EPISODES_DIR
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    return Path(os.path.abspath(root)) / "memory" / "legacy-brain" / "episodes"
+
+
+def _writable_episodes_dir() -> Path:
+    path = _configured_episodes_dir()
+    if path == LEGACY_EPISODES_DIR:
+        raise RuntimeError("JAVIS_DATA_ROOT is required before writing episodes")
+    return path
+
+
+EPISODES_DIR = _configured_episodes_dir()
 MAX_EPISODES = 500
+
+
+class LegacyEpisodeReadOnlyError(RuntimeError):
+    reason_code = "legacy_memory_read_only"
 
 
 # ── 指纹提取 ──
@@ -81,7 +106,13 @@ def extract_fingerprint(user_input: str, tools_involved: list[str] = None) -> di
 class Episode:
     """单次会话的情景记录"""
 
-    def __init__(self, user_input: str = "", session_id: str = ""):
+    def __init__(
+        self,
+        user_input: str = "",
+        session_id: str = "",
+        *,
+        read_only: bool = True,
+    ):
         now = time.time()
         self.id = f"ep_{int(now)}_{hashlib.md5(user_input.encode() if user_input else str(now).encode()).hexdigest()[:6]}"
         self.session_id = session_id
@@ -95,6 +126,7 @@ class Episode:
         self.user_feedback = ""
         self.tool_count = 0
         self.failure_count = 0
+        self._read_only = bool(read_only)
 
     def record_tool_call(self, tool: str, params: dict, result: str, error: str = "", latency_ms: int = 0):
         """记录一次工具调用到时间线"""
@@ -123,6 +155,8 @@ class Episode:
 
     def finish(self, outcome: str = "", feedback: str = ""):
         """结束 episode 并写入磁盘"""
+        if self._read_only:
+            raise LegacyEpisodeReadOnlyError("legacy_memory_read_only")
         self.end_time = time.time()
         self.duration_ms = int((self.end_time - self.start_time) * 1000)
         self.outcome = outcome or ("success" if self.failure_count == 0 else "failure" if self.tool_count == self.failure_count else "partial")
@@ -130,7 +164,10 @@ class Episode:
         self._save()
 
     def _save(self):
-        EPISODES_DIR.mkdir(parents=True, exist_ok=True)
+        if self._read_only:
+            raise LegacyEpisodeReadOnlyError("legacy_memory_read_only")
+        episodes_dir = _writable_episodes_dir()
+        episodes_dir.mkdir(parents=True, exist_ok=True)
         data = {
             "id": self.id, "session_id": self.session_id, "user_input": self.user_input,
             "fingerprint": self.fingerprint, "timeline": self.timeline,
@@ -138,7 +175,7 @@ class Episode:
             "tool_count": self.tool_count, "failure_count": self.failure_count,
             "start_time": self.start_time, "end_time": self.end_time, "user_feedback": self.user_feedback,
         }
-        (EPISODES_DIR / f"{self.id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        (episodes_dir / f"{self.id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info(f"💾 情景已存档: {self.id} ({self.outcome}, {self.tool_count}工具, {self.failure_count}失败)")
 
     def to_dict(self):

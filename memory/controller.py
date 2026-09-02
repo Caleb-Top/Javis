@@ -37,11 +37,16 @@ _cache = {
 _CACHE_TTL = 30  # 秒
 
 
+class LegacyMemoryReadOnlyError(RuntimeError):
+    reason_code = "legacy_memory_read_only"
+
+
 class MemoryController:
     """统一记忆控制器"""
 
-    def __init__(self, brain=None):
+    def __init__(self, brain=None, *, read_only: bool = True):
         self._brain = brain
+        self._read_only = bool(read_only)
         self._cycle_count = 0
         self._running = False
 
@@ -182,6 +187,8 @@ class MemoryController:
 
     def memorize(self, user_msg: str, assistant_msg: str = ""):
         """记一条对话到大脑"""
+        if self._read_only:
+            raise LegacyMemoryReadOnlyError("legacy_memory_read_only")
         if not self._brain or not user_msg:
             return
         try:
@@ -198,6 +205,8 @@ class MemoryController:
 
     def start_cycles(self):
         """启动所有后台循环"""
+        if self._read_only:
+            raise LegacyMemoryReadOnlyError("legacy_memory_read_only")
         if self._running:
             return
         self._running = True
@@ -226,23 +235,31 @@ class MemoryController:
                 logger.debug(f"循环异常: {e}")
 
     def _cycle_semantic(self):
+        if self._read_only:
+            raise LegacyMemoryReadOnlyError("legacy_memory_read_only")
         from memory.semantic import consolidate
         n = consolidate(brain=self._brain)
         if n:
             logger.info(f"语义提取: {n} 新规则")
 
     def _cycle_procedural(self):
+        if self._read_only:
+            raise LegacyMemoryReadOnlyError("legacy_memory_read_only")
         from memory.procedural import consolidate_from_episodes
         n = consolidate_from_episodes()
         if n:
             logger.info(f"程序固化: {n} 新链")
 
     def _cycle_compress(self):
+        if self._read_only:
+            raise LegacyMemoryReadOnlyError("legacy_memory_read_only")
         if self._brain:
             self._brain.compress()
 
     def _cycle_summarize(self):
         """生成/更新长期摘要"""
+        if self._read_only:
+            raise LegacyMemoryReadOnlyError("legacy_memory_read_only")
         if not self._brain:
             return
         try:

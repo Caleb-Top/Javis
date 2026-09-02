@@ -197,48 +197,12 @@ read_ui_window, get_window_state
 2. 能用 run_code 解决的, 就写代码
 3. 执行后自己验证结果
 4. 用中文回复，用上面的风格
-5. 你有跨会话持久记忆。每次对话开始时，系统提示里的「经验规则」和「风格守则」
-   是从你硬盘上的 brain_data/ 加载的——你的用户偏好、对话教训都写在那里。
-   所以不要说自己"记不住"或"关窗就忘"。你记着呢，只是每次需要重新加载到上下文而已。
-6. 如果忘记之前说过什么，用 brain_status 或 memory_status 查自己的记忆库"""
+5. 只有当前请求附带的、带来源引用的受控记忆上下文可以作为长期记忆使用。
+6. 没有受控记忆上下文时不要声称记得跨会话事实，也不要从旧 Brain 或全局索引兜底召回。"""
 
 
 def build_dynamic_prompt(brain=None) -> str:
-    """三层 Prompt 构建: Tier 1(身份+工具) + Tier 2(经验+记忆+风格) + Tier 3(阶段指引)
-
-    三层架构:
-      Tier 1 — 身份 + 工具Schema（固定，~6KB）
-      Tier 2 — 经验 + 风格 + 记忆（动态加载）
-      Tier 3 — 当前阶段指引（运行时注入）
-    """
-    rules = []
-    if brain:
-        seen_exp = set()
-        for exp in brain.get_priority_experiences(min_priority=3):
-            if exp.lesson and len(exp.lesson) > 10 and exp.lesson[:100] not in seen_exp:
-                seen_exp.add(exp.lesson[:100])
-                rules.append(exp.lesson[:120])
-        rules = rules[:5]
-        style_rules = []
-        seen = set()
-        for f in sorted(brain._facts, key=lambda x: -x.priority):
-            if f.category.startswith("user_style") and f.priority >= 4 and f.content[:60] not in seen:
-                seen.add(f.content[:60])
-                style_rules.append(f.content[:100])
-        if style_rules:
-            rules.append("风格: " + "; ".join(style_rules[:5]))
-        tops = sorted([f for f in brain._facts if f.category == "session.topic"],
-                      key=lambda x: x.created_at, reverse=True)[:3]
-        if tops:
-            rules.append("上次: " + "; ".join(t.content[:60] for t in tops))
-        msgs = sorted([f for f in brain._facts if f.category == "conversation.user_msgs"],
-                      key=lambda x: x.created_at, reverse=True)[:3]
-        if msgs:
-            rules.append("你说: " + "; ".join(f.content[:50] for f in msgs))
-    if rules:
-        return (BASE_SYSTEM_PROMPT +
-                "\n\n## 📋 记忆\n" +
-                "\n".join(f"{i+1}. {r}" for i, r in enumerate(rules[:8])))
+    """Return the static compatibility prompt without consulting legacy Brain."""
     return BASE_SYSTEM_PROMPT
 
 
@@ -257,8 +221,7 @@ class Agent:
         self.engine = engine
         self.tool_catalog = tool_catalog
         self.planner = Planner()
-        self.reflector = Reflector(brain=brain)
-        self._current_episode = None
+        self.reflector = Reflector(brain=None)
         # ── 优化: System Prompt 缓存 ──
         self._cached_prompt = ""
         self._cached_prompt_step = -1
@@ -275,7 +238,7 @@ class Agent:
         self.brain = brain
         self.learner = learner
         # ── P0-8: 三层 Prompt 架构 ──
-        self.prompt_builder = PromptBuilder(brain=brain)
+        self.prompt_builder = PromptBuilder(brain=None)
 
         self._confirm_event: asyncio.Event | None = None
         self._confirm_result: bool | None = None
@@ -291,29 +254,7 @@ class Agent:
         # ── P1-3: Hooks 系统集成 ──
         self.hook_manager = get_hook_manager()
 
-        # 启动时扫描已有工作区知识，自动吸收
-        try:
-            from core.workspace_manager import WORKSPACE_ROOT
-            for f in (WORKSPACE_ROOT / "thoughts").glob("*.md"):
-                if self.brain:
-                    content = f.read_text(encoding="utf-8")
-                    lines = content.split(chr(10))
-                    title = f.stem.replace("_", " ").replace("-", " ")[:60]
-                    self.brain.learn_fact(f"知识: {title} ({len(lines)}行)",
-                                          category="self_learned.workspace",
-                                          source="self_reflection", priority=2)
-                    # 提取前5个标题
-                    count = 0
-                    for line in lines:
-                        ls = line.strip()
-                        if ls.startswith("##") and len(ls) > 5 and count < 5:
-                            self.brain.learn_fact(ls.lstrip("#").strip()[:80],
-                                                  category="self_learned.workspace",
-                                                  source="self_reflection", priority=1)
-                            count += 1
-                    logger.info(f"🧠 吸收已有知识: {title}")
-        except Exception:
-            pass
+        # Long-term memory is supplied only through a request-scoped RecallBundle.
 
     def set_confirm_handler(self):
         self._confirm_event = asyncio.Event()
@@ -444,7 +385,7 @@ class Agent:
 
         P0-8: 使用 PromptBuilder 组装三层 Prompt:
           Layer 1 — 基础身份层（静态）: 个性、语气、核心能力
-          Layer 2 — 动态记忆层: 脑数据注入、经验规则、最近话题
+          Layer 2 — 请求级记忆层: 经 ACL 校验的 RecallBundle 与来源引用
           Layer 3 — 阶段指引层: 当前阶段指引 + 护栏摘要 + 安全规则
 
         Args:
@@ -481,8 +422,6 @@ class Agent:
             self.state.messages.append({"role": "user", "content": user_input[:500]})
             self.state.messages.append({"role": "assistant", "content": core_answer})
             _log("core_memory", core_answer[:100])
-            if self.brain:
-                self.brain.learn_fact("会话主题: " + user_input[:80], category="session.topic", source="self", priority=3)
             yield {"type": "text_delta", "text": core_answer}
             yield self._completion_event(True)
             return
@@ -498,8 +437,6 @@ class Agent:
             self.state.messages.append({"role": "user", "content": user_input[:500]})
             self.state.messages.append({"role": "assistant", "content": session_answer})
             _log("session_recall", session_answer[:100])
-            if self.brain:
-                self.brain.learn_fact("会话主题: 当前会话召回", category="session.topic", source="self", priority=3)
             yield {"type": "text_delta", "text": session_answer}
             yield self._completion_event(True)
             return
@@ -566,12 +503,6 @@ class Agent:
             if conversation_cards is not None
             else self._conversation_history(self.state.messages, limit=40)
         )
-        try:
-            from memory.episodic import Episode, extract_fingerprint
-            self._current_episode = Episode(user_input, session_id=str(time.time()))
-        except Exception:
-            self._current_episode = None
-
         context = ""
 
         # 优化: 轻量请求跳过规划
@@ -804,14 +735,6 @@ class Agent:
 
                     act = {"tool": tn, "params": tp, "result": "success" if result.success else "failure", "error": result.error or ""}
                     self._action_history.append(act)
-                    try:
-                        if self._current_episode:
-                            self._current_episode.record_tool_call(tn, tp, "success" if result.success else "failure", result.error or "", latency_ms=0)
-                    except Exception:
-                        pass
-
-                    if not result.success and self.learner:
-                        self.learner.learn_from_error(result.error, {"tool": tn, "params": tp})
 
                     yield {"type": "tool_result", "tool": tn, "success": result.success,
                            "data": (result.data or result.error or "")[:800]}
@@ -860,24 +783,12 @@ class Agent:
                 self.state.messages.append({"role": "assistant", "content": "[工具执行完成]"})
 
             self._after_learn(user_input)
-            if self._current_episode:
-                self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
-                self._current_episode = None
-            if self.brain:
-                topic = user_input[:80]
-                self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
             yield completion
             return
 
         if not any(m.get("role") == "assistant" and m.get("content") for m in self.state.messages[-5:]):
             self.state.messages.append({"role": "assistant", "content": "[任务执行超出步数上限]"})
         self._after_learn(user_input)
-        if self._current_episode:
-            self._current_episode.finish(outcome="success" if not any(a.get("result") == "failure" for a in self._action_history) else "failure")
-            self._current_episode = None
-        if self.brain:
-            topic = user_input[:80]
-            self.brain.learn_fact("会话主题: " + topic, category="session.topic", source="self", priority=3)
         yield self._completion_event(False, "Maximum execution steps reached")
 
     def _parse_plan_from_text(self, text: str):
@@ -907,121 +818,9 @@ class Agent:
             logger.info(f"📋 自动注册计划完成")
 
     def _auto_learn_from_actions(self):
-        """从本轮执行的动作中自动提取知识并学习"""
-        if not self.brain or not self._action_history:
-            return
-        try:
-            for act in self._action_history:
-                tool = act.get("tool", "")
-                params = act.get("params", {})
-                result = act.get("result", "")
-
-                # 1. create_workspace_file → 读取内容并学习
-                if tool == "create_workspace_file" and result == "success":
-                    path = params.get("path", "")
-                    purpose = params.get("purpose", "")
-                    category = params.get("category", "")
-                    content = params.get("content", "")
-                    if content and len(content) > 50:
-                        cat = category if category in ("thought", "project") else "knowledge"
-                        lines = content.split(chr(10))
-                        # 提取带#或数字的标题行作为知识点
-                        key_points = []
-                        for line in lines:
-                            ls = line.strip()
-                            if ls.startswith("#") and len(ls) > 5:
-                                key_points.append(ls.lstrip("#").strip())
-                            elif ls.startswith("- **") and "**" in ls:
-                                key_points.append(ls.replace("- **", "").replace("**", ""))
-                        for kp in key_points[:8]:
-                            self.brain.learn_fact(kp, category=f"self_learned.{cat}",
-                                                  source="self_reflection", priority=2)
-                        # 整体摘要作为事实
-                        summary = content[:200].strip()
-                        self.brain.learn_fact(f"自主知识: {purpose[:60]} - {summary[:100]}",
-                                              category=f"self_learned.{cat}",
-                                              source="self_reflection", priority=2)
-                        logger.info(f"🧠 自主学习: 从'{path}'提取{len(key_points)}个知识点")
-
-                # 2. create_temp_file → 临时内容摘要学习
-                elif tool == "create_temp_file" and result == "success":
-                    content = params.get("content", "")
-                    purpose = params.get("purpose", "")
-                    if content and len(content) > 80:
-                        summary = content[:150].strip()
-                        self.brain.learn_fact(f"临时知识: {purpose[:40]} - {summary[:80]}",
-                                              category="self_learned.temp",
-                                              source="self_reflection", priority=1)
-
-            # 3. 从最后一条assistant回复中提取知识（如果有结构化内容）
-            if not self._action_history:
-                return
-            last_reply = ""
-            for m in reversed(self.state.messages):
-                if m.get("role") == "assistant" and m.get("content"):
-                    text = m["content"]
-                    if isinstance(text, str) and len(text) > 100:
-                        last_reply = text
-                        break
-            if last_reply:
-                # 从回复中提取关键段落（含列表、分类等结构化内容）
-                lines = last_reply.split(chr(10))
-                for line in lines:
-                    ls = line.strip()
-                    # 匹配 "**xxx**" 格式的知识点
-                    if ls.startswith("**") and "**" in ls[2:]:
-                        self.brain.learn_fact(ls.strip("*").strip(),
-                                              category="self_learned.reply",
-                                              source="self_reflection", priority=1)
-                    # 匹配含"⭐"的高价值信息
-                    if "⭐" in ls or "★" in ls:
-                        self.brain.learn_fact(ls[:120],
-                                              category="self_learned.reply",
-                                              source="self_reflection", priority=2)
-        except Exception:
-            pass
+        """Legacy automatic learning is quarantined by the L2 memory boundary."""
+        return
 
     def _after_learn(self, user_input: str):
-        if self.brain:
-            try:
-                from memory.controller import get_controller
-                get_controller(self.brain).memorize(user_input)
-            except Exception:
-                pass
-        # ── P0-8: 记忆写入后失效 PromptBuilder 缓存 ──
-        if hasattr(self, 'prompt_builder') and self.brain:
-            self.prompt_builder.invalidate_cache()
-        if not self.learner or not self.brain:
-            return
-        try:
-            self.state.phase = "verifying"
-            if self._action_history:
-                result = self.reflector.reflect(user_input, self._action_history)
-                for act in self._action_history:
-                    error_text = act.get("error", "")
-                    tool_name = act.get("tool", "")
-                    domain = map_tool_to_domain(tool_name)
-                    err_cat = classify_error(error_text)
-                    priority = result.priority if act.get("result") == "failure" else 1
-                    self.brain.record_experience(
-                        intent=user_input[:50], action=tool_name,
-                        result=act.get("result", "unknown"), error=error_text[:100],
-                        lesson=result.reusable_lesson or f"{tool_name}: {error_text[:60]}",
-                        priority=priority, domain=domain, error_category=err_cat,
-                    )
-                if result.reusable_lesson and result.priority >= 3:
-                    self.brain.learn_fact(f"[经验] {result.reusable_lesson}",
-                        category=f"experience.{result.domain}", source="self_reflection",
-                        priority=result.priority)
-            if self._action_history:
-                reply = ""
-                for m in reversed(self.state.messages):
-                    if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) > 10:
-                        reply = m["content"][:500]
-                        break
-                if reply:
-                    self.learner.learn_from_conversation(user_input, reply, self._action_history)
-                    self.brain.learn_style(user_input, reply)
-            self._auto_learn_from_actions()
-        except Exception:
-            pass
+        """Retained as a no-op compatibility hook; L2 projection owns persistence."""
+        return

@@ -19,25 +19,42 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("memory.indexer")
 
-BRAIN_DIR = Path(__file__).parent.parent / "brain_data"
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+LEGACY_BRAIN_DIR = _SOURCE_ROOT / "brain_data"
+
+
+def _configured_brain_dir() -> Path:
+    raw_root = os.environ.get("JAVIS_DATA_ROOT", "").strip()
+    if not raw_root:
+        return LEGACY_BRAIN_DIR
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    return Path(os.path.abspath(root)) / "memory" / "legacy-brain"
+
+
+BRAIN_DIR = LEGACY_BRAIN_DIR
 DB_PATH = BRAIN_DIR / "memory.db"
 DB_READY = False
+
+
+class LegacyMemoryIndexReadOnlyError(RuntimeError):
+    reason_code = "legacy_memory_read_only"
 
 # ════════════════════════════════════════════
 # SQLite 初始化
 # ════════════════════════════════════════════
 
 def _get_db():
-    """获取数据库连接 (惰性初始化)"""
+    """Open an existing legacy index in SQLite read-only mode."""
     global DB_READY
+    if not DB_PATH.is_file() or DB_PATH.is_symlink():
+        raise LegacyMemoryIndexReadOnlyError("legacy_memory_index_unavailable")
     import sqlite3
-    db = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    db = sqlite3.connect(DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=OFF")
-    if not DB_READY:
-        _create_tables(db)
-        DB_READY = True
+    db.execute("PRAGMA query_only=ON")
+    DB_READY = True
     return db
 
 
@@ -134,6 +151,7 @@ def _create_tables(db):
 
 def rebuild_index():
     """从所有 JSON 文件全量重建 SQLite 索引"""
+    raise LegacyMemoryIndexReadOnlyError("legacy_memory_read_only")
     db = _get_db()
     t0 = time.time()
 
@@ -299,44 +317,19 @@ _last_sync = 0
 
 def ensure_index():
     """确保索引就绪 (惰性重建)"""
-    if not DB_PATH.exists() or DB_PATH.stat().st_size < 1000:
-        rebuild_index()
-        return
+    if not DB_PATH.is_file() or DB_PATH.is_symlink() or DB_PATH.stat().st_size < 1000:
+        raise LegacyMemoryIndexReadOnlyError("legacy_memory_index_unavailable")
 
     # 检查 meta 是否过时
     db = _get_db()
     row = db.execute("SELECT value FROM meta WHERE key='last_rebuild'").fetchone()
     if not row:
-        rebuild_index()
+        raise LegacyMemoryIndexReadOnlyError("legacy_memory_index_unavailable")
 
 
 def incremental_sync():
     """增量同步（检查文件 mtime, 只同步变更的）"""
-    global _last_sync
-    ensure_index()
-    db = _get_db()
-
-    now = time.time()
-    if now - _last_sync < 30:
-        return
-    _last_sync = now
-
-    # Check if any JSON files changed since last rebuild
-    row = db.execute("SELECT value FROM meta WHERE key='last_rebuild'").fetchone()
-    last_rebuild = float(row[0]) if row else 0
-
-    changed_dirs = []
-    for dirname in ["episodes", "facts", "experiences", "semantic", "procedural"]:
-        d = BRAIN_DIR / dirname
-        if d.exists():
-            for fp in d.glob("*.json"):
-                if fp.stat().st_mtime > last_rebuild:
-                    changed_dirs.append(dirname)
-                    break
-
-    if changed_dirs:
-        logger.debug(f"检测到数据变更: {changed_dirs}, 重建索引")
-        rebuild_index()
+    raise LegacyMemoryIndexReadOnlyError("legacy_memory_read_only")
 
 
 # ════════════════════════════════════════════

@@ -36,6 +36,7 @@ from core.life.memory.contracts import (
     JournalEntry,
     MemoryItemKind,
     MemoryItemStatus,
+    MigrateLegacyBatch,
     ParticipantRole,
     ParticipantStatus,
     PrivacyClass,
@@ -59,7 +60,7 @@ from core.life.memory.contracts import (
 
 
 DATABASE_RELATIVE_PATH = Path("memory") / "autobiographical.sqlite3"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _READ_PERMISSIONS = frozenset({"read", "manage", "delete"})
 _PROJECTION_STATES = frozenset({"pending", "excluded", "not_selected", "projected"})
 _TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -107,6 +108,10 @@ _REQUIRED_V2_TABLES = _REQUIRED_V1_TABLES | {
 }
 _REQUIRED_V3_TABLES = _REQUIRED_V2_TABLES | {"shared_decisions"}
 _REQUIRED_V4_TABLES = _REQUIRED_V3_TABLES | {"correction_receipts", "deletion_audits"}
+_REQUIRED_V5_TABLES = _REQUIRED_V4_TABLES | {
+    "legacy_memory_candidates",
+    "legacy_migration_batches",
+}
 
 
 class MemoryStoreError(RuntimeError):
@@ -520,6 +525,39 @@ _MIGRATION_4 = (
     "CREATE INDEX idx_deletion_audits_completed ON deletion_audits(completed_at_utc)",
 )
 
+_MIGRATION_5 = (
+    """
+    CREATE TABLE legacy_memory_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        migration_id TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        source_relative_path_hash TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL,
+        item_kind TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK (disposition IN ('candidate', 'quarantined')),
+        reason_codes_json TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        UNIQUE (migration_id, source_relative_path_hash, source_sha256)
+    )
+    """,
+    """
+    CREATE TABLE legacy_migration_batches (
+        migration_id TEXT NOT NULL,
+        batch_index INTEGER NOT NULL CHECK (batch_index >= 0),
+        manifest_digest TEXT NOT NULL,
+        candidate_set_digest TEXT NOT NULL,
+        candidate_count INTEGER NOT NULL CHECK (candidate_count >= 0),
+        candidate_count_quarantined INTEGER NOT NULL CHECK (candidate_count_quarantined >= 0),
+        candidate_count_reviewable INTEGER NOT NULL CHECK (candidate_count_reviewable >= 0),
+        created_at_utc TEXT NOT NULL,
+        PRIMARY KEY (migration_id, batch_index)
+    )
+    """,
+    "CREATE INDEX idx_legacy_candidate_disposition "
+    "ON legacy_memory_candidates(migration_id, disposition, candidate_id)",
+)
+
 
 class MemoryStore:
     """Versioned, single-writer storage rooted below the runtime data root."""
@@ -730,6 +768,30 @@ class MemoryStore:
             ).fetchall()
         return tuple(dict(row) for row in rows)
 
+    def legacy_migration_status(self, migration_id: str) -> dict[str, Any]:
+        _require_text(migration_id, "migration_id")
+        with self._read_connection() as db:
+            batch = db.execute(
+                "SELECT COUNT(*) AS batch_count, COALESCE(SUM(candidate_count), 0) AS copied "
+                "FROM legacy_migration_batches WHERE migration_id = ?",
+                (migration_id,),
+            ).fetchone()
+            rows = db.execute(
+                "SELECT disposition, COUNT(*) AS count FROM legacy_memory_candidates "
+                "WHERE migration_id = ? GROUP BY disposition",
+                (migration_id,),
+            ).fetchall()
+        counts = {str(row["disposition"]): int(row["count"]) for row in rows}
+        return {
+            "migration_id": migration_id,
+            "batch_count": int(batch["batch_count"]),
+            "copied_count": int(batch["copied"]),
+            "candidate_count": counts.get("candidate", 0),
+            "quarantined_count": counts.get("quarantined", 0),
+            "active_count": 0,
+            "fts_visible_count": 0,
+        }
+
     def get_item(
         self,
         item_kind: MemoryItemKind | str,
@@ -900,6 +962,17 @@ class MemoryStore:
     ) -> ExperienceEpisode | JournalEntry:
         with self._writer_transaction(writer_token) as writer:
             return writer.correct_memory(command)
+
+    def migrate_legacy_batch(
+        self,
+        command: MigrateLegacyBatch,
+        candidates: Iterable[Mapping[str, Any]],
+        *,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        frozen = tuple(dict(candidate) for candidate in candidates)
+        with self._writer_transaction(writer_token) as writer:
+            return writer.migrate_legacy_batch(command, frozen)
 
     def delete_item(
         self,
@@ -1159,6 +1232,10 @@ class MemoryStore:
             if version == 3:
                 self._validate_v3_schema(db)
                 self._apply_migration(db, 4, _MIGRATION_4)
+                version = 4
+            if version == 4:
+                self._validate_v4_schema(db)
+                self._apply_migration(db, 5, _MIGRATION_5)
             self._validate_schema(db)
             mode = str(db.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             if mode != "wal":
@@ -1252,10 +1329,10 @@ class MemoryStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
-        MemoryStore._validate_v3_schema(db, SCHEMA_VERSION)
+        MemoryStore._validate_v4_schema(db, SCHEMA_VERSION)
         rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
         names = {str(row["name"]) for row in rows}
-        if _REQUIRED_V4_TABLES - names:
+        if _REQUIRED_V5_TABLES - names:
             raise sqlite3.DatabaseError("required memory schema objects are missing")
         meta = db.execute(
             "SELECT schema_version FROM memory_meta WHERE singleton = 1"
@@ -1272,6 +1349,14 @@ class MemoryStore:
         names = {str(row["name"]) for row in rows}
         if _REQUIRED_V3_TABLES - names:
             raise sqlite3.DatabaseError("required v3 memory schema objects are missing")
+
+    @staticmethod
+    def _validate_v4_schema(db: sqlite3.Connection, expected_version: int = 4) -> None:
+        MemoryStore._validate_v3_schema(db, expected_version)
+        rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+        names = {str(row["name"]) for row in rows}
+        if _REQUIRED_V4_TABLES - names:
+            raise sqlite3.DatabaseError("required v4 memory schema objects are missing")
 
     def _assert_writer(self, writer_token: object) -> None:
         if writer_token is not self._writer_token:
@@ -1895,6 +1980,203 @@ class _MemoryWriter:
         ):
             raise MemoryStoreAuthorizationError("memory management identity binding invalid")
         return context
+
+    def migrate_legacy_batch(
+        self,
+        command: MigrateLegacyBatch,
+        candidates: tuple[Mapping[str, Any], ...],
+    ) -> dict[str, Any]:
+        if not isinstance(command, MigrateLegacyBatch):
+            raise TypeError("command must be MigrateLegacyBatch")
+        self._require_migration_actor(command.access_context, command.issued_at_utc)
+        expected_fields = {
+            "schema_version",
+            "candidate_id",
+            "migration_id",
+            "manifest_digest",
+            "source_relative_path_hash",
+            "source_sha256",
+            "item_kind",
+            "disposition",
+            "reason_codes",
+            "payload",
+            "created_at_utc",
+        }
+        if not candidates:
+            raise ValueError("legacy migration batch cannot be empty")
+        candidate_ids = tuple(str(value.get("candidate_id") or "") for value in candidates)
+        if len(set(candidate_ids)) != len(candidate_ids) or set(candidate_ids) != set(
+            command.candidate_ids
+        ):
+            raise MemoryStoreConflictError("legacy migration candidate set mismatch")
+        normalized: list[dict[str, Any]] = []
+        for value in candidates:
+            if set(value) != expected_fields:
+                raise ValueError("legacy migration candidate schema mismatch")
+            item = dict(value)
+            if item["schema_version"] != 1:
+                raise ValueError("legacy migration candidate schema unsupported")
+            if (
+                item["migration_id"] != command.migration_id
+                or item["manifest_digest"] != command.manifest_digest
+            ):
+                raise MemoryStoreConflictError("legacy migration manifest binding mismatch")
+            for field_name in (
+                "manifest_digest",
+                "source_relative_path_hash",
+                "source_sha256",
+            ):
+                digest = item[field_name]
+                if (
+                    type(digest) is not str
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ValueError(f"{field_name} must be lowercase SHA-256")
+            if item["disposition"] not in {"candidate", "quarantined"}:
+                raise ValueError("legacy migration disposition invalid")
+            reasons = item["reason_codes"]
+            if (
+                not isinstance(reasons, (list, tuple))
+                or not reasons
+                or len(reasons) > 16
+                or any(type(reason) is not str or not reason or len(reason) > 128 for reason in reasons)
+            ):
+                raise ValueError("legacy migration reason codes invalid")
+            if not isinstance(item["payload"], Mapping):
+                raise ValueError("legacy migration payload must be an object")
+            encoded_payload = _json(dict(item["payload"]))
+            if len(encoded_payload.encode("utf-8")) > 16_384:
+                raise ValueError("legacy migration payload is too large")
+            item["reason_codes"] = sorted(set(reasons))
+            item["payload"] = json.loads(encoded_payload)
+            normalized.append(item)
+        candidate_set_digest = hashlib.sha256(
+            _json(sorted(normalized, key=lambda value: value["candidate_id"])).encode("utf-8")
+        ).hexdigest()
+        existing_batch = self.__db.execute(
+            "SELECT manifest_digest, candidate_set_digest, candidate_count, "
+            "candidate_count_quarantined, candidate_count_reviewable "
+            "FROM legacy_migration_batches WHERE migration_id = ? AND batch_index = ?",
+            (command.migration_id, command.batch_index),
+        ).fetchone()
+        if existing_batch is not None:
+            if (
+                str(existing_batch["manifest_digest"]) != command.manifest_digest
+                or str(existing_batch["candidate_set_digest"]) != candidate_set_digest
+                or int(existing_batch["candidate_count"]) != len(normalized)
+            ):
+                raise MemoryStoreConflictError("legacy migration batch idempotency conflict")
+            return self._legacy_batch_result(
+                command.migration_id,
+                command.batch_index,
+                replayed=True,
+            )
+        for item in normalized:
+            row = self.__db.execute(
+                "SELECT migration_id, manifest_digest, source_relative_path_hash, source_sha256, "
+                "item_kind, disposition, reason_codes_json, payload_json, created_at_utc "
+                "FROM legacy_memory_candidates WHERE candidate_id = ?",
+                (item["candidate_id"],),
+            ).fetchone()
+            values = (
+                item["migration_id"],
+                item["manifest_digest"],
+                item["source_relative_path_hash"],
+                item["source_sha256"],
+                item["item_kind"],
+                item["disposition"],
+                _json(item["reason_codes"]),
+                _json(item["payload"]),
+                item["created_at_utc"],
+            )
+            if row is not None:
+                if tuple(row) != values:
+                    raise MemoryStoreConflictError("legacy candidate identity conflict")
+                continue
+            self.__db.execute(
+                "INSERT INTO legacy_memory_candidates (candidate_id, migration_id, "
+                "manifest_digest, source_relative_path_hash, source_sha256, item_kind, "
+                "disposition, reason_codes_json, payload_json, created_at_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (item["candidate_id"], *values),
+            )
+        quarantined = sum(item["disposition"] == "quarantined" for item in normalized)
+        reviewable = len(normalized) - quarantined
+        self.__db.execute(
+            "INSERT INTO legacy_migration_batches (migration_id, batch_index, manifest_digest, "
+            "candidate_set_digest, candidate_count, candidate_count_quarantined, "
+            "candidate_count_reviewable, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                command.migration_id,
+                command.batch_index,
+                command.manifest_digest,
+                candidate_set_digest,
+                len(normalized),
+                quarantined,
+                reviewable,
+                command.issued_at_utc,
+            ),
+        )
+        return self._legacy_batch_result(
+            command.migration_id,
+            command.batch_index,
+            replayed=False,
+        )
+
+    def _require_migration_actor(
+        self, context: AccessContext, issued_at_utc: str
+    ) -> AccessContext:
+        if (
+            not isinstance(context, AccessContext)
+            or context.purpose is not AccessPurpose.MIGRATION
+            or "memory.migrate" not in context.capability_scopes
+            or context.actor_kind is not ActorKind.PRIMARY_USER
+            or context.identity_assurance
+            not in {IdentityAssurance.DESKTOP_CONFIRMED, IdentityAssurance.VERIFIED}
+            or context.actor_subject_id not in context.participant_subject_ids
+            or not (context.issued_at_utc <= issued_at_utc < context.expires_at_utc)
+        ):
+            raise MemoryStoreAuthorizationError("legacy migration access denied")
+        row = self.__db.execute(
+            "SELECT p.status, p.identity_assurance, p.server_binding_source, s.status AS subject_status "
+            "FROM session_participants AS p JOIN subjects AS s ON s.subject_id = p.subject_id "
+            "WHERE p.session_id = ? AND p.subject_id = ? AND p.participant_role = 'primary'",
+            (context.session_id, context.actor_subject_id),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["status"]) != ParticipantStatus.ACTIVE.value
+            or str(row["subject_status"]) != SubjectStatus.ACTIVE.value
+            or str(row["server_binding_source"]) != "packaged_desktop"
+            or str(row["identity_assurance"])
+            not in {
+                IdentityAssurance.DESKTOP_CONFIRMED.value,
+                IdentityAssurance.VERIFIED.value,
+            }
+        ):
+            raise MemoryStoreAuthorizationError("legacy migration identity binding invalid")
+        return context
+
+    def _legacy_batch_result(
+        self, migration_id: str, batch_index: int, *, replayed: bool
+    ) -> dict[str, Any]:
+        row = self.__db.execute(
+            "SELECT candidate_count, candidate_count_quarantined, "
+            "candidate_count_reviewable FROM legacy_migration_batches "
+            "WHERE migration_id = ? AND batch_index = ?",
+            (migration_id, batch_index),
+        ).fetchone()
+        return {
+            "migration_id": migration_id,
+            "batch_index": batch_index,
+            "copied_count": int(row["candidate_count"]),
+            "quarantined_count": int(row["candidate_count_quarantined"]),
+            "candidate_count": int(row["candidate_count_reviewable"]),
+            "active_count": 0,
+            "fts_visible_count": 0,
+            "replayed": replayed,
+        }
 
     @staticmethod
     def _shared_decision_id(actor_subject_id: str, idempotency_key: str) -> str:

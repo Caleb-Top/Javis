@@ -61,6 +61,13 @@ from .contracts import (
     canonical_hash,
     canonical_json_bytes,
 )
+from .migration import (
+    LegacyBrainScanner,
+    LegacyManifestEntry,
+    LegacyMemoryCandidate,
+    LegacyMigrationError,
+    LegacyMigrationManifest,
+)
 
 __all__ = [
     "AccessContext",
@@ -88,6 +95,11 @@ __all__ = [
     "IdentityAssurance",
     "JournalEntry",
     "JournalEntryKind",
+    "LegacyBrainScanner",
+    "LegacyManifestEntry",
+    "LegacyMemoryCandidate",
+    "LegacyMigrationError",
+    "LegacyMigrationManifest",
     "MemoryAudience",
     "MemoryItemKind",
     "MemoryItemStatus",

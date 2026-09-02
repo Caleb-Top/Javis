@@ -1,20 +1,32 @@
 ﻿"""自学习引擎 — 每次对话后自我进化"""
 
-import json, time, logging, traceback
-from pathlib import Path
+import logging
+
 from knowledge.brain import Brain
 
 logger = logging.getLogger("learner")
 
 
-class Learner:
-    """自学习引擎 — 从每次对话中提取知识并自我完善"""
+class LegacyLearnerReadOnlyError(RuntimeError):
+    reason_code = "legacy_memory_read_only"
 
-    def __init__(self, brain=None):
-        self.brain = brain if brain is not None else Brain()
+
+class Learner:
+    """Archived self-learning interface kept fail-closed during L2 cutover."""
+
+    def __init__(self, brain=None, *, read_only: bool = True):
+        self.brain = brain
+        self.read_only = bool(read_only)
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise LegacyLearnerReadOnlyError("legacy_memory_read_only")
+        if self.brain is None:
+            self.brain = Brain()
 
     def learn_from_conversation(self, user_input: str, reply: str, actions: list[dict]):
         """从一次完整对话中学习"""
+        self._require_writable()
         # 1. 提取用户偏好
         prefs = self._extract_preferences(user_input)
         for pref in prefs:
@@ -39,6 +51,7 @@ class Learner:
 
     def learn_from_error(self, error: str, context: dict):
         """从错误中学习"""
+        self._require_writable()
         lesson = f"[错误教训] {error}"
         if "参数" in error:
             lesson += " → 需要检查参数类型和格式"

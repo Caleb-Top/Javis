@@ -14,6 +14,8 @@ import warnings
 from unittest.mock import patch
 import re
 
+from fastapi import HTTPException
+
 from core.llm_client import LLMClient
 from core.tool_registry import ToolDef, ToolRegistry
 from core.tool_result import ToolResult
@@ -552,36 +554,15 @@ class P0RuntimeTests(unittest.TestCase):
         self.assertEqual(workflow["version"], 1)
         self.assertIn("workflow_hash", workflow)
 
-    def test_main_materializes_active_procedural_memory_api(self):
+    def test_main_legacy_procedural_memory_api_is_read_only(self):
         os.environ["JAVIS_TEST_MODE"] = "1"
         main = importlib.import_module("main")
 
-        task = f"research_{uuid.uuid4().hex[:8]}"
-        for _ in range(3):
-            main.runtime.event_bus.publish(
-                "tool.completed",
-                {
-                    "tool": "web_search",
-                    "task": task,
-                    "success": True,
-                    "params": {"query": "local vlm"},
-                },
-                source="tools",
-            )
-        asyncio.run(main.api_memory_consolidate({"limit": 100}))
-        candidates = asyncio.run(main.api_memory_candidates(kind="procedural", limit=100))["candidates"]
-        candidate_id = next(item["candidate_id"] for item in candidates if item["content"].endswith(f"{task} -> web_search"))
-        asyncio.run(main.api_memory_candidate_status({"candidate_id": candidate_id, "status": "active"}))
-        with tempfile.TemporaryDirectory() as td:
-            result = asyncio.run(main.api_memory_materialize_procedural({
-                "limit": 100,
-                "output_dir": td,
-            }))
-            files = list(Path(td).glob("wft_*.json"))
+        with self.assertRaises(HTTPException) as captured:
+            asyncio.run(main.api_memory_materialize_procedural({"limit": 100}))
 
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["result"]["procedural"], 1)
-        self.assertEqual(len(files), 1)
+        self.assertEqual(captured.exception.status_code, 410)
+        self.assertEqual(captured.exception.detail, "legacy_memory_read_only")
 
     def test_evolution_engine_creates_reviewable_workflow_candidate_from_hot_tool_path(self):
         from core.events import EventBus
@@ -1197,58 +1178,38 @@ class P0RuntimeTests(unittest.TestCase):
         self.assertEqual(result["events"][-1]["type"], "unit.timeline")
         self.assertEqual(result["events"][-1]["payload"]["step"], "first")
 
-    def test_main_memory_consolidation_api_returns_candidates(self):
+    def test_main_legacy_memory_consolidation_api_is_read_only(self):
         os.environ["JAVIS_TEST_MODE"] = "1"
         main = importlib.import_module("main")
 
-        key = f"voice_{uuid.uuid4().hex[:8]}"
-        content = f"User preference: {key} = quiet"
-        main.runtime.event_bus.publish("user.preference", {"key": key, "value": "quiet"}, source="unit")
-        consolidated = asyncio.run(main.api_memory_consolidate({"limit": 50}))
-        candidates = asyncio.run(main.api_memory_candidates(kind="semantic", limit=10))
+        with self.assertRaises(HTTPException) as captured:
+            asyncio.run(main.api_memory_consolidate({"limit": 50}))
 
-        self.assertTrue(consolidated["ok"])
-        self.assertGreaterEqual(consolidated["result"]["semantic"], 1)
-        self.assertTrue(candidates["ok"])
-        self.assertIn(content, [item["content"] for item in candidates["candidates"]])
+        self.assertEqual(captured.exception.status_code, 410)
+        self.assertEqual(captured.exception.detail, "legacy_memory_read_only")
 
-    def test_main_memory_candidate_status_api_activates_candidate(self):
+    def test_main_legacy_memory_candidate_status_api_is_read_only(self):
         os.environ["JAVIS_TEST_MODE"] = "1"
         main = importlib.import_module("main")
 
-        key = f"pace_{uuid.uuid4().hex[:8]}"
-        content = f"User preference: {key} = fast"
-        main.runtime.event_bus.publish("user.preference", {"key": key, "value": "fast"}, source="unit")
-        asyncio.run(main.api_memory_consolidate({"limit": 50}))
-        candidates = asyncio.run(main.api_memory_candidates(kind="semantic", limit=100))["candidates"]
-        candidate_id = next(item["candidate_id"] for item in candidates if item["content"] == content)
+        with self.assertRaises(HTTPException) as captured:
+            asyncio.run(main.api_memory_candidate_status({
+                "candidate_id": "legacy-candidate",
+                "status": "active",
+            }))
 
-        result = asyncio.run(main.api_memory_candidate_status({
-            "candidate_id": candidate_id,
-            "status": "active",
-        }))
-        active = asyncio.run(main.api_memory_candidates(kind="semantic", status="active", limit=20))
+        self.assertEqual(captured.exception.status_code, 410)
+        self.assertEqual(captured.exception.detail, "legacy_memory_read_only")
 
-        self.assertTrue(result["ok"])
-        self.assertIn(candidate_id, [item["candidate_id"] for item in active["candidates"]])
-
-    def test_main_memory_apply_active_api_syncs_approved_semantic_candidate_to_brain(self):
+    def test_main_legacy_apply_active_api_is_read_only(self):
         os.environ["JAVIS_TEST_MODE"] = "1"
         main = importlib.import_module("main")
 
-        key = f"format_{uuid.uuid4().hex[:8]}"
-        content = f"User preference: {key} = concise"
-        main.runtime.event_bus.publish("user.preference", {"key": key, "value": "concise"}, source="unit")
-        asyncio.run(main.api_memory_consolidate({"limit": 50}))
-        candidates = asyncio.run(main.api_memory_candidates(kind="semantic", limit=100))["candidates"]
-        candidate_id = next(item["candidate_id"] for item in candidates if item["content"] == content)
-        asyncio.run(main.api_memory_candidate_status({"candidate_id": candidate_id, "status": "active"}))
+        with self.assertRaises(HTTPException) as captured:
+            asyncio.run(main.api_memory_apply_active({"limit": 100}))
 
-        result = asyncio.run(main.api_memory_apply_active({"limit": 100}))
-
-        self.assertTrue(result["ok"])
-        self.assertGreaterEqual(result["result"]["semantic"], 1)
-        self.assertTrue(any(fact.content == content for fact in main.runtime.brain._facts))
+        self.assertEqual(captured.exception.status_code, 410)
+        self.assertEqual(captured.exception.detail, "legacy_memory_read_only")
 
     def test_main_exposes_evolution_service_and_candidate_apis(self):
         os.environ["JAVIS_TEST_MODE"] = "1"

@@ -38,7 +38,6 @@ from core.subsystem import SubsystemStatus
 from core.tool_catalog import ToolCatalog
 from core.tool_registry import ToolRegistry
 from knowledge.brain import Brain
-from knowledge.learner import Learner
 
 
 logger = logging.getLogger("jarvis.runtime")
@@ -53,7 +52,7 @@ class JarvisRuntime:
     continuity_layout: ContinuityLayout
     startup_side_effects: bool
     brain: Brain
-    learner: Learner
+    learner: Any | None
     registry: ToolRegistry
     llm: LLMClient
     engine: InferenceEngine
@@ -329,26 +328,6 @@ def _run_tool_setup() -> None:
         logger.warning("工具路径初始化跳过: %s", exc)
 
 
-def _inject_startup_knowledge(brain: Brain) -> None:
-    from knowledge.human_knowledge import inject_to_brain as inject_human
-    from knowledge.papers_db import ingest_to_brain
-
-    try:
-        brain.compress()
-    except Exception as exc:
-        logger.debug("大脑压缩跳过:%s", exc)
-    try:
-        ingest_to_brain(brain)
-        logger.info("论文知识已注入大脑")
-    except Exception as exc:
-        logger.warning("论文注入跳过:%s", exc)
-    try:
-        count = inject_human(brain)
-        logger.info("人类文明知识已注入:%s条", count)
-    except Exception as exc:
-        logger.warning("人类知识注入跳过:%s", exc)
-
-
 def _connect_code_exec(registry: ToolRegistry, brain: Brain) -> None:
     try:
         import tools.code_exec as code_exec
@@ -358,39 +337,6 @@ def _connect_code_exec(registry: ToolRegistry, brain: Brain) -> None:
         logger.info("🔗 执行引擎已连接大脑和注册中心")
     except Exception as exc:
         logger.warning("执行引擎初始化跳过: %s", exc)
-
-
-def _inject_runtime_facts(brain: Brain) -> None:
-    try:
-        brain.learn_fact(
-            "用户风格: 自然口语，先结论后数据，不读原始数据行，短句优先",
-            category="user_style.base",
-            source="user_feedback",
-            priority=5,
-        )
-        brain.learn_fact(
-            "规则: 工具原始数据不能复读，用自己的话重新组织",
-            category="user_style.rule.no_repeat_data",
-            source="user_feedback",
-            priority=5,
-        )
-        logger.info("用户风格初始化完成")
-    except Exception as exc:
-        logger.warning("用户风格初始化跳过: %s", exc)
-
-    injectors = [
-        ("tools_lib.tool_superpowers", "Superpowers 技能已注入大脑"),
-        ("tools_lib.tool_plugin_creator", "Plugin Creator 技能已注入大脑"),
-        ("tools_lib.tool_anthropic_plugins", "Anthropic 插件库已注入大脑"),
-        ("tools_lib.tool_catch2", "Catch2 C++ 测试已注入大脑"),
-    ]
-    for module_name, message in injectors:
-        try:
-            inject_to_brain = getattr(importlib.import_module(module_name), "inject_to_brain")
-            inject_to_brain(brain)
-            logger.info(message)
-        except Exception as exc:
-            logger.warning("%s 注入跳过: %s", module_name, exc)
 
 
 def _register_extension_tools(registry: ToolRegistry, root: Path) -> None:
@@ -414,15 +360,7 @@ def _register_extension_tools(registry: ToolRegistry, root: Path) -> None:
     # and SkillForge. Legacy modules remain importable but are not model-facing.
 
 
-def _start_background_services(brain: Brain) -> None:
-    try:
-        from memory.controller import get_controller
-
-        get_controller(brain).start_cycles()
-        logger.info("记忆控制器已启动 (循环: 语义5m/压缩10m/摘要30m)")
-    except Exception as exc:
-        logger.warning("记忆控制器启动跳过: %s", exc)
-
+def _start_background_services() -> None:
     try:
         import threading
         from core.tray import _start_escape_hook
@@ -469,10 +407,10 @@ def create_runtime(
                 os.environ.pop("JAVIS_DISABLE_BRAIN_AUTO_FLUSH", None)
             else:
                 os.environ["JAVIS_DISABLE_BRAIN_AUTO_FLUSH"] = previous_auto_flush
-    learner = Learner(brain=brain)
-    if startup_side_effects:
-        _inject_startup_knowledge(brain)
-    else:
+    # The legacy Learner is archive-only. Durable learning is owned by
+    # ConversationStore projection and MemoryService.
+    learner = None
+    if not startup_side_effects:
         logger.info("启动副作用已关闭: 跳过知识注入和后台服务")
 
     event_bus = EventBus()
@@ -560,9 +498,8 @@ def create_runtime(
 
     if startup_side_effects:
         _connect_code_exec(registry, brain)
-        _inject_runtime_facts(brain)
         _register_extension_tools(registry, root)
-        _start_background_services(brain)
+        _start_background_services()
         runtime.discover_skills()
         runtime.load_skill("全功能")
 

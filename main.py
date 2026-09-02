@@ -1113,18 +1113,14 @@ async def api_memory_events(type: str = "", limit: int = 50):
     events = recent(limit=limit, event_type=type or None)
     return {"ok": True, "events": events, "count": len(events)}
 
+
+def _reject_legacy_memory_mutation() -> None:
+    raise HTTPException(status_code=410, detail="legacy_memory_read_only")
+
 @app.post("/api/memory/consolidate")
 async def api_memory_consolidate(data: dict = Body(...)):
-    store = getattr(runtime, "event_store", None)
-    if store is None:
-        return {"ok": False, "result": {}, "error": "event store unavailable"}
-    try:
-        from memory.consolidation import EventMemoryConsolidator
-
-        result = EventMemoryConsolidator(store).consolidate(limit=int(data.get("limit", 500)))
-        return {"ok": True, "result": result}
-    except Exception as e:
-        return {"ok": False, "result": {}, "error": str(e)[:200]}
+    del data
+    _reject_legacy_memory_mutation()
 
 @app.get("/api/memory/candidates")
 async def api_memory_candidates(kind: str = "", status: str = "candidate", limit: int = 50):
@@ -1146,48 +1142,18 @@ async def api_memory_recall(q: str = "", limit: int = 10):
 
 @app.post("/api/memory/candidates/status")
 async def api_memory_candidate_status(data: dict = Body(...)):
-    store = getattr(runtime, "event_store", None)
-    update = getattr(store, "update_memory_candidate_status", None)
-    if not callable(update):
-        return {"ok": False, "error": "memory candidates unavailable"}
-    candidate_id = str(data.get("candidate_id", "")).strip()
-    status = str(data.get("status", "")).strip()
-    if not candidate_id:
-        return {"ok": False, "error": "candidate_id is required"}
-    updated = update(candidate_id, status)
-    if not updated:
-        return {"ok": False, "error": "candidate not found or status invalid"}
-    runtime.event_bus.publish(
-        "memory.candidate.status_changed",
-        {"candidate_id": candidate_id, "status": status},
-        source="memory",
-    )
-    return {"ok": True, "candidate_id": candidate_id, "status": status}
+    del data
+    _reject_legacy_memory_mutation()
 
 @app.post("/api/memory/apply-active")
 async def api_memory_apply_active(data: dict = Body(...)):
-    try:
-        from memory.activation import ActiveMemoryApplier
-
-        result = ActiveMemoryApplier(runtime).apply(limit=int(data.get("limit", 100)))
-        return {"ok": True, "result": result}
-    except Exception as e:
-        return {"ok": False, "result": {}, "error": str(e)[:200]}
+    del data
+    _reject_legacy_memory_mutation()
 
 @app.post("/api/memory/materialize-procedural")
 async def api_memory_materialize_procedural(data: dict = Body(...)):
-    try:
-        from memory.procedural import PROCEDURAL_DIR
-        from memory.procedural_materializer import ProceduralMemoryMaterializer
-
-        output_dir = Path(data.get("output_dir") or PROCEDURAL_DIR)
-        result = ProceduralMemoryMaterializer(runtime.event_store, output_dir).materialize(
-            limit=int(data.get("limit", 100))
-        )
-        runtime.event_bus.publish("memory.procedural.materialized", result, source="memory")
-        return {"ok": True, "result": result, "output_dir": str(output_dir)}
-    except Exception as e:
-        return {"ok": False, "result": {}, "error": str(e)[:200]}
+    del data
+    _reject_legacy_memory_mutation()
 
 @app.post("/api/evolution/review")
 async def api_evolution_review(data: dict = Body(...)):
@@ -1283,26 +1249,19 @@ async def api_evolution_candidate_performance(data: dict = Body(...)):
 async def api_mem_get(sid:str):return {"id":sid,"cards":load_conversation(sid)}
 
 @app.post("/api/memory/conversations/{sid}")
-async def api_mem_save(sid:str,data:dict):save_conversation(sid,data.get("cards",[]),name=data.get("name",""));return {"ok":True}
+async def api_mem_save(sid:str,data:dict):
+    del sid, data
+    _reject_legacy_memory_mutation()
 
 @app.post("/api/memory/conversations/{sid}/rename")
 async def api_mem_rename(sid:str,data:dict):
-    name=data.get("name","")
-    import json as _json, pathlib
-    ip=pathlib.Path(__file__).parent/"memory"/"index.json"
-    if ip.exists():
-        try:
-            idx=_json.loads(ip.read_text(encoding="utf-8"))
-            for c in idx.get("conversations",[]):
-                if c["id"]==sid: c["name"]=name;break
-            ip.write_text(_json.dumps(idx,ensure_ascii=False,indent=2),encoding="utf-8")
-        except Exception as e:
-            logger.warning(f"会话重命名失败: {e}")
-            return {"ok": False, "error": str(e)[:200]}
-    return {"ok":True,"name":name}
+    del sid, data
+    _reject_legacy_memory_mutation()
 
 @app.delete("/api/memory/conversations/{sid}")
-async def api_mem_del(sid:str):delete_conversation(sid);return {"ok":True}
+async def api_mem_del(sid:str):
+    del sid
+    _reject_legacy_memory_mutation()
 
 # ═══════════════════════════════════════════════════════════════
 # P0-10: FTS5 全文搜索 + 索引管理 API
@@ -1354,13 +1313,7 @@ async def api_memory_index_status():
 @app.post("/api/memory/index/rebuild")
 async def api_memory_index_rebuild():
     """重建记忆索引"""
-    try:
-        from memory.indexer import rebuild_index
-        rebuild_index()
-        from memory.indexer import index_status
-        return {"ok": True, "status": index_status()}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:200]}
+    _reject_legacy_memory_mutation()
 
 @app.get("/api/memory/search/ui")
 async def api_memory_search_ui():
