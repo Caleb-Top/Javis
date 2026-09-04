@@ -446,9 +446,11 @@ def create_runtime(
         resolved_data_root,
         environment_fingerprint=environment_fingerprint,
     )
+    life_boot_id = str(life.status().get("boot_id") or "runtime-boot-unavailable")
     memory_service = MemoryService(
         resolved_data_root,
         conversation_store=conversation_store,
+        runtime_boot_id=life_boot_id,
     )
     l7 = L7Supervisor()
     llm = LLMClient(str(root / "config.yaml"))
@@ -509,7 +511,7 @@ def create_runtime(
     memory_service.start()
     runtime.memory_access_factory = AccessContextFactory(
         MemoryServiceAccessView(memory_service),
-        runtime_boot_id=str(life.status().get("boot_id") or "runtime-boot-unavailable"),
+        runtime_boot_id=life_boot_id,
     )
     runtime.event_bus.publish("runtime.created", {"root": str(root)}, source="runtime")
     return runtime

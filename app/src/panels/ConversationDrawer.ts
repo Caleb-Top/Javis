@@ -13,7 +13,13 @@ export function createConversationDrawer(client: BackendClient, manager: DrawerM
   drawer.className = "app-drawer drawer-left conversation-drawer";
   drawer.setAttribute("aria-label", "会话与记忆");
   drawer.innerHTML = `
-    <header class="drawer-header"><div><small>MEMORY</small><h2>会话与记忆</h2></div><button class="icon-button drawer-close" aria-label="关闭">×</button></header>
+    <header class="drawer-header">
+      <div><small>MEMORY</small><h2>会话与记忆</h2></div>
+      <div class="drawer-header-actions">
+        <button class="icon-button open-memory-manager" type="button" aria-label="打开记忆管理" title="记忆管理">◫</button>
+        <button class="icon-button drawer-close" type="button" aria-label="关闭">×</button>
+      </div>
+    </header>
     <label class="search-box"><span class="sr-only">搜索会话和记忆</span><input type="search" placeholder="搜索会话、事实和事件" autocomplete="off"><kbd>FTS</kbd></label>
     <div class="search-status" data-state="idle">输入至少 2 个字符</div>
     <div class="conversation-results" aria-live="polite"></div>`;
@@ -21,6 +27,10 @@ export function createConversationDrawer(client: BackendClient, manager: DrawerM
   const input = drawer.querySelector<HTMLInputElement>("input")!;
   const status = drawer.querySelector<HTMLElement>(".search-status")!;
   const results = drawer.querySelector<HTMLElement>(".conversation-results")!;
+  drawer.querySelector<HTMLButtonElement>(".open-memory-manager")!.addEventListener(
+    "click",
+    () => document.dispatchEvent(new CustomEvent("javis:open-memory")),
+  );
   let timer = 0;
   let controller: AbortController | null = null;
 

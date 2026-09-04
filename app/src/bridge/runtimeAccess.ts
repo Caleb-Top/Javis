@@ -6,7 +6,21 @@ export const RUNTIME_ACCESS_SCOPES = [
   "voice.capture",
 ] as const;
 
-export type RuntimeAccessScope = typeof RUNTIME_ACCESS_SCOPES[number];
+export const MEMORY_RUNTIME_ACCESS_SCOPES = [
+  "memory.read",
+  "memory.manage",
+  "memory.delete",
+  "memory.migrate",
+] as const;
+
+export const MEMORY_DESKTOP_RUNTIME_ACCESS_SCOPES = [
+  "conversation",
+  ...MEMORY_RUNTIME_ACCESS_SCOPES,
+] as const;
+
+export type RuntimeAccessScope =
+  | typeof RUNTIME_ACCESS_SCOPES[number]
+  | typeof MEMORY_RUNTIME_ACCESS_SCOPES[number];
 
 export type RuntimeAccessIssueRequest = {
   clientInstanceId: string;
@@ -49,6 +63,7 @@ type RuntimeAccessProviderOptions = {
   now?(): number;
   ttlSeconds?: number;
   refreshSkewSeconds?: number;
+  scopes?: readonly RuntimeAccessScope[];
 };
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,256}$/;
@@ -126,6 +141,21 @@ export function createRuntimeAccessProvider(
   const now = options.now ?? (() => Date.now() / 1000);
   const ttlSeconds = options.ttlSeconds ?? 300;
   const refreshSkewSeconds = options.refreshSkewSeconds ?? 30;
+  const requestedScopes = options.scopes
+    ? [...options.scopes]
+    : [...RUNTIME_ACCESS_SCOPES];
+  const allowedScopes = new Set<RuntimeAccessScope>([
+    ...RUNTIME_ACCESS_SCOPES,
+    ...MEMORY_RUNTIME_ACCESS_SCOPES,
+  ]);
+  if (
+    requestedScopes.length < 1
+    || requestedScopes.length > allowedScopes.size
+    || new Set(requestedScopes).size !== requestedScopes.length
+    || requestedScopes.some((scope) => !allowedScopes.has(scope))
+  ) {
+    throw new Error("runtime access scopes must be unique supported values");
+  }
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 300) {
     throw new Error("runtime capability TTL must be between 1 and 300 seconds");
   }
@@ -212,7 +242,7 @@ export function createRuntimeAccessProvider(
     if (pending) return pending;
     const request: RuntimeAccessIssueRequest = {
       clientInstanceId,
-      scopes: [...RUNTIME_ACCESS_SCOPES],
+      scopes: [...requestedScopes],
       ttlSeconds,
     };
     pending = issue(request)

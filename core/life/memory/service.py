@@ -13,7 +13,10 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, TypeVar
 
+from .access import MemorySubjectBinder, ServerPrincipal
 from .contracts import (
+    AccessContext,
+    AccessPurpose,
     ConfirmSharedMemory,
     CorrectMemory,
     DeletionRequest,
@@ -123,6 +126,7 @@ class MemoryService:
         episode_extractor: EpisodeExtractor | None = None,
         recall_cache_capacity: int = 128,
         deletion_stage_hook: Callable[[str, str], None] | None = None,
+        runtime_boot_id: str | None = None,
     ) -> None:
         if type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError("queue_capacity must be a positive integer")
@@ -160,6 +164,9 @@ class MemoryService:
         self._episode_extractor = episode_extractor or EpisodeExtractor()
         self._recall_engine = RecallEngine(cache_capacity=recall_cache_capacity)
         self._deletion_stage_hook = deletion_stage_hook
+        self._runtime_boot_id = None if runtime_boot_id is None else str(runtime_boot_id).strip()
+        if runtime_boot_id is not None and not self._runtime_boot_id:
+            raise ValueError("runtime_boot_id must be bounded text")
         self._prompt_invalidators: list[Callable[[], None]] = []
 
         self._lock = threading.RLock()
@@ -274,6 +281,36 @@ class MemoryService:
     def put_session_participant(self, participant: SessionParticipant) -> Future[bool]:
         return self._submit_store_mutation("put_session_participant", participant)
 
+    def bind_primary_session(
+        self,
+        session_id: str,
+        principal: ServerPrincipal,
+    ) -> Future[dict[str, str]]:
+        """Bind one authorized packaged-desktop session on the writer thread."""
+
+        if self._runtime_boot_id is None:
+            raise MemoryServiceUnavailable("memory_identity_binding_unavailable")
+        if not isinstance(principal, ServerPrincipal):
+            raise TypeError("principal must be ServerPrincipal")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, str]:
+            binding = MemorySubjectBinder(
+                store,
+                writer_token=writer_token,
+                runtime_boot_id=self._runtime_boot_id,
+            ).bind_primary_user(session_id, principal)
+            return {
+                "session_id": binding.primary_participant.session_id,
+                "state": "bound",
+            }
+
+        return self._submit_write(
+            "bind_primary_session",
+            operation,
+            priority=MemoryCommandPriority.CRITICAL,
+            critical=True,
+        )
+
     def put_item(
         self,
         item: ExperienceEpisode | JournalEntry | SharedMemory | UserModelClaim | RelationshipEvent,
@@ -371,8 +408,24 @@ class MemoryService:
             critical=True,
         )
 
-    def deletion_status(self, deletion_request_id: str) -> Future[dict[str, Any] | None]:
-        return self._submit_read("deletion_status", None, deletion_request_id)
+    def deletion_status(
+        self,
+        deletion_request_id: str,
+        access_context: AccessContext | None = None,
+    ) -> Future[dict[str, Any] | None]:
+        if access_context is not None:
+            if not isinstance(access_context, AccessContext):
+                raise TypeError("access_context must be an AccessContext")
+            if access_context.purpose is not AccessPurpose.DELETE:
+                raise ValueError("deletion status requires delete purpose")
+        return self._submit_read(
+            "deletion_status",
+            None,
+            deletion_request_id,
+            actor_subject_id=(
+                None if access_context is None else access_context.actor_subject_id
+            ),
+        )
 
     def migrate_legacy_batch(
         self,
@@ -403,6 +456,17 @@ class MemoryService:
             "fts_visible_count": 0,
         }
         return self._submit_read("legacy_migration_status", fallback, migration_id)
+
+    def legacy_migration_summary(self) -> Future[dict[str, Any]]:
+        return self._submit_read(
+            "legacy_migration_summary",
+            {
+                "batch_count": 0,
+                "candidate_count": 0,
+                "quarantined_count": 0,
+                "last_scan_at_utc": None,
+            },
+        )
 
     def register_prompt_invalidator(self, invalidator: Callable[[], None]) -> None:
         if not callable(invalidator):
@@ -454,6 +518,25 @@ class MemoryService:
 
     def get_item(self, item_kind: MemoryItemKind | str, item_id: str, access_context: Any) -> Future[Any]:
         return self._submit_read("get_item", None, item_kind, item_id, access_context)
+
+    def list_items(
+        self,
+        access_context: Any,
+        item_kinds: tuple[MemoryItemKind | str, ...] | list[MemoryItemKind | str],
+        *,
+        statuses: tuple[str, ...] = ("active",),
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> Future[tuple[tuple[Any, ...], str | None]]:
+        return self._submit_read(
+            "list_items",
+            ((), None),
+            access_context,
+            tuple(item_kinds),
+            statuses=tuple(statuses),
+            cursor=cursor,
+            limit=limit,
+        )
 
     def search_items(self, query: RecallQuery) -> Future[tuple[Any, ...]]:
         """Fail closed to an empty tuple when memory or the bounded read lane is unavailable."""
@@ -631,9 +714,15 @@ class MemoryService:
                 raise MemoryServiceError("background_queue_full") from exc
         return future
 
-    def _submit_read(self, method_name: str, fallback: _T, *args: Any) -> Future[_T]:
+    def _submit_read(
+        self,
+        method_name: str,
+        fallback: _T,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Future[_T]:
         return self._submit_read_operation(
-            lambda store: getattr(store, method_name)(*args),
+            lambda store: getattr(store, method_name)(*args, **kwargs),
             fallback,
         )
 

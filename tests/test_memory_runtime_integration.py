@@ -3,10 +3,48 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 import core.runtime as runtime_module
-from core.life.memory.access import MemoryServiceAccessView
-from core.life.memory.contracts import ActorKind
+from core.life.memory.access import (
+    AccessContextFactory,
+    MemoryServiceAccessView,
+    PrincipalBindingSource,
+    ServerPrincipal,
+)
+from core.life.memory.contracts import AccessPurpose, ActorKind
 from core.life.memory.service import MemoryService
+from core.runtime_access import RuntimeAccessAuthority
+
+
+BOOT_ID = "boot-memory-binding"
+TAURI_ORIGIN = "http://tauri.localhost"
+
+
+def _server_principal(
+    authority: RuntimeAccessAuthority,
+    token: str,
+    *,
+    session_id: str,
+    scope: str,
+) -> ServerPrincipal:
+    decision = authority.validate(
+        token,
+        scope=scope,
+        origin=TAURI_ORIGIN,
+        peer_host="127.0.0.1",
+    )
+    assert decision.allowed and decision.principal is not None
+    principal = decision.principal
+    return ServerPrincipal(
+        runtime_boot_id=principal.runtime_boot_id,
+        session_id=session_id,
+        client_id_hash=principal.client_id_hash,
+        capability_scopes=principal.scopes,
+        issued_at_epoch=principal.issued_at_epoch,
+        expires_at_epoch=principal.expires_at_epoch,
+        binding_source=PrincipalBindingSource(principal.binding_source),
+    )
 
 
 def _runtime(tmp_path: Path):
@@ -90,3 +128,75 @@ def test_async_close_stops_admission_before_draining_memory(tmp_path: Path):
 
     assert events[:2] == ["conversation", "memory"]
     assert runtime.memory_service.status()["state"] == "stopped"
+
+
+def test_primary_session_bind_is_idempotent_and_unlocks_only_matching_client(tmp_path: Path):
+    session_id = "session-primary-bind"
+    service = MemoryService(tmp_path / "memory", runtime_boot_id=BOOT_ID).start()
+    authority = RuntimeAccessAuthority(BOOT_ID)
+    issued = authority.issue("desktop-main", ("conversation", "memory.read"))
+    principal = _server_principal(
+        authority,
+        issued.token,
+        session_id=session_id,
+        scope="conversation",
+    )
+    access_factory = AccessContextFactory(
+        MemoryServiceAccessView(service, timeout=5),
+        runtime_boot_id=BOOT_ID,
+    )
+    try:
+        before = access_factory.for_session(
+            session_id,
+            principal=_server_principal(
+                authority,
+                issued.token,
+                session_id=session_id,
+                scope="memory.read",
+            ),
+            purpose=AccessPurpose.RECALL,
+        )
+        assert before.actor_kind is ActorKind.GUEST
+
+        first = service.bind_primary_session(session_id, principal).result(timeout=10)
+        replay = service.bind_primary_session(session_id, principal).result(timeout=10)
+        assert first == replay == {"session_id": session_id, "state": "bound"}
+        assert "subject" not in repr(first)
+        assert issued.token not in repr(first)
+
+        after = access_factory.for_session(
+            session_id,
+            principal=_server_principal(
+                authority,
+                issued.token,
+                session_id=session_id,
+                scope="memory.read",
+            ),
+            purpose=AccessPurpose.RECALL,
+        )
+        assert after.actor_kind is ActorKind.PRIMARY_USER
+        assert len(after.participant_subject_ids) == 2
+
+        other = authority.issue("desktop-other", ("conversation", "memory.read"))
+        conflicting = _server_principal(
+            authority,
+            other.token,
+            session_id=session_id,
+            scope="conversation",
+        )
+        with pytest.raises(Exception, match="session_primary_conflict"):
+            service.bind_primary_session(session_id, conflicting).result(timeout=10)
+
+        other_context = access_factory.for_session(
+            session_id,
+            principal=_server_principal(
+                authority,
+                other.token,
+                session_id=session_id,
+                scope="memory.read",
+            ),
+            purpose=AccessPurpose.RECALL,
+        )
+        assert other_context.actor_kind is ActorKind.GUEST
+    finally:
+        assert service.shutdown(timeout=10)

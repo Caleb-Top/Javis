@@ -4,6 +4,7 @@ export type BackendEndpoints = {
 };
 
 const DEFAULT_HTTP_ORIGIN = "http://127.0.0.1:8080";
+export const LIFE_MEMORY_API_ROOT = "/api/life/memory";
 
 function configuredBackendOrigin(): string {
   const env = (import.meta as ImportMeta & {

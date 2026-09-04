@@ -28,10 +28,14 @@ pub const MAX_RESTART_ATTEMPTS: u8 = 3;
 const PORT: u16 = 8080;
 const STARTUP_POLLS: usize = 20;
 const MAX_RUNTIME_ACCESS_RESPONSE_BYTES: u64 = 64 * 1024;
-const RUNTIME_ACCESS_SCOPES: [&str; 5] = [
+const RUNTIME_ACCESS_SCOPES: [&str; 9] = [
     "conversation",
     "diagnostics.read",
     "life.read",
+    "memory.delete",
+    "memory.manage",
+    "memory.migrate",
+    "memory.read",
     "playback",
     "voice.capture",
 ];
@@ -631,6 +635,19 @@ mod tests {
         assert!(validate_runtime_access_request("desktop", &["unknown".to_string()], 60).is_err());
         assert!(validate_runtime_access_request("desktop", &[], 60).is_err());
         assert!(validate_runtime_access_request("desktop", &scopes, 0).is_err());
+        for scope in [
+            "memory.delete",
+            "memory.manage",
+            "memory.migrate",
+            "memory.read",
+        ] {
+            assert!(validate_runtime_access_request(
+                "desktop",
+                &["conversation".to_string(), scope.to_string()],
+                60,
+            )
+            .is_ok());
+        }
     }
 
     #[cfg(target_os = "windows")]

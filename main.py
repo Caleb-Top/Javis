@@ -242,6 +242,7 @@ def _discover():
 from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Body,Header,HTTPException,Request
 from fastapi.staticfiles import StaticFiles;from fastapi.responses import FileResponse
 from core.life.api import LifeSessionPublisher, create_life_router
+from core.life.memory.api import create_memory_router
 from utils.app_cors import install_desktop_cors
 
 
@@ -274,6 +275,15 @@ install_desktop_cors(
     allow_development_origins=_ALLOW_DEV_RUNTIME_ACCESS,
 )
 app.include_router(create_life_router(runtime.life))
+if runtime.memory_access_factory is not None:
+    app.include_router(
+        create_memory_router(
+            runtime.memory_service,
+            runtime.memory_access_factory,
+            authorize_runtime_http,
+            legacy_root=ROOT / "brain_data",
+        )
+    )
 
 @app.get("/")
 async def root():return FileResponse(str(ROOT/"web"/"index.html"))

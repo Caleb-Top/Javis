@@ -11,8 +11,10 @@ import { createBackendClient, type ConnectionSnapshot } from "./bridge/backendCl
 import { resolveBackendEndpoints } from "./bridge/backendEndpoints.ts";
 import {
   createRuntimeAccessProvider,
+  MEMORY_DESKTOP_RUNTIME_ACCESS_SCOPES,
   type RuntimeAccessIssueRequest,
 } from "./bridge/runtimeAccess.ts";
+import { getOrCreateRuntimeClientInstanceId } from "./bridge/runtimeIdentity.ts";
 import { createSidecarClient, isTauriRuntime, type SidecarSnapshot } from "./bridge/sidecarClient";
 import { openCodeSurface, closeCodeSurface, mountCodeSurface } from "./code/CodeSurface";
 import {
@@ -33,6 +35,8 @@ import {
 } from "./live/localSurfaceCommand.ts";
 import { createVoiceCapture } from "./live/VoiceCapture";
 import type { LiveState } from "./live/liveState";
+import { createMemoryClient } from "./memory/MemoryClient.ts";
+import { createMemorySurface } from "./memory/MemorySurface.ts";
 import { createSurfaceContextMenu } from "./menu/SurfaceContextMenu";
 import { createPetSurface } from "./pet/PetSurface";
 import type { PetShortcut } from "./pet/petPreferences.ts";
@@ -138,12 +142,6 @@ let pendingVoicePlaybackRequestId: string | null = null;
 let voicePlaybackEpoch = 0;
 const sidecar = createSidecarClient();
 
-function createRuntimeClientInstanceId(): string {
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
-  return `desktop-main-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
 async function issueDevelopmentRuntimeCapability(
   request: RuntimeAccessIssueRequest,
 ): Promise<string> {
@@ -161,9 +159,15 @@ async function issueDevelopmentRuntimeCapability(
   return response.text();
 }
 
+const runtimeClientInstanceId = getOrCreateRuntimeClientInstanceId();
 const runtimeAccess = createRuntimeAccessProvider({
-  clientInstanceId: createRuntimeClientInstanceId(),
+  clientInstanceId: runtimeClientInstanceId,
   issue: isTauriRuntime() ? undefined : issueDevelopmentRuntimeCapability,
+});
+const memoryRuntimeAccess = createRuntimeAccessProvider({
+  clientInstanceId: runtimeClientInstanceId,
+  issue: isTauriRuntime() ? undefined : issueDevelopmentRuntimeCapability,
+  scopes: MEMORY_DESKTOP_RUNTIME_ACCESS_SCOPES,
 });
 let backendConnection: ConnectionSnapshot = { http: false, websocket: false };
 type ObservableSidecarSnapshot = SidecarSnapshot & {
@@ -420,6 +424,10 @@ client.subscribeReliability((snapshot) => {
 });
 const conversationDrawer = createConversationDrawer(client, drawerManager);
 controlDrawer = createControlDrawer(client, drawerManager);
+const memorySurface = createMemorySurface(createMemoryClient({
+  runtimeAccess: memoryRuntimeAccess,
+  sessionId: client.sessionId,
+}), drawerManager);
 let firstRunReturnMode: DesktopMode = "live";
 const firstRun = createFirstRunPanel({
   onOpen: () => {
@@ -824,6 +832,8 @@ async function bootRuntime(): Promise<void> {
 
 window.addEventListener("beforeunload", () => {
   petSurface.dispose();
+  memorySurface.dispose();
+  memoryRuntimeAccess.dispose();
   runtimeAccess.dispose();
   client.dispose();
 });
@@ -887,6 +897,7 @@ document.querySelector<HTMLButtonElement>(".control-panel-control")!.addEventLis
 document.querySelector<HTMLButtonElement>(".perception-control")!.addEventListener("click", (event) => controlDrawer?.open("perception", event.currentTarget as HTMLElement));
 document.querySelector<HTMLButtonElement>(".more-control")!.addEventListener("click", (event) => conversationDrawer.open(event.currentTarget as HTMLElement));
 document.addEventListener("javis:open-conversations", () => conversationDrawer.open(caption));
+document.addEventListener("javis:open-memory", () => memorySurface.open());
 document.addEventListener("javis:return-live", () => {
   closeCodeSurface();
   void setDesktopMode("live");

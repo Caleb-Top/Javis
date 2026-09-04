@@ -709,14 +709,32 @@ class MemoryStore:
             ).fetchone()
         return None if row is None else dict(row)
 
-    def deletion_status(self, deletion_request_id: str) -> dict[str, Any] | None:
+    def deletion_status(
+        self,
+        deletion_request_id: str,
+        *,
+        actor_subject_id: str | None = None,
+    ) -> dict[str, Any] | None:
         _require_text(deletion_request_id, "deletion_request_id")
+        if actor_subject_id is not None:
+            _require_text(actor_subject_id, "actor_subject_id")
+        owner_filter = ""
+        parameters: tuple[str, ...] = (deletion_request_id,)
+        if actor_subject_id is not None:
+            actor_hash = hashlib.sha256(actor_subject_id.encode("utf-8")).hexdigest()
+            owner_filter = (
+                " AND (actor_subject_id = ? OR (actor_subject_id IS NULL AND EXISTS ("
+                "SELECT 1 FROM deletion_audits AS audit "
+                "WHERE audit.deletion_request_id = deletion_requests.deletion_request_id "
+                "AND audit.actor_subject_hash = ?)))"
+            )
+            parameters = (deletion_request_id, actor_subject_id, actor_hash)
         with self._read_connection() as db:
             row = db.execute(
                 "SELECT deletion_request_id, scope, source_handling, state, attempt, "
                 "last_reason_code, created_at_utc, updated_at_utc, completed_at_utc "
-                "FROM deletion_requests WHERE deletion_request_id = ?",
-                (deletion_request_id,),
+                "FROM deletion_requests WHERE deletion_request_id = ?" + owner_filter,
+                parameters,
             ).fetchone()
             if row is None:
                 return None
@@ -791,6 +809,108 @@ class MemoryStore:
             "active_count": 0,
             "fts_visible_count": 0,
         }
+
+    def legacy_migration_summary(self) -> dict[str, Any]:
+        """Return content-free migration counts for the management surface."""
+
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT disposition, COUNT(*) AS count, MAX(created_at_utc) AS latest "
+                "FROM legacy_memory_candidates GROUP BY disposition"
+            ).fetchall()
+            batch = db.execute(
+                "SELECT COUNT(*) AS batch_count, MAX(created_at_utc) AS latest "
+                "FROM legacy_migration_batches"
+            ).fetchone()
+        counts = {str(row["disposition"]): int(row["count"]) for row in rows}
+        timestamps = [str(row["latest"]) for row in rows if row["latest"]]
+        if batch is not None and batch["latest"]:
+            timestamps.append(str(batch["latest"]))
+        return {
+            "batch_count": 0 if batch is None else int(batch["batch_count"]),
+            "candidate_count": counts.get("candidate", 0),
+            "quarantined_count": counts.get("quarantined", 0),
+            "last_scan_at_utc": max(timestamps) if timestamps else None,
+        }
+
+    def list_items(
+        self,
+        access_context: AccessContext,
+        item_kinds: Iterable[MemoryItemKind | str],
+        *,
+        statuses: Iterable[MemoryItemStatus | str] = (MemoryItemStatus.ACTIVE,),
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> tuple[tuple[Any, ...], str | None]:
+        """List a bounded SQL-visible page without exposing authority metadata."""
+
+        if not self._context_can_recall(access_context):
+            return (), None
+        kinds = tuple(dict.fromkeys(self._item_kind_value(kind) for kind in item_kinds))
+        if not kinds or len(kinds) > len(_ITEM_CONTRACTS):
+            raise ValueError("item_kinds must be a bounded non-empty set")
+        status_values = tuple(
+            dict.fromkeys(
+                value.value if isinstance(value, MemoryItemStatus) else str(value)
+                for value in statuses
+            )
+        )
+        allowed_statuses = {status.value for status in MemoryItemStatus}
+        if (
+            not status_values
+            or len(status_values) > len(allowed_statuses)
+            or any(value not in allowed_statuses for value in status_values)
+        ):
+            raise ValueError("statuses contain an unsupported memory status")
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if cursor is not None:
+            _require_text(cursor, "cursor")
+
+        kind_slots = ",".join("?" for _ in kinds)
+        status_slots = ",".join("?" for _ in status_values)
+        audiences = _AUDIENCES_BY_CEILING[access_context.audience_ceiling]
+        audience_slots = ",".join("?" for _ in audiences)
+        filters = [
+            f"i.item_kind IN ({kind_slots})",
+            f"i.status IN ({status_slots})",
+            "i.deletion_fenced = 0",
+            "(i.expires_at_utc IS NULL OR i.expires_at_utc > ?)",
+            f"i.audience IN ({audience_slots})",
+            "(i.audience = 'guest' OR "
+            "(i.audience = 'owner_private' AND i.owner_subject_id = ?) OR "
+            "(i.audience IN ('participants', 'explicit_shared') AND EXISTS ("
+            "SELECT 1 FROM memory_acl AS a WHERE a.item_id = i.item_id "
+            "AND a.subject_id = ? AND a.permission IN ('read', 'manage'))))",
+        ]
+        parameters: list[Any] = [
+            *kinds,
+            *status_values,
+            access_context.issued_at_utc,
+            *audiences,
+            access_context.actor_subject_id,
+            access_context.actor_subject_id,
+        ]
+        if cursor is not None:
+            filters.append("i.item_id > ?")
+            parameters.append(cursor)
+        parameters.append(limit + 1)
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT i.item_id, i.item_kind, i.payload_json FROM memory_items AS i WHERE "
+                + " AND ".join(filters)
+                + " ORDER BY i.item_id LIMIT ?",
+                tuple(parameters),
+            ).fetchall()
+        page = rows[:limit]
+        next_cursor = str(page[-1]["item_id"]) if len(rows) > limit and page else None
+        return (
+            tuple(
+                self._decode_item(str(row["item_kind"]), str(row["payload_json"]))
+                for row in page
+            ),
+            next_cursor,
+        )
 
     def get_item(
         self,
@@ -1573,15 +1693,25 @@ class _MemoryWriter:
         if not isinstance(command, ProposeSharedMemory):
             raise TypeError("command must be ProposeSharedMemory")
         context = self._require_shared_actor(command.access_context, command.issued_at_utc)
+        shared_memory_id = "shared-" + hashlib.sha256(
+            f"{context.actor_subject_id}\0{command.idempotency_key}".encode("utf-8")
+        ).hexdigest()[:40]
+        existing = self._shared_memory(shared_memory_id)
+        if existing is not None:
+            if (
+                existing.owner_subject_id == context.actor_subject_id
+                and existing.source_episode_ids == tuple(command.source_episode_ids)
+                and existing.proposed_text == command.proposed_text
+                and existing.participant_subject_ids
+                == tuple(sorted(context.participant_subject_ids))
+            ):
+                return existing
+            raise MemoryStoreConflictError("shared proposal idempotency conflict")
         source_rows = self._live_source_episodes(
             command.source_episode_ids,
             context,
             command.issued_at_utc,
         )
-        shared_memory_id = "shared-" + hashlib.sha256(
-            f"{context.actor_subject_id}\0{command.idempotency_key}".encode("utf-8")
-        ).hexdigest()[:40]
-        existing = self._shared_memory(shared_memory_id)
         source_digest = hashlib.sha256(
             _json(
                 {
@@ -1616,10 +1746,6 @@ class _MemoryWriter:
             created_at_utc=command.issued_at_utc,
             updated_at_utc=command.issued_at_utc,
         )
-        if existing is not None:
-            if existing == proposed:
-                return existing
-            raise MemoryStoreConflictError("shared proposal idempotency conflict")
         self.put_item(proposed)
         for row in source_rows:
             edge_id = "edge-" + hashlib.sha256(
