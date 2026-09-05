@@ -1169,6 +1169,13 @@ class Subject(_WireContract):
             "privacy_class",
             _enum(self.privacy_class, PrivacyClass, "privacy_class"),
         )
+        if self.subject_kind is not SubjectKind.JAVIS and (
+            self.identity_assurance is IdentityAssurance.VERIFIED
+            or self.assurance_ceiling is IdentityAssurance.VERIFIED
+        ):
+            raise _field_error(
+                "identity_assurance", "verified assurance is unavailable for human subjects"
+            )
         if self.credential_reference_hash is not None:
             _hash(self.credential_reference_hash, "credential_reference_hash")
         _id(self.merged_into_subject_id, "merged_into_subject_id", optional=True)

@@ -35,6 +35,14 @@ MEMORY_RUNTIME_ACCESS_SCOPES = frozenset(
         "memory.read",
     }
 )
+RELATIONSHIP_RUNTIME_ACCESS_SCOPES = frozenset(
+    {
+        "identity.manage",
+        "participants.manage",
+        "relationship.manage",
+        "relationship.read",
+    }
+)
 ACTION_RUNTIME_ACCESS_SCOPES = frozenset(
     {
         "action.approve",
@@ -74,7 +82,7 @@ RUNTIME_ACCESS_SCOPES = frozenset(
         "playback",
         "voice.capture",
     }
-) | ACTION_RUNTIME_ACCESS_SCOPES | ENVIRONMENT_RUNTIME_ACCESS_SCOPES | MEMORY_RUNTIME_ACCESS_SCOPES
+) | ACTION_RUNTIME_ACCESS_SCOPES | ENVIRONMENT_RUNTIME_ACCESS_SCOPES | MEMORY_RUNTIME_ACCESS_SCOPES | RELATIONSHIP_RUNTIME_ACCESS_SCOPES
 PACKAGED_ORIGINS = frozenset(
     {
         "tauri://localhost",
@@ -869,6 +877,7 @@ __all__ = [
     "IssuedRuntimeCapability",
     "MEMORY_RUNTIME_ACCESS_SCOPES",
     "PACKAGED_ORIGINS",
+    "RELATIONSHIP_RUNTIME_ACCESS_SCOPES",
     "RUNTIME_ACCESS_SCOPES",
     "RuntimeAccessAuthority",
     "RuntimeAccessDecision",

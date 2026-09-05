@@ -43,6 +43,13 @@ from .extraction import EpisodeExtractor, JournalProjection
 from .projection import TerminalProjector
 from .recall import RecallEngine, empty_recall_bundle
 from .store import MemoryStore
+from .subjects import (
+    BindSession,
+    BootstrapPrimary,
+    CreateKnownPerson,
+    DisableSubject,
+    LockSession,
+)
 
 
 _T = TypeVar("_T")
@@ -127,6 +134,7 @@ class MemoryService:
         recall_cache_capacity: int = 128,
         deletion_stage_hook: Callable[[str, str], None] | None = None,
         runtime_boot_id: str | None = None,
+        javis_identity_id: str | None = None,
     ) -> None:
         if type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError("queue_capacity must be a positive integer")
@@ -167,6 +175,11 @@ class MemoryService:
         self._runtime_boot_id = None if runtime_boot_id is None else str(runtime_boot_id).strip()
         if runtime_boot_id is not None and not self._runtime_boot_id:
             raise ValueError("runtime_boot_id must be bounded text")
+        self._javis_identity_id = (
+            None if javis_identity_id is None else str(javis_identity_id).strip()
+        )
+        if javis_identity_id is not None and not self._javis_identity_id:
+            raise ValueError("javis_identity_id must be bounded text")
         self._prompt_invalidators: list[Callable[[], None]] = []
 
         self._lock = threading.RLock()
@@ -221,6 +234,25 @@ class MemoryService:
                 self._accepting = False
             return self
         return self
+
+    def configure_runtime_identity(
+        self, runtime_boot_id: str, identity_id: str
+    ) -> None:
+        boot = str(runtime_boot_id or "").strip()
+        identity = str(identity_id or "").strip()
+        if not boot:
+            raise ValueError("runtime_boot_id must be bounded text")
+        if not identity:
+            raise ValueError("identity_id must be bounded text")
+        with self._lock:
+            if self._state != "new":
+                raise RuntimeError("runtime identity must be configured before memory starts")
+            if self._runtime_boot_id not in (None, boot):
+                raise RuntimeError("runtime boot is already configured")
+            if self._javis_identity_id not in (None, identity):
+                raise RuntimeError("Javis identity is already configured")
+            self._runtime_boot_id = boot
+            self._javis_identity_id = identity
 
     def status(self) -> dict[str, Any]:
         """Return content-free service diagnostics."""
@@ -281,35 +313,97 @@ class MemoryService:
     def put_session_participant(self, participant: SessionParticipant) -> Future[bool]:
         return self._submit_store_mutation("put_session_participant", participant)
 
-    def bind_primary_session(
-        self,
-        session_id: str,
-        principal: ServerPrincipal,
-    ) -> Future[dict[str, str]]:
-        """Bind one authorized packaged-desktop session on the writer thread."""
+    def bootstrap_primary(
+        self, command: BootstrapPrimary, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, BootstrapPrimary):
+            raise TypeError("command must be BootstrapPrimary")
 
-        if self._runtime_boot_id is None:
-            raise MemoryServiceUnavailable("memory_identity_binding_unavailable")
-        if not isinstance(principal, ServerPrincipal):
-            raise TypeError("principal must be ServerPrincipal")
-
-        def operation(store: MemoryStore, writer_token: object) -> dict[str, str]:
-            binding = MemorySubjectBinder(
-                store,
-                writer_token=writer_token,
-                runtime_boot_id=self._runtime_boot_id,
-            ).bind_primary_user(session_id, principal)
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            result = self._subject_binder(store, writer_token).bootstrap_primary(
+                command, principal
+            )
             return {
-                "session_id": binding.primary_participant.session_id,
+                "schema_version": 1,
+                "command_id": command.command_id,
+                "session_id": command.access_context.session_id,
+                "state": "bound",
+                "replayed": result.replayed,
+            }
+
+        return self._submit_subject_command("bootstrap_primary", operation)
+
+    def create_known_person(
+        self, command: CreateKnownPerson, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, CreateKnownPerson):
+            raise TypeError("command must be CreateKnownPerson")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            self._subject_binder(store, writer_token).create_known_person(
+                command, principal
+            )
+            return {
+                "schema_version": 1,
+                "command_id": command.command_id,
+                "state": "created",
+            }
+
+        return self._submit_subject_command("create_known_person", operation)
+
+    def rebind_primary(
+        self, command: BindSession, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, BindSession):
+            raise TypeError("command must be BindSession")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            self._subject_binder(store, writer_token).rebind_primary(command, principal)
+            return {
+                "schema_version": 1,
+                "command_id": command.command_id,
+                "session_id": command.access_context.session_id,
                 "state": "bound",
             }
 
-        return self._submit_write(
-            "bind_primary_session",
-            operation,
-            priority=MemoryCommandPriority.CRITICAL,
-            critical=True,
-        )
+        return self._submit_subject_command("rebind_primary", operation)
+
+    def lock_session(
+        self, command: LockSession, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, LockSession):
+            raise TypeError("command must be LockSession")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            changed = self._subject_binder(store, writer_token).lock_session(
+                command, principal
+            )
+            self._invalidate_memory_contexts()
+            return {
+                "schema_version": 1,
+                "command_id": command.command_id,
+                "state": "locked",
+                "changed": changed,
+            }
+
+        return self._submit_subject_command("lock_session", operation)
+
+    def disable_subject(
+        self, command: DisableSubject, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, DisableSubject):
+            raise TypeError("command must be DisableSubject")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            self._subject_binder(store, writer_token).disable_subject(command, principal)
+            self._invalidate_memory_contexts()
+            return {
+                "schema_version": 1,
+                "command_id": command.command_id,
+                "state": "disabled",
+            }
+
+        return self._submit_subject_command("disable_subject", operation)
 
     def put_item(
         self,
@@ -504,6 +598,19 @@ class MemoryService:
     def get_subject(self, subject_id: str) -> Future[Subject | None]:
         return self._submit_read("get_subject", None, subject_id)
 
+    def active_primary_subject(self) -> Future[Subject | None]:
+        return self._submit_read("active_primary_subject", None)
+
+    def get_subject_binding(self, binding_id: str) -> Future[Any]:
+        return self._submit_read("get_subject_binding", None, binding_id)
+
+    def active_subject_binding(
+        self, runtime_boot_id: str, client_id_hash: str
+    ) -> Future[Any]:
+        return self._submit_read(
+            "active_subject_binding", None, runtime_boot_id, client_id_hash
+        )
+
     def active_session_participants(
         self, session_id: str
     ) -> Future[tuple[SessionParticipant, ...]]:
@@ -634,6 +741,32 @@ class MemoryService:
             method_name,
             operation,
             priority=priority,
+            critical=True,
+        )
+
+    def _subject_binder(
+        self, store: MemoryStore, writer_token: object
+    ) -> MemorySubjectBinder:
+        if self._runtime_boot_id is None:
+            raise MemoryServiceUnavailable("memory_identity_binding_unavailable")
+        return MemorySubjectBinder(
+            store,
+            writer_token=writer_token,
+            runtime_boot_id=self._runtime_boot_id,
+            javis_identity_id=self._javis_identity_id,
+        )
+
+    def _submit_subject_command(
+        self,
+        name: str,
+        operation: Callable[[MemoryStore, object], _T],
+    ) -> Future[_T]:
+        if self._runtime_boot_id is None:
+            raise MemoryServiceUnavailable("memory_identity_binding_unavailable")
+        return self._submit_write(
+            name,
+            operation,
+            priority=MemoryCommandPriority.CRITICAL,
             critical=True,
         )
 
@@ -777,6 +910,10 @@ class MemoryService:
                 store_status = store.status()
                 resumed = ()
                 if store_status.get("state") == "ready" and not store.read_only:
+                    if self._runtime_boot_id is not None:
+                        binder = self._subject_binder(store, self._writer_token)
+                        binder.ensure_javis_subject()
+                        binder.retire_stale_bindings()
                     resumed = self._deletion_worker(store, self._writer_token).resume_pending()
                 with self._lock:
                     self._store = store

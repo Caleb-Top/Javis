@@ -275,24 +275,6 @@ def create_memory_router(
             )
         except (TypeError, ValueError, RuntimeError) as exc:
             raise _api_error(403, "memory_identity_binding_invalid", "当前会话身份不可用于记忆") from exc
-        if (
-            context.actor_kind is ActorKind.GUEST
-            and principal.binding_source is PrincipalBindingSource.PACKAGED_DESKTOP
-            and "conversation" in principal.capability_scopes
-        ):
-            await _await_result(memory_service.bind_primary_session(session_id, principal))
-            try:
-                context = access_factory.for_session(
-                    session_id,
-                    principal=principal,
-                    purpose=purpose,
-                )
-            except (TypeError, ValueError, RuntimeError) as exc:
-                raise _api_error(
-                    403,
-                    "memory_identity_binding_invalid",
-                    "当前会话身份不可用于记忆",
-                ) from exc
         if context.actor_kind is ActorKind.GUEST:
             raise _api_error(403, "memory_guest_denied", "访客会话不能读取或修改私人记忆")
         return context

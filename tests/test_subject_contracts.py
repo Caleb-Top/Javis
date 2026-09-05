@@ -17,7 +17,13 @@ from core.life.memory.contracts import (
     SubjectBinding,
 )
 from core.life.memory.store import MemoryStore, MemoryStoreConflictError
-from core.life.memory.subjects import BootstrapPrimary, SetGuestPresent
+from core.life.memory.subjects import (
+    BindSession,
+    BootstrapPrimary,
+    CreateKnownPerson,
+    DisableSubject,
+    SetGuestPresent,
+)
 
 
 NOW = "2026-08-20T10:00:00.000Z"
@@ -45,6 +51,19 @@ def access_wire(*scopes: str) -> dict:
         "issued_at_utc": NOW,
         "expires_at_utc": LATEST,
     }
+
+
+def bound_access_wire(*scopes: str) -> dict:
+    wire = access_wire(*scopes)
+    wire.update(
+        {
+            "session_generation": 1,
+            "guest_present": False,
+            "binding_id": "binding-1",
+            "binding_assurance": "desktop_confirmed",
+        }
+    )
+    return wire
 
 
 def subject_wire(subject_id: str, kind: str, *, display_name: str) -> dict:
@@ -282,6 +301,62 @@ def test_subject_commands_require_scopes_and_explicit_confirmation():
     }
     with pytest.raises(ValueError, match="confirmation"):
         SetGuestPresent.from_dict(clear_guest)
+
+
+def test_bound_subject_commands_reject_implicit_or_guest_authority():
+    known_person = {
+        "schema_version": 1,
+        "command_id": "known-person-1",
+        "access_context": bound_access_wire("identity.manage"),
+        "display_name": "Alex",
+        "aliases": ["A. Lee"],
+        "explicit_confirmation": True,
+        "idempotency_key": "known-person-idempotency-1",
+        "issued_at_utc": NOW,
+    }
+    parsed = CreateKnownPerson.from_dict(known_person)
+    assert CreateKnownPerson.from_dict(parsed.to_dict()) == parsed
+
+    guest_context = copy.deepcopy(known_person)
+    guest_context["access_context"] = access_wire("identity.manage")
+    with pytest.raises(ValueError, match="active primary binding"):
+        CreateKnownPerson.from_dict(guest_context)
+
+    unconfirmed = copy.deepcopy(known_person)
+    unconfirmed["explicit_confirmation"] = False
+    with pytest.raises(ValueError, match="explicit"):
+        CreateKnownPerson.from_dict(unconfirmed)
+
+    disable = {
+        "schema_version": 1,
+        "command_id": "disable-subject-1",
+        "access_context": bound_access_wire("identity.manage"),
+        "target_subject_id": "subject-known",
+        "expected_revision": 1,
+        "explicit_confirmation": True,
+        "idempotency_key": "disable-subject-idempotency-1",
+        "issued_at_utc": NOW,
+    }
+    parsed_disable = DisableSubject.from_dict(disable)
+    assert DisableSubject.from_dict(parsed_disable.to_dict()) == parsed_disable
+
+    invalid_revision = copy.deepcopy(disable)
+    invalid_revision["expected_revision"] = 0
+    with pytest.raises(ValueError, match="expected_revision"):
+        DisableSubject.from_dict(invalid_revision)
+
+    bind = {
+        "schema_version": 1,
+        "command_id": "bind-session-1",
+        "access_context": bound_access_wire("participants.manage"),
+        "target_subject_id": "subject-known",
+        "expected_generation": 1,
+        "explicit_confirmation": False,
+        "idempotency_key": "bind-session-idempotency-1",
+        "issued_at_utc": NOW,
+    }
+    with pytest.raises(ValueError, match="explicit"):
+        BindSession.from_dict(bind)
 
 
 def test_store_enforces_single_primary_binding_and_generation_owner(tmp_path: Path):

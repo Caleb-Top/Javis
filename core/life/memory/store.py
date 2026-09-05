@@ -13,6 +13,7 @@ import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -824,6 +825,17 @@ class MemoryStore:
             ).fetchone()
         return None if row is None else Subject.from_dict(json.loads(row["payload_json"]))
 
+    def active_primary_subject(self) -> Subject | None:
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT payload_json FROM subjects "
+                "WHERE subject_kind = 'primary_user' AND status = 'active' "
+                "ORDER BY subject_id LIMIT 2"
+            ).fetchall()
+        if len(rows) > 1:
+            raise MemoryStoreConflictError("multiple active primary subjects")
+        return None if not rows else Subject.from_dict(json.loads(rows[0]["payload_json"]))
+
     def active_session_participants(self, session_id: str) -> tuple[SessionParticipant, ...]:
         _require_text(session_id, "session_id")
         with self._read_connection() as db:
@@ -1242,6 +1254,36 @@ class MemoryStore:
     ) -> bool:
         with self._writer_transaction(writer_token) as writer:
             return writer.put_subject_binding(binding)
+
+    def retire_subject_bindings(
+        self,
+        runtime_boot_id: str,
+        at_utc: str,
+        *,
+        writer_token: object,
+    ) -> int:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.retire_subject_bindings(runtime_boot_id, at_utc)
+
+    def revoke_subject_binding(
+        self,
+        binding_id: str,
+        revoked_at_utc: str,
+        *,
+        writer_token: object,
+    ) -> bool:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.revoke_subject_binding(binding_id, revoked_at_utc)
+
+    def revoke_subject_bindings(
+        self,
+        subject_id: str,
+        revoked_at_utc: str,
+        *,
+        writer_token: object,
+    ) -> int:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.revoke_subject_bindings(subject_id, revoked_at_utc)
 
     def put_session_generation(
         self, state: SessionGenerationState, *, writer_token: object
@@ -1936,6 +1978,70 @@ class _MemoryWriter:
         )
         self._bump_meta(acl=True)
         return True
+
+    def retire_subject_bindings(self, runtime_boot_id: str, at_utc: str) -> int:
+        _require_text(runtime_boot_id, "runtime_boot_id")
+        _require_text(at_utc, "at_utc")
+        rows = self.__db.execute(
+            "SELECT payload_json FROM subject_bindings WHERE status = 'active' "
+            "ORDER BY binding_id"
+        ).fetchall()
+        retired = 0
+        for row in rows:
+            binding = SubjectBinding.from_dict(json.loads(row["payload_json"]))
+            if binding.expires_at_utc <= at_utc:
+                status = BindingStatus.EXPIRED
+                revoked_at = None
+            elif binding.runtime_boot_id != runtime_boot_id:
+                status = BindingStatus.REVOKED
+                revoked_at = at_utc
+            else:
+                continue
+            self.put_subject_binding(
+                replace(
+                    binding,
+                    revision=binding.revision + 1,
+                    status=status,
+                    revoked_at_utc=revoked_at,
+                )
+            )
+            retired += 1
+        return retired
+
+    def revoke_subject_binding(self, binding_id: str, revoked_at_utc: str) -> bool:
+        _require_text(binding_id, "binding_id")
+        _require_text(revoked_at_utc, "revoked_at_utc")
+        row = self.__db.execute(
+            "SELECT payload_json FROM subject_bindings WHERE binding_id = ?",
+            (binding_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        binding = SubjectBinding.from_dict(json.loads(row["payload_json"]))
+        if binding.status is not BindingStatus.ACTIVE:
+            return False
+        return self.put_subject_binding(
+            replace(
+                binding,
+                revision=binding.revision + 1,
+                status=BindingStatus.REVOKED,
+                revoked_at_utc=revoked_at_utc,
+            )
+        )
+
+    def revoke_subject_bindings(self, subject_id: str, revoked_at_utc: str) -> int:
+        _require_text(subject_id, "subject_id")
+        _require_text(revoked_at_utc, "revoked_at_utc")
+        rows = self.__db.execute(
+            "SELECT binding_id FROM subject_bindings "
+            "WHERE subject_id = ? AND status = 'active' ORDER BY binding_id",
+            (subject_id,),
+        ).fetchall()
+        revoked = 0
+        for row in rows:
+            if self.revoke_subject_binding(str(row["binding_id"]), revoked_at_utc):
+                revoked += 1
+        return revoked
 
     def put_session_generation(self, state: SessionGenerationState) -> bool:
         if not isinstance(state, SessionGenerationState):

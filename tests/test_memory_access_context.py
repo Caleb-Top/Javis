@@ -23,9 +23,11 @@ from core.life.memory.contracts import (
     IdentityAssurance,
 )
 from core.life.memory.store import MemoryStore
+from core.life.memory.subjects import BootstrapPrimary
 
 
 NOW = 1_800_000_000.0
+NOW_UTC = "2027-01-15T08:00:00.000Z"
 HASH_A = "a" * 64
 HASH_B = "b" * 64
 
@@ -41,6 +43,8 @@ def principal(
         "memory.manage",
         "memory.migrate",
         "memory.read",
+        "identity.manage",
+        "participants.manage",
     ),
     issued_at: float = NOW - 10,
     expires_at: float = NOW + 300,
@@ -65,6 +69,7 @@ def store_and_binder(tmp_path: Path):
         store,
         writer_token=writer_token,
         runtime_boot_id="boot-1",
+        javis_identity_id="identity-javis-1",
         now=lambda: NOW,
     )
     try:
@@ -80,6 +85,26 @@ def factory(store, *, boot: str = "boot-1") -> AccessContextFactory:
         now=lambda: NOW,
         context_id_factory=lambda: "context-fixed",
     )
+
+
+def bootstrap(store, binder, candidate: ServerPrincipal | None = None):
+    context = factory(store).for_identity_management(
+        "session-1",
+        principal=principal(),
+    )
+    command = BootstrapPrimary.from_dict(
+        {
+            "schema_version": 1,
+            "command_id": "command-bootstrap-primary",
+            "access_context": context.to_dict(),
+            "display_name": "Primary user",
+            "aliases": [],
+            "explicit_confirmation": True,
+            "idempotency_key": "bootstrap-primary-1",
+            "issued_at_utc": NOW_UTC,
+        }
+    )
+    return binder.bootstrap_primary(command, candidate or principal())
 
 
 def test_server_principal_is_frozen_bounded_and_bearer_free():
@@ -116,19 +141,23 @@ def test_packaged_desktop_binding_creates_javis_primary_and_active_session_pair(
 ):
     store, binder = store_and_binder
 
-    binding = binder.bind_primary_user("session-1", principal())
-    repeated = binder.bind_primary_user("session-1", principal())
+    binding = bootstrap(store, binder)
+    repeated = bootstrap(store, binder)
 
-    assert repeated == binding
-    assert binding.primary_subject.credential_reference_hash == HASH_A
+    assert binding.replayed is False
+    assert repeated.replayed is True
+    assert repeated.primary_subject == binding.primary_subject
+    assert repeated.subject_binding == binding.subject_binding
+    assert binding.primary_subject.credential_reference_hash is None
     assert binding.primary_subject.identity_assurance is IdentityAssurance.DESKTOP_CONFIRMED
     assert binding.javis_subject.subject_id == "subject-javis"
+    assert binding.javis_subject.credential_reference_hash is not None
+    assert store.active_subject_binding("boot-1", HASH_A) == binding.subject_binding
     participants = store.active_session_participants("session-1")
     assert {item.subject_id for item in participants} == {
         binding.primary_subject.subject_id,
         "subject-javis",
     }
-    assert len(participants) == 2
 
 
 @pytest.mark.parametrize(
@@ -144,9 +173,9 @@ def test_arbitrary_local_web_surfaces_cannot_bind_primary_user(
     store, binder = store_and_binder
 
     with pytest.raises(AccessBindingError, match=reason):
-        binder.bind_primary_user("session-1", principal(binding_source=source))
+        bootstrap(store, binder, principal(binding_source=source))
 
-    assert store.active_session_participants("session-1") == ()
+    assert store.active_primary_subject() is None
 
 
 @pytest.mark.parametrize(
@@ -161,15 +190,15 @@ def test_arbitrary_local_web_surfaces_cannot_bind_primary_user(
 def test_explicit_binding_rejects_session_boot_expiry_and_scope_mismatch(
     store_and_binder, candidate, reason
 ):
-    _, binder = store_and_binder
+    store, binder = store_and_binder
 
     with pytest.raises(AccessBindingError, match=reason):
-        binder.bind_primary_user("session-1", candidate)
+        bootstrap(store, binder, candidate)
 
 
 def test_bound_primary_session_generates_bounded_server_context(store_and_binder):
     store, binder = store_and_binder
-    binding = binder.bind_primary_user("session-1", principal())
+    binding = bootstrap(store, binder)
 
     context = factory(store).for_session(
         "session-1", principal=principal(), purpose=AccessPurpose.RECALL
@@ -202,7 +231,7 @@ def test_unknown_expired_cross_session_or_nonpackaged_principal_is_guest(
     store_and_binder, candidate
 ):
     store, binder = store_and_binder
-    binder.bind_primary_user("session-1", principal())
+    bootstrap(store, binder)
 
     context = factory(store).for_session("session-1", principal=candidate)
 
@@ -225,7 +254,7 @@ def test_unknown_expired_cross_session_or_nonpackaged_principal_is_guest(
 )
 def test_purpose_requires_its_exact_capability_scope(store_and_binder, purpose, scopes):
     store, binder = store_and_binder
-    binder.bind_primary_user("session-1", principal())
+    bootstrap(store, binder)
 
     context = factory(store).for_session(
         "session-1", principal=principal(scopes=scopes), purpose=purpose
@@ -247,7 +276,7 @@ def test_session_without_active_binding_and_store_failure_both_fail_closed(store
 
 def test_degraded_store_cannot_reuse_stale_primary_binding(store_and_binder):
     store, binder = store_and_binder
-    binder.bind_primary_user("session-1", principal())
+    bootstrap(store, binder)
 
     class DegradedStore:
         def status(self):
@@ -270,14 +299,14 @@ def test_degraded_store_cannot_reuse_stale_primary_binding(store_and_binder):
 
 def test_different_client_hash_cannot_claim_an_existing_primary_binding(store_and_binder):
     store, binder = store_and_binder
-    binder.bind_primary_user("session-1", principal())
+    bootstrap(store, binder)
 
     context = factory(store).for_session(
         "session-1", principal=principal(client_id_hash=HASH_B)
     )
 
     assert context.actor_kind is ActorKind.GUEST
-    assert context.actor_subject_id != "subject-primary-" + HASH_A[:32]
+    assert context.actor_subject_id.startswith("subject-guest-")
 
 
 @pytest.mark.parametrize(
@@ -318,7 +347,7 @@ def test_access_context_factory_has_no_owner_audience_or_subject_override_parame
     store_and_binder,
 ):
     store, binder = store_and_binder
-    binder.bind_primary_user("session-1", principal())
+    bootstrap(store, binder)
 
     with pytest.raises(TypeError):
         factory(store).for_session(
@@ -332,7 +361,7 @@ def test_safe_access_projection_contains_identity_snapshot_but_no_secret(
     store_and_binder,
 ):
     store, binder = store_and_binder
-    binder.bind_primary_user("session-1", principal())
+    bootstrap(store, binder)
     context = factory(store).for_session("session-1", principal=principal())
 
     projection = safe_access_projection(context)
@@ -341,6 +370,8 @@ def test_safe_access_projection_contains_identity_snapshot_but_no_secret(
     assert projection["context_id"] == "context-fixed"
     assert projection["actor_kind"] == "primary_user"
     assert projection["participant_subject_ids"] == list(context.participant_subject_ids)
+    assert projection["guest_present"] is False
+    assert projection["binding_id"] == context.binding_id
     assert "token" not in encoded.casefold()
     assert "nonce" not in encoded.casefold()
     assert "client_instance_id" not in encoded

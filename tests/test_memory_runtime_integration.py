@@ -14,6 +14,7 @@ from core.life.memory.access import (
 )
 from core.life.memory.contracts import AccessPurpose, ActorKind
 from core.life.memory.service import MemoryService
+from core.life.memory.subjects import BootstrapPrimary
 from core.runtime_access import RuntimeAccessAuthority
 
 
@@ -132,9 +133,15 @@ def test_async_close_stops_admission_before_draining_memory(tmp_path: Path):
 
 def test_primary_session_bind_is_idempotent_and_unlocks_only_matching_client(tmp_path: Path):
     session_id = "session-primary-bind"
-    service = MemoryService(tmp_path / "memory", runtime_boot_id=BOOT_ID).start()
+    service = MemoryService(
+        tmp_path / "memory",
+        runtime_boot_id=BOOT_ID,
+        javis_identity_id="identity-runtime-test",
+    ).start()
     authority = RuntimeAccessAuthority(BOOT_ID)
-    issued = authority.issue("desktop-main", ("conversation", "memory.read"))
+    issued = authority.issue(
+        "desktop-main", ("conversation", "identity.manage", "memory.read")
+    )
     principal = _server_principal(
         authority,
         issued.token,
@@ -158,9 +165,27 @@ def test_primary_session_bind_is_idempotent_and_unlocks_only_matching_client(tmp
         )
         assert before.actor_kind is ActorKind.GUEST
 
-        first = service.bind_primary_session(session_id, principal).result(timeout=10)
-        replay = service.bind_primary_session(session_id, principal).result(timeout=10)
-        assert first == replay == {"session_id": session_id, "state": "bound"}
+        bootstrap_context = access_factory.for_identity_management(
+            session_id,
+            principal=principal,
+        )
+        command = BootstrapPrimary.from_dict(
+            {
+                "schema_version": 1,
+                "command_id": "command-runtime-bootstrap",
+                "access_context": bootstrap_context.to_dict(),
+                "display_name": "Primary user",
+                "aliases": [],
+                "explicit_confirmation": True,
+                "idempotency_key": "runtime-bootstrap-1",
+                "issued_at_utc": bootstrap_context.issued_at_utc,
+            }
+        )
+        first = service.bootstrap_primary(command, principal).result(timeout=10)
+        replay = service.bootstrap_primary(command, principal).result(timeout=10)
+        assert first["state"] == replay["state"] == "bound"
+        assert first["replayed"] is False
+        assert replay["replayed"] is True
         assert "subject" not in repr(first)
         assert issued.token not in repr(first)
 
@@ -177,15 +202,29 @@ def test_primary_session_bind_is_idempotent_and_unlocks_only_matching_client(tmp
         assert after.actor_kind is ActorKind.PRIMARY_USER
         assert len(after.participant_subject_ids) == 2
 
-        other = authority.issue("desktop-other", ("conversation", "memory.read"))
+        other = authority.issue(
+            "desktop-other", ("conversation", "identity.manage", "memory.read")
+        )
         conflicting = _server_principal(
             authority,
             other.token,
             session_id=session_id,
             scope="conversation",
         )
-        with pytest.raises(Exception, match="session_primary_conflict"):
-            service.bind_primary_session(session_id, conflicting).result(timeout=10)
+        conflicting_context = access_factory.for_identity_management(
+            session_id,
+            principal=conflicting,
+        )
+        conflicting_command = BootstrapPrimary.from_dict(
+            {
+                **command.to_dict(),
+                "command_id": "command-runtime-bootstrap-other",
+                "access_context": conflicting_context.to_dict(),
+                "idempotency_key": "runtime-bootstrap-other",
+            }
+        )
+        with pytest.raises(Exception, match="primary_already_exists"):
+            service.bootstrap_primary(conflicting_command, conflicting).result(timeout=10)
 
         other_context = access_factory.for_session(
             session_id,

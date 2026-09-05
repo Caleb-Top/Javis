@@ -24,6 +24,7 @@ from core.life.memory.contracts import (
     JournalEntry,
 )
 from core.life.memory.service import MemoryService
+from core.life.memory.subjects import BootstrapPrimary
 from core.runtime_access import RuntimeAccessAuthority, create_http_authorizer
 
 
@@ -36,6 +37,7 @@ ENDED = "2026-08-20T10:05:00.000Z"
 HASH_A = "a" * 64
 ALL_SCOPES = (
     "conversation",
+    "identity.manage",
     "memory.delete",
     "memory.manage",
     "memory.migrate",
@@ -202,16 +204,34 @@ def memory_api(tmp_path: Path):
         conversation_store=conversations,
         reconcile_interval_seconds=60,
         runtime_boot_id=BOOT_ID,
+        javis_identity_id="identity-memory-api",
     ).start()
     authority = RuntimeAccessAuthority(BOOT_ID)
     issued = authority.issue(CLIENT_ID, ALL_SCOPES)
-    binding_principal = _server_principal(authority, issued.token, scope="conversation")
-    service.bind_primary_session(SESSION_ID, binding_principal).result(timeout=10)
-
     access_factory = AccessContextFactory(
         MemoryServiceAccessView(service, timeout=5),
         runtime_boot_id=BOOT_ID,
     )
+    binding_principal = _server_principal(
+        authority, issued.token, scope="identity.manage"
+    )
+    bootstrap_context = access_factory.for_identity_management(
+        SESSION_ID,
+        principal=binding_principal,
+    )
+    bootstrap = BootstrapPrimary.from_dict(
+        {
+            "schema_version": 1,
+            "command_id": "command-memory-api-bootstrap",
+            "access_context": bootstrap_context.to_dict(),
+            "display_name": "Primary user",
+            "aliases": [],
+            "explicit_confirmation": True,
+            "idempotency_key": "memory-api-bootstrap",
+            "issued_at_utc": bootstrap_context.issued_at_utc,
+        }
+    )
+    service.bootstrap_primary(bootstrap, binding_principal).result(timeout=10)
     manage_context = access_factory.for_session(
         SESSION_ID,
         principal=_server_principal(authority, issued.token, scope="memory.manage"),
@@ -461,7 +481,7 @@ def test_capability_scope_guest_and_server_owned_body_fields_fail_closed(memory_
     assert _response_code(auth_first) == "missing_capability"
 
 
-def test_first_packaged_memory_access_binds_the_same_client_session(memory_api):
+def test_explicitly_bound_client_can_open_a_new_session_without_auto_participants(memory_api):
     new_session = "session-memory-first-open"
     response = _request(
         memory_api,
@@ -472,9 +492,7 @@ def test_first_packaged_memory_access_binds_the_same_client_session(memory_api):
 
     assert response.status_code == 200, response.text
     participants = memory_api.service.active_session_participants(new_session).result(timeout=10)
-    assert {participant.subject_id for participant in participants} == set(
-        memory_api.participant_subject_ids
-    )
+    assert participants == ()
     _assert_no_authority_leak(memory_api, response.json())
 
 
@@ -648,7 +666,7 @@ def test_correction_and_both_deletion_modes_report_verified_progress(memory_api)
         _assert_no_authority_leak(memory_api, progress.json())
 
 
-def test_deletion_progress_is_hidden_from_another_packaged_subject(memory_api):
+def test_deletion_progress_is_hidden_from_an_unbound_packaged_client(memory_api):
     submitted = _request(
         memory_api,
         "POST",
@@ -672,6 +690,6 @@ def test_deletion_progress_is_hidden_from_another_packaged_subject(memory_api):
         session_id="session-memory-other",
     )
 
-    assert hidden.status_code == 404
-    assert _response_code(hidden) == "memory_deletion_not_found"
+    assert hidden.status_code == 403
+    assert _response_code(hidden) == "memory_guest_denied"
     _assert_no_authority_leak(memory_api, hidden.json())
