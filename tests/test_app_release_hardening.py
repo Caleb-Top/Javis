@@ -58,8 +58,10 @@ class AppReleaseHardeningTests(unittest.TestCase):
     def test_appdata_logger_rotates_and_redacts(self):
         logger = self.read("src-tauri/src/app_log.rs")
         main = self.read("src-tauri/src/main.rs")
+        runtime_bundle = self.read("src-tauri/src/runtime_bundle.rs")
 
-        self.assertIn("app_data_dir", logger)
+        self.assertIn("canonical_data_root", logger)
+        self.assertIn("app_data_dir", runtime_bundle)
         self.assertIn('.join("logs")', logger)
         self.assertIn('.join("app")', logger)
         self.assertIn("10 * 1024 * 1024", logger)

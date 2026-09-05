@@ -8,7 +8,7 @@ import os
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -1026,8 +1026,12 @@ class GrowthStore:
 
     def _initialize(self) -> None:
         try:
-            with sqlite3.connect(
-                self.path, timeout=self._busy_timeout_ms / 1_000, isolation_level=None
+            with closing(
+                sqlite3.connect(
+                    self.path,
+                    timeout=self._busy_timeout_ms / 1_000,
+                    isolation_level=None,
+                )
             ) as db:
                 db.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
                 db.execute("PRAGMA foreign_keys = ON")

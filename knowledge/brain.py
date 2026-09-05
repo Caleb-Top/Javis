@@ -84,7 +84,11 @@ class Brain:
         self._read_only = bool(read_only)
         self._persistence_enabled = self._brain_dir != LEGACY_BRAIN_DIR and not self._read_only
         self._legacy_read = bool(legacy_read)
-        if not self._persistence_enabled and not _env_flag("JAVIS_TEST_MODE"):
+        if (
+            not self._persistence_enabled
+            and not self._read_only
+            and not _env_flag("JAVIS_TEST_MODE")
+        ):
             raise RuntimeError("JAVIS_DATA_ROOT is required before Brain can persist state")
         self._ensure_dirs()
         self._facts: list[Fact] = []
@@ -124,6 +128,9 @@ class Brain:
             d.mkdir(parents=True, exist_ok=True)
 
     def _load(self):
+        if self._brain_dir == LEGACY_BRAIN_DIR and not self._legacy_read:
+            logger.info("旧 Brain 归档未显式启用，跳过加载")
+            return
         facts_files = sorted(self._facts_dir.glob("*.json"))
         exp_files = sorted(self._experiences_dir.glob("*.json"))
         if self._legacy_read and self._brain_dir != LEGACY_BRAIN_DIR:

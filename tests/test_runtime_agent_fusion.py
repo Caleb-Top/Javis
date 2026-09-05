@@ -24,14 +24,22 @@ class RuntimeAgentFusionTests(unittest.TestCase):
         self.assertNotIn("recorder.record(msg)", source)
 
     def test_runtime_owns_shared_conversation_store_and_hub(self):
-        with tempfile.TemporaryDirectory() as root_text:
+        with (
+            tempfile.TemporaryDirectory() as root_text,
+            tempfile.TemporaryDirectory() as data_text,
+        ):
             root = Path(root_text)
-            runtime = create_runtime(root, startup_side_effects=False)
+            data_root = Path(data_text)
+            runtime = create_runtime(
+                root,
+                startup_side_effects=False,
+                data_root=data_root,
+            )
             try:
                 status = runtime.get_runtime_status()
                 self.assertEqual(
                     runtime.conversation_store.path,
-                    (root / "data" / "conversations" / "conversations.sqlite3").resolve(),
+                    (data_root / "conversations" / "conversations.sqlite3").resolve(),
                 )
                 self.assertIs(runtime.conversation_hub.store, runtime.conversation_store)
                 self.assertEqual(status["conversations"]["sessions"], 0)

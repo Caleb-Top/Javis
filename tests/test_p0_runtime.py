@@ -430,7 +430,7 @@ class P0RuntimeTests(unittest.TestCase):
         self.assertIn("自检", text)
         self.assertEqual(events[-1]["type"], "done")
 
-    def test_active_semantic_memory_candidate_can_sync_into_brain(self):
+    def test_active_semantic_memory_candidate_cannot_write_read_only_brain(self):
         from core.events import EventBus
         from core.runtime import create_runtime
         from memory.activation import ActiveMemoryApplier
@@ -451,8 +451,8 @@ class P0RuntimeTests(unittest.TestCase):
             result = ActiveMemoryApplier(runtime).apply(limit=20)
             runtime.close()
 
-        self.assertEqual(result["semantic"], 1)
-        self.assertTrue(any(
+        self.assertEqual(result["semantic"], 0)
+        self.assertFalse(any(
             fact.content == "User preference: tone = brief"
             and fact.category == "memory.semantic.approved"
             for fact in runtime.brain._facts
@@ -1141,7 +1141,7 @@ class P0RuntimeTests(unittest.TestCase):
         status = runtime.get_runtime_status()
 
         self.assertTrue(status["ok"])
-        self.assertEqual(status["subsystems"], ["demo", "life"])
+        self.assertEqual(status["subsystems"], ["demo", "l7", "life"])
         self.assertGreaterEqual(status["event_count"], 2)
         self.assertIn("runtime.created", status["recent_events"])
         self.assertIn("subsystem.registered", status["recent_events"])
@@ -1796,9 +1796,10 @@ class P0RuntimeTests(unittest.TestCase):
             security_warned = config_api._SECURITY_WARNED
             config_api._SECURITY_WARNED = True
             try:
-                model = config_api.set_api_key("deepseek", "secret")
-                saved = config_path.exists()
-                loaded = config_api.load_config()
+                with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}):
+                    model = config_api.set_api_key("deepseek", "secret")
+                    saved = config_path.exists()
+                    loaded = config_api.load_config()
             finally:
                 config_api.CONFIG_PATH = original_path
                 config_api._SECURITY_WARNED = security_warned
@@ -2025,14 +2026,13 @@ class P0RuntimeTests(unittest.TestCase):
         os.environ.setdefault("DEEPSEEK_API_KEY", "dummy")
         main = importlib.import_module("main")
 
-        with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.read_text", side_effect=OSError("index unavailable")),
-        ):
-            result = asyncio.run(main.api_mem_rename("session-1", {"name": "Renamed"}))
+        from fastapi import HTTPException
 
-        self.assertFalse(result["ok"])
-        self.assertIn("index unavailable", result["error"])
+        with self.assertRaises(HTTPException) as captured:
+            asyncio.run(main.api_mem_rename("session-1", {"name": "Renamed"}))
+
+        self.assertEqual(captured.exception.status_code, 410)
+        self.assertEqual(captured.exception.detail, "legacy_memory_read_only")
 
     def test_skill_manager_exports_main_expected_api(self):
         from core import skill_manager

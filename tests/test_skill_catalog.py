@@ -40,14 +40,22 @@ class SkillCatalogTests(unittest.TestCase):
     def test_runtime_owns_persistent_skill_catalog_under_its_root(self):
         from core.runtime import create_runtime
 
-        with tempfile.TemporaryDirectory() as root_text:
+        with (
+            tempfile.TemporaryDirectory() as root_text,
+            tempfile.TemporaryDirectory() as data_text,
+        ):
             root = Path(root_text)
-            runtime = create_runtime(root, startup_side_effects=False)
+            data_root = Path(data_text)
+            runtime = create_runtime(
+                root,
+                startup_side_effects=False,
+                data_root=data_root,
+            )
             catalog_path = runtime.skill_catalog.path
             shared_bus = runtime.skill_catalog.event_bus
             runtime.close()
 
-        self.assertEqual(catalog_path, (root / "data" / "skills" / "catalog.sqlite3").resolve())
+        self.assertEqual(catalog_path, (data_root / "skills" / "catalog.sqlite3").resolve())
         self.assertIs(shared_bus, runtime.event_bus)
 
     def test_discovers_frontmatter_as_governed_candidates(self):

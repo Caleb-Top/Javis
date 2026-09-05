@@ -19,7 +19,11 @@ class ActiveMemoryApplier:
         store = getattr(self.runtime, "event_store", None)
         brain = getattr(self.runtime, "brain", None)
         candidates = getattr(store, "memory_candidates", None)
-        if not callable(candidates) or brain is None:
+        if (
+            not callable(candidates)
+            or brain is None
+            or bool(getattr(brain, "_read_only", False))
+        ):
             return {"semantic": 0, "procedural": 0}
 
         result = {"semantic": 0, "procedural": 0}

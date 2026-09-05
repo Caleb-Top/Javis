@@ -11,14 +11,22 @@ class AgentRunStoreTests(unittest.TestCase):
     def test_runtime_owns_and_closes_agent_run_store(self):
         from core.runtime import create_runtime
 
-        with tempfile.TemporaryDirectory() as root_text:
+        with (
+            tempfile.TemporaryDirectory() as root_text,
+            tempfile.TemporaryDirectory() as data_text,
+        ):
             root = Path(root_text)
-            runtime = create_runtime(root, startup_side_effects=False)
+            data_root = Path(data_text)
+            runtime = create_runtime(
+                root,
+                startup_side_effects=False,
+                data_root=data_root,
+            )
             store_path = runtime.agent_runs.path
             shared_bus = runtime.agent_runs.event_bus
             runtime.close()
 
-        self.assertEqual(store_path, (root / "data" / "agent_runs" / "runs.sqlite3").resolve())
+        self.assertEqual(store_path, (data_root / "agent_runs" / "runs.sqlite3").resolve())
         self.assertIs(shared_bus, runtime.event_bus)
 
     def test_full_run_graph_persists_across_reopen(self):
