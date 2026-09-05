@@ -12,7 +12,7 @@ import math
 import re
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from datetime import datetime
 from enum import Enum
 from typing import Any, TypeVar
@@ -58,6 +58,7 @@ class Audience(str, Enum):
 class IdentityAssurance(str, Enum):
     GUEST = "guest"
     DESKTOP_CONFIRMED = "desktop_confirmed"
+    OWNER_ATTESTED = "owner_attested"
     VERIFIED = "verified"
 
 
@@ -107,6 +108,8 @@ class ClaimValueType(str, Enum):
     BOOLEAN = "boolean"
     INTEGER = "integer"
     NUMBER = "number"
+    STRING_SET = "string_set"
+    TIME_WINDOW = "time_window"
 
 
 class ClaimSensitivity(str, Enum):
@@ -114,6 +117,7 @@ class ClaimSensitivity(str, Enum):
     PERSONAL = "personal"
     SENSITIVE = "sensitive"
     HIGHLY_SENSITIVE = "highly_sensitive"
+    RESTRICTED = "restricted"
 
 
 class ClaimStatus(str, Enum):
@@ -133,6 +137,18 @@ class RelationshipEventKind(str, Enum):
     COMMITMENT = "commitment"
     CORRECTION = "correction"
     SHARED_CONFIRMATION = "shared_confirmation"
+    BOUNDARY_CONFIRMED = "boundary_confirmed"
+    BOUNDARY_CHANGED = "boundary_changed"
+    BOUNDARY_REVOKED = "boundary_revoked"
+    COMMITMENT_CREATED = "commitment_created"
+    COMMITMENT_FULFILLED = "commitment_fulfilled"
+    COMMITMENT_MISSED = "commitment_missed"
+    COMMITMENT_CANCELLED = "commitment_cancelled"
+    SHARED_MEMORY_CONFIRMED = "shared_memory_confirmed"
+    SHARED_MEMORY_REVOKED = "shared_memory_revoked"
+    CORRECTION_ACKNOWLEDGED = "correction_acknowledged"
+    REPAIR_ACKNOWLEDGED = "repair_acknowledged"
+    MILESTONE_CONFIRMED = "milestone_confirmed"
 
 
 class RelationshipEventStatus(str, Enum):
@@ -149,6 +165,7 @@ class SubjectKind(str, Enum):
     PRIMARY_USER = "primary_user"
     KNOWN_PERSON = "known_person"
     SESSION_GUEST = "session_guest"
+    GUEST = "guest"
 
 
 class SubjectStatus(str, Enum):
@@ -160,6 +177,7 @@ class SubjectStatus(str, Enum):
 
 class ParticipantRole(str, Enum):
     PRIMARY = "primary"
+    OWNER = "owner"
     PARTICIPANT = "participant"
     JAVIS = "javis"
     GUEST = "guest"
@@ -169,6 +187,44 @@ class ParticipantStatus(str, Enum):
     ACTIVE = "active"
     LEFT = "left"
     REVOKED = "revoked"
+    FENCED = "fenced"
+
+
+class BindingSource(str, Enum):
+    DESKTOP_PROFILE = "desktop_profile"
+    OWNER_HANDOFF = "owner_handoff"
+    GUEST_DEFAULT = "guest_default"
+
+
+class BindingStatus(str, Enum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+    CONSUMED = "consumed"
+
+
+class RelationshipDirection(str, Enum):
+    JAVIS_TO_SUBJECT = "javis_to_subject"
+    SUBJECT_TO_JAVIS = "subject_to_javis"
+    MUTUAL = "mutual"
+
+
+class GuidanceVerbosity(str, Enum):
+    BRIEF = "brief"
+    BALANCED = "balanced"
+    DETAILED = "detailed"
+
+
+class GuidanceDirectness(str, Enum):
+    DIRECT = "direct"
+    NEUTRAL = "neutral"
+    GENTLE = "gentle"
+
+
+class GuidanceFormality(str, Enum):
+    CASUAL = "casual"
+    NEUTRAL = "neutral"
+    FORMAL = "formal"
 
 
 class MemoryItemKind(str, Enum):
@@ -388,6 +444,24 @@ def _code_tuple(value: Any, field_name: str, *, maximum: int = 32) -> tuple[str,
     return result
 
 
+def _text_tuple(
+    value: Any,
+    field_name: str,
+    *,
+    maximum: int = 32,
+    max_chars: int = MAX_SUMMARY_CHARS,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > maximum:
+        raise _field_error(field_name, f"must contain at most {maximum} text values")
+    result = tuple(
+        _text(item, f"{field_name}[{index}]", max_chars=max_chars)
+        for index, item in enumerate(value)
+    )
+    if len(set(result)) != len(result):
+        raise _field_error(field_name, "must contain unique values")
+    return result
+
+
 def _enum_tuple(
     value: Any,
     enum_type: type[Enum],
@@ -449,9 +523,15 @@ class _WireContract:
     def from_dict(cls: type[_Contract], data: Mapping[str, Any]) -> _Contract:
         if not isinstance(data, Mapping):
             raise ValueError(f"{cls.__name__}: wire value must be an object")
-        expected = tuple(field.name for field in fields(cls))
+        contract_fields = tuple(fields(cls))
+        expected = tuple(field.name for field in contract_fields)
         actual = set(data)
-        missing = set(expected) - actual
+        required = {
+            field.name
+            for field in contract_fields
+            if field.default is MISSING and field.default_factory is MISSING
+        }
+        missing = required - actual
         if missing:
             raise ValueError(
                 f"{cls.__name__}: missing field(s): {', '.join(sorted(missing))}"
@@ -460,7 +540,7 @@ class _WireContract:
         if unexpected:
             rendered = ", ".join(sorted(repr(item) for item in unexpected))
             raise ValueError(f"{cls.__name__}: unexpected field(s): {rendered}")
-        return cls(**{name: data[name] for name in expected})
+        return cls(**{name: data[name] for name in expected if name in data})
 
     def to_dict(self) -> dict[str, Any]:
         return {field.name: _wire(getattr(self, field.name)) for field in fields(self)}
@@ -533,6 +613,10 @@ class AccessContext(_WireContract):
     acl_epoch: int
     issued_at_utc: str
     expires_at_utc: str
+    session_generation: int = 0
+    guest_present: bool = True
+    binding_id: str | None = None
+    binding_assurance: IdentityAssurance = IdentityAssurance.GUEST
 
     def __post_init__(self) -> None:
         _schema(self.schema_version)
@@ -558,6 +642,14 @@ class AccessContext(_WireContract):
         )
         object.__setattr__(self, "purpose", _enum(self.purpose, AccessPurpose, "purpose"))
         _non_negative_int(self.acl_epoch, "acl_epoch")
+        _non_negative_int(self.session_generation, "session_generation")
+        _boolean(self.guest_present, "guest_present")
+        _id(self.binding_id, "binding_id", optional=True)
+        object.__setattr__(
+            self,
+            "binding_assurance",
+            _enum(self.binding_assurance, IdentityAssurance, "binding_assurance"),
+        )
         issued = _timestamp(self.issued_at_utc, "issued_at_utc")
         expires = _timestamp(self.expires_at_utc, "expires_at_utc")
         if _timestamp_value(expires) <= _timestamp_value(issued):
@@ -763,6 +855,8 @@ class SharedMemory(_WireContract):
     expires_at_utc: str | None
     created_at_utc: str
     updated_at_utc: str
+    confirmation_set_revision: int = 1
+    required_confirmer_subject_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _schema(self.schema_version)
@@ -808,6 +902,22 @@ class SharedMemory(_WireContract):
             raise _field_error("confirmation_receipts", "proposal revisions must match")
         if any(subject not in self.participant_subject_ids for subject in receipt_subjects):
             raise _field_error("confirmation_receipts", "confirmers must be participants")
+        _positive_int(self.confirmation_set_revision, "confirmation_set_revision")
+        object.__setattr__(
+            self,
+            "required_confirmer_subject_ids",
+            _id_tuple(
+                self.required_confirmer_subject_ids,
+                "required_confirmer_subject_ids",
+                maximum=16,
+            ),
+        )
+        if not set(self.required_confirmer_subject_ids).issubset(
+            self.participant_subject_ids
+        ):
+            raise _field_error(
+                "required_confirmer_subject_ids", "must be a participant subset"
+            )
         object.__setattr__(self, "status", _enum(self.status, SharedMemoryStatus, "status"))
         confirmed = _timestamp(self.confirmed_at_utc, "confirmed_at_utc", optional=True)
         revoked = _timestamp(self.revoked_at_utc, "revoked_at_utc", optional=True)
@@ -858,7 +968,7 @@ class UserModelClaim(_WireContract):
     subject_id: str
     predicate: str
     value_type: ClaimValueType
-    value: str | bool | int | float
+    value: str | bool | int | float | tuple[str, ...]
     epistemic_class: ClaimEpistemicClass
     confidence: float
     sensitivity: ClaimSensitivity
@@ -872,6 +982,7 @@ class UserModelClaim(_WireContract):
     expires_at_utc: str | None
     created_at_utc: str
     updated_at_utc: str
+    confirmation_event_id: str | None = None
 
     def __post_init__(self) -> None:
         _schema(self.schema_version)
@@ -891,13 +1002,21 @@ class UserModelClaim(_WireContract):
         elif self.value_type is ClaimValueType.INTEGER:
             if type(self.value) is not int:
                 raise _field_error("value", "must be an integer")
-        else:
+        elif self.value_type is ClaimValueType.NUMBER:
             if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
                 raise _field_error("value", "must be a finite number")
             numeric = float(self.value)
             if not math.isfinite(numeric):
                 raise _field_error("value", "must be a finite number")
             object.__setattr__(self, "value", numeric)
+        elif self.value_type is ClaimValueType.STRING_SET:
+            object.__setattr__(
+                self,
+                "value",
+                _text_tuple(self.value, "value", maximum=32, max_chars=MAX_TITLE_CHARS),
+            )
+        else:
+            _text(self.value, "value", max_chars=256)
         object.__setattr__(
             self,
             "epistemic_class",
@@ -930,6 +1049,11 @@ class UserModelClaim(_WireContract):
             raise _field_error("confirmed_at_utc", "confirmed claim requires confirmation time")
         if self.status is not ClaimStatus.CONFIRMED and confirmed is not None:
             raise _field_error("confirmed_at_utc", "only confirmed claims carry confirmation time")
+        _id(self.confirmation_event_id, "confirmation_event_id", optional=True)
+        if self.status is ClaimStatus.CONFIRMED and self.confirmation_event_id is None:
+            raise _field_error(
+                "confirmation_event_id", "confirmed claim requires confirmation evidence"
+            )
         _validate_revision_and_times(
             self.revision, self.created_at_utc, self.updated_at_utc, self.expires_at_utc
         )
@@ -954,6 +1078,8 @@ class RelationshipEvent(_WireContract):
     expires_at_utc: str | None
     created_at_utc: str
     updated_at_utc: str
+    direction: RelationshipDirection = RelationshipDirection.MUTUAL
+    confidence: float = 1.0
 
     def __post_init__(self) -> None:
         _schema(self.schema_version)
@@ -971,6 +1097,10 @@ class RelationshipEvent(_WireContract):
         object.__setattr__(
             self, "event_kind", _enum(self.event_kind, RelationshipEventKind, "event_kind")
         )
+        object.__setattr__(
+            self, "direction", _enum(self.direction, RelationshipDirection, "direction")
+        )
+        object.__setattr__(self, "confidence", _unit(self.confidence, "confidence"))
         _text(self.summary, "summary", max_chars=MAX_PROPOSED_TEXT_CHARS)
         object.__setattr__(
             self,
@@ -1004,6 +1134,10 @@ class Subject(_WireContract):
     session_scope_id: str | None
     created_at_utc: str
     updated_at_utc: str
+    aliases: tuple[str, ...] = ()
+    created_by_subject_id: str | None = None
+    assurance_ceiling: IdentityAssurance = IdentityAssurance.GUEST
+    privacy_class: PrivacyClass = PrivacyClass.USER_PRIVATE
 
     def __post_init__(self) -> None:
         _schema(self.schema_version)
@@ -1019,11 +1153,27 @@ class Subject(_WireContract):
             "identity_assurance",
             _enum(self.identity_assurance, IdentityAssurance, "identity_assurance"),
         )
+        object.__setattr__(
+            self,
+            "aliases",
+            _text_tuple(self.aliases, "aliases", maximum=16, max_chars=MAX_TITLE_CHARS),
+        )
+        _id(self.created_by_subject_id, "created_by_subject_id", optional=True)
+        object.__setattr__(
+            self,
+            "assurance_ceiling",
+            _enum(self.assurance_ceiling, IdentityAssurance, "assurance_ceiling"),
+        )
+        object.__setattr__(
+            self,
+            "privacy_class",
+            _enum(self.privacy_class, PrivacyClass, "privacy_class"),
+        )
         if self.credential_reference_hash is not None:
             _hash(self.credential_reference_hash, "credential_reference_hash")
         _id(self.merged_into_subject_id, "merged_into_subject_id", optional=True)
         _id(self.session_scope_id, "session_scope_id", optional=True)
-        if self.subject_kind is SubjectKind.SESSION_GUEST:
+        if self.subject_kind in {SubjectKind.SESSION_GUEST, SubjectKind.GUEST}:
             if self.session_scope_id is None or self.identity_assurance is not IdentityAssurance.GUEST:
                 raise _field_error("session_scope_id", "session guest requires guest session binding")
         elif self.session_scope_id is not None:
@@ -1054,12 +1204,18 @@ class SessionParticipant(_WireContract):
     status: ParticipantStatus
     created_at_utc: str
     updated_at_utc: str
+    session_generation: int = 0
+    binding_id: str | None = None
+    lease_expires_at_utc: str | None = None
+    active: bool = False
 
     def __post_init__(self) -> None:
         _schema(self.schema_version)
         for field_name in ("participant_id", "session_id", "subject_id"):
             _id(getattr(self, field_name), field_name)
         _positive_int(self.revision, "revision")
+        _non_negative_int(self.session_generation, "session_generation")
+        _id(self.binding_id, "binding_id", optional=True)
         object.__setattr__(
             self,
             "participant_role",
@@ -1072,10 +1228,18 @@ class SessionParticipant(_WireContract):
         )
         joined = _timestamp(self.joined_at_utc, "joined_at_utc")
         left = _timestamp(self.left_at_utc, "left_at_utc", optional=True)
+        lease_expires = _timestamp(
+            self.lease_expires_at_utc, "lease_expires_at_utc", optional=True
+        )
         if left is not None and _timestamp_value(left) < _timestamp_value(joined):
             raise _field_error("left_at_utc", "must not precede joined_at_utc")
+        if lease_expires is not None and _timestamp_value(lease_expires) <= _timestamp_value(joined):
+            raise _field_error("lease_expires_at_utc", "must follow joined_at_utc")
         _code(self.server_binding_source, "server_binding_source")
         object.__setattr__(self, "status", _enum(self.status, ParticipantStatus, "status"))
+        _boolean(self.active, "active")
+        if self.active and self.status is not ParticipantStatus.ACTIVE:
+            raise _field_error("active", "only active status may be current")
         if self.status is ParticipantStatus.ACTIVE and left is not None:
             raise _field_error("left_at_utc", "active participant cannot have left time")
         if self.status is ParticipantStatus.LEFT and left is None:
@@ -1084,6 +1248,228 @@ class SessionParticipant(_WireContract):
         updated = _timestamp(self.updated_at_utc, "updated_at_utc")
         if _timestamp_value(updated) < _timestamp_value(created):
             raise _field_error("updated_at_utc", "must not precede created_at_utc")
+
+
+@dataclass(frozen=True)
+class SubjectBinding(_WireContract):
+    schema_version: int
+    binding_id: str
+    revision: int
+    subject_id: str
+    runtime_boot_id: str
+    client_id_hash: str
+    assurance: IdentityAssurance
+    binding_source: BindingSource
+    status: BindingStatus
+    issued_at_utc: str
+    expires_at_utc: str
+    revoked_at_utc: str | None
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        for field_name in ("binding_id", "subject_id", "runtime_boot_id"):
+            _id(getattr(self, field_name), field_name)
+        _positive_int(self.revision, "revision")
+        _hash(self.client_id_hash, "client_id_hash")
+        object.__setattr__(
+            self, "assurance", _enum(self.assurance, IdentityAssurance, "assurance")
+        )
+        object.__setattr__(
+            self,
+            "binding_source",
+            _enum(self.binding_source, BindingSource, "binding_source"),
+        )
+        object.__setattr__(self, "status", _enum(self.status, BindingStatus, "status"))
+        issued = _timestamp(self.issued_at_utc, "issued_at_utc")
+        expires = _timestamp(self.expires_at_utc, "expires_at_utc")
+        revoked = _timestamp(self.revoked_at_utc, "revoked_at_utc", optional=True)
+        if _timestamp_value(expires) <= _timestamp_value(issued):
+            raise _field_error("expires_at_utc", "must follow issued_at_utc")
+        if self.status is BindingStatus.ACTIVE and revoked is not None:
+            raise _field_error("revoked_at_utc", "active binding cannot be revoked")
+        if self.status is BindingStatus.REVOKED and revoked is None:
+            raise _field_error("revoked_at_utc", "revoked binding requires a timestamp")
+
+
+@dataclass(frozen=True)
+class HandoffLease(_WireContract):
+    schema_version: int
+    lease_id: str
+    revision: int
+    issuer_subject_id: str
+    target_subject_id: str
+    session_id: str
+    session_generation: int
+    assurance: IdentityAssurance
+    status: BindingStatus
+    issued_at_utc: str
+    expires_at_utc: str
+    consumed_at_utc: str | None
+    revoked_at_utc: str | None
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        for field_name in (
+            "lease_id",
+            "issuer_subject_id",
+            "target_subject_id",
+            "session_id",
+        ):
+            _id(getattr(self, field_name), field_name)
+        if self.issuer_subject_id == self.target_subject_id:
+            raise _field_error("target_subject_id", "handoff target must differ from issuer")
+        _positive_int(self.revision, "revision")
+        _non_negative_int(self.session_generation, "session_generation")
+        object.__setattr__(
+            self, "assurance", _enum(self.assurance, IdentityAssurance, "assurance")
+        )
+        if self.assurance not in {
+            IdentityAssurance.OWNER_ATTESTED,
+            IdentityAssurance.VERIFIED,
+        }:
+            raise _field_error("assurance", "handoff requires owner-attested assurance")
+        object.__setattr__(self, "status", _enum(self.status, BindingStatus, "status"))
+        issued = _timestamp(self.issued_at_utc, "issued_at_utc")
+        expires = _timestamp(self.expires_at_utc, "expires_at_utc")
+        consumed = _timestamp(self.consumed_at_utc, "consumed_at_utc", optional=True)
+        revoked = _timestamp(self.revoked_at_utc, "revoked_at_utc", optional=True)
+        if _timestamp_value(expires) <= _timestamp_value(issued):
+            raise _field_error("expires_at_utc", "must follow issued_at_utc")
+        if consumed is not None and revoked is not None:
+            raise _field_error("status", "lease cannot be both consumed and revoked")
+        if self.status is BindingStatus.ACTIVE and (consumed is not None or revoked is not None):
+            raise _field_error("status", "active lease cannot have a terminal timestamp")
+        if self.status is BindingStatus.CONSUMED and consumed is None:
+            raise _field_error("consumed_at_utc", "consumed lease requires a timestamp")
+        if self.status is BindingStatus.REVOKED and revoked is None:
+            raise _field_error("revoked_at_utc", "revoked lease requires a timestamp")
+
+
+@dataclass(frozen=True)
+class SessionGenerationState(_WireContract):
+    schema_version: int
+    session_id: str
+    generation: int
+    guest_present: bool
+    privacy_fenced: bool
+    owner_subject_id: str | None
+    active_binding_id: str | None
+    revision: int
+    created_at_utc: str
+    updated_at_utc: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        _id(self.session_id, "session_id")
+        _non_negative_int(self.generation, "generation")
+        _boolean(self.guest_present, "guest_present")
+        _boolean(self.privacy_fenced, "privacy_fenced")
+        _id(self.owner_subject_id, "owner_subject_id", optional=True)
+        _id(self.active_binding_id, "active_binding_id", optional=True)
+        _positive_int(self.revision, "revision")
+        created = _timestamp(self.created_at_utc, "created_at_utc")
+        updated = _timestamp(self.updated_at_utc, "updated_at_utc")
+        if _timestamp_value(updated) < _timestamp_value(created):
+            raise _field_error("updated_at_utc", "must not precede created_at_utc")
+        if self.privacy_fenced and (
+            self.owner_subject_id is not None or self.active_binding_id is not None
+        ):
+            raise _field_error(
+                "privacy_fenced", "fenced generation cannot retain owner authority"
+            )
+
+
+@dataclass(frozen=True)
+class RelationshipView(_WireContract):
+    schema_version: int
+    subject_id: str
+    address_name: str | None
+    boundaries: tuple[str, ...]
+    commitments: tuple[str, ...]
+    recent_milestones: tuple[str, ...]
+    shared_memory_ids: tuple[str, ...]
+    unresolved_conflicts: tuple[str, ...]
+    source_event_ids: tuple[str, ...]
+    acl_epoch: int
+    generated_at_utc: str
+    expires_at_utc: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        _id(self.subject_id, "subject_id")
+        _text(self.address_name, "address_name", max_chars=MAX_TITLE_CHARS, optional=True)
+        for field_name in (
+            "boundaries",
+            "commitments",
+            "recent_milestones",
+            "unresolved_conflicts",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _text_tuple(
+                    getattr(self, field_name),
+                    field_name,
+                    maximum=16,
+                    max_chars=MAX_SUMMARY_CHARS,
+                ),
+            )
+        for field_name in ("shared_memory_ids", "source_event_ids"):
+            object.__setattr__(
+                self,
+                field_name,
+                _id_tuple(getattr(self, field_name), field_name, maximum=32),
+            )
+        _non_negative_int(self.acl_epoch, "acl_epoch")
+        generated = _timestamp(self.generated_at_utc, "generated_at_utc")
+        expires = _timestamp(self.expires_at_utc, "expires_at_utc")
+        if _timestamp_value(expires) <= _timestamp_value(generated):
+            raise _field_error("expires_at_utc", "must follow generated_at_utc")
+
+
+@dataclass(frozen=True)
+class CommunicationGuidance(_WireContract):
+    schema_version: int
+    subject_id: str
+    language: str | None
+    address_name: str | None
+    verbosity: GuidanceVerbosity
+    directness: GuidanceDirectness
+    formality: GuidanceFormality
+    ask_before_sensitive_topic: bool
+    speech_rate: float
+    source_claim_ids: tuple[str, ...]
+    acl_epoch: int
+    expires_at_utc: str
+
+    def __post_init__(self) -> None:
+        _schema(self.schema_version)
+        _id(self.subject_id, "subject_id")
+        _code(self.language, "language", optional=True)
+        _text(self.address_name, "address_name", max_chars=MAX_TITLE_CHARS, optional=True)
+        object.__setattr__(
+            self, "verbosity", _enum(self.verbosity, GuidanceVerbosity, "verbosity")
+        )
+        object.__setattr__(
+            self, "directness", _enum(self.directness, GuidanceDirectness, "directness")
+        )
+        object.__setattr__(
+            self, "formality", _enum(self.formality, GuidanceFormality, "formality")
+        )
+        _boolean(self.ask_before_sensitive_topic, "ask_before_sensitive_topic")
+        if isinstance(self.speech_rate, bool) or not isinstance(self.speech_rate, (int, float)):
+            raise _field_error("speech_rate", "must be a finite number in [0.9, 1.1]")
+        rate = float(self.speech_rate)
+        if not math.isfinite(rate) or not 0.9 <= rate <= 1.1:
+            raise _field_error("speech_rate", "must be a finite number in [0.9, 1.1]")
+        object.__setattr__(self, "speech_rate", rate)
+        object.__setattr__(
+            self,
+            "source_claim_ids",
+            _id_tuple(self.source_claim_ids, "source_claim_ids", maximum=32),
+        )
+        _non_negative_int(self.acl_epoch, "acl_epoch")
+        _timestamp(self.expires_at_utc, "expires_at_utc")
 
 
 @dataclass(frozen=True)
@@ -1622,11 +2008,14 @@ __all__ = [
     "AccessPurpose",
     "ActorKind",
     "Audience",
+    "BindingSource",
+    "BindingStatus",
     "ClaimEpistemicClass",
     "ClaimSensitivity",
     "ClaimStatus",
     "ClaimValueType",
     "ConfirmSharedMemory",
+    "CommunicationGuidance",
     "CorrectMemory",
     "CreateJournalEntry",
     "DeletionRequest",
@@ -1640,6 +2029,10 @@ __all__ = [
     "EpistemicLabel",
     "ExperienceEpisode",
     "ForgetMemory",
+    "GuidanceDirectness",
+    "GuidanceFormality",
+    "GuidanceVerbosity",
+    "HandoffLease",
     "IdentityAssurance",
     "JournalEntry",
     "JournalEntryKind",
@@ -1659,17 +2052,21 @@ __all__ = [
     "RecallOwnerLabel",
     "RecallQuery",
     "RejectSharedMemory",
+    "RelationshipDirection",
     "RelationshipEvent",
     "RelationshipEventKind",
     "RelationshipEventStatus",
     "RetentionClass",
     "RevokeSharedMemory",
+    "RelationshipView",
     "SessionParticipant",
+    "SessionGenerationState",
     "SharedConfirmationReceipt",
     "SharedMemory",
     "SharedMemoryStatus",
     "SourceHandling",
     "Subject",
+    "SubjectBinding",
     "SubjectKind",
     "SubjectStatus",
     "TerminalOutcome",

@@ -22,6 +22,7 @@ from core.life.memory.contracts import (
     AccessPurpose,
     ActorKind,
     Audience,
+    BindingStatus,
     ClaimStatus,
     ConfirmSharedMemory,
     CorrectMemory,
@@ -32,6 +33,7 @@ from core.life.memory.contracts import (
     DerivationRelation,
     ExperienceEpisode,
     ForgetMemory,
+    HandoffLease,
     IdentityAssurance,
     JournalEntry,
     MemoryItemKind,
@@ -47,12 +49,14 @@ from core.life.memory.contracts import (
     RelationshipEventStatus,
     RetentionClass,
     RevokeSharedMemory,
+    SessionGenerationState,
     SessionParticipant,
     SharedConfirmationReceipt,
     SharedMemory,
     SharedMemoryStatus,
     SourceHandling,
     Subject,
+    SubjectBinding,
     SubjectKind,
     SubjectStatus,
     UserModelClaim,
@@ -60,7 +64,7 @@ from core.life.memory.contracts import (
 
 
 DATABASE_RELATIVE_PATH = Path("memory") / "autobiographical.sqlite3"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _READ_PERMISSIONS = frozenset({"read", "manage", "delete"})
 _PROJECTION_STATES = frozenset({"pending", "excluded", "not_selected", "projected"})
 _TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -111,6 +115,35 @@ _REQUIRED_V4_TABLES = _REQUIRED_V3_TABLES | {"correction_receipts", "deletion_au
 _REQUIRED_V5_TABLES = _REQUIRED_V4_TABLES | {
     "legacy_memory_candidates",
     "legacy_migration_batches",
+}
+_REQUIRED_V6_TABLES = _REQUIRED_V5_TABLES | {
+    "subject_bindings",
+    "session_generations",
+    "handoff_leases",
+    "claim_decisions",
+    "claim_source_suppressions",
+    "relationship_view_meta",
+    "shared_confirmation_sets",
+}
+_REQUIRED_V6_COLUMNS = {
+    "subjects": {
+        "aliases_json",
+        "created_by_subject_id",
+        "assurance_ceiling",
+        "privacy_class",
+    },
+    "session_participants": {
+        "session_generation",
+        "binding_id",
+        "lease_expires_at_utc",
+        "active",
+    },
+    "user_model_claims": {"claim_status", "confirmation_event_id"},
+    "relationship_events": {"direction", "confidence", "view_eligible"},
+    "shared_memories": {
+        "confirmation_set_revision",
+        "required_confirmer_subject_ids_json",
+    },
 }
 
 
@@ -558,6 +591,134 @@ _MIGRATION_5 = (
     "ON legacy_memory_candidates(migration_id, disposition, candidate_id)",
 )
 
+_MIGRATION_6 = (
+    """
+    CREATE TABLE IF NOT EXISTS subject_bindings (
+        binding_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE CASCADE,
+        runtime_boot_id TEXT NOT NULL,
+        client_id_hash TEXT NOT NULL,
+        assurance TEXT NOT NULL,
+        binding_source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        issued_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        revoked_at_utc TEXT,
+        payload_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS session_generations (
+        session_id TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL CHECK (generation >= 0),
+        guest_present INTEGER NOT NULL DEFAULT 1 CHECK (guest_present IN (0, 1)),
+        privacy_fenced INTEGER NOT NULL DEFAULT 1 CHECK (privacy_fenced IN (0, 1)),
+        owner_subject_id TEXT REFERENCES subjects(subject_id) ON DELETE SET NULL,
+        active_binding_id TEXT REFERENCES subject_bindings(binding_id) ON DELETE SET NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS handoff_leases (
+        lease_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision >= 1),
+        issuer_subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE CASCADE,
+        target_subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL REFERENCES session_generations(session_id) ON DELETE CASCADE,
+        session_generation INTEGER NOT NULL CHECK (session_generation >= 0),
+        assurance TEXT NOT NULL,
+        status TEXT NOT NULL,
+        issued_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        consumed_at_utc TEXT,
+        revoked_at_utc TEXT,
+        payload_json TEXT NOT NULL,
+        CHECK (issuer_subject_id <> target_subject_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS claim_decisions (
+        decision_id TEXT PRIMARY KEY,
+        claim_id TEXT NOT NULL REFERENCES user_model_claims(claim_id) ON DELETE CASCADE,
+        actor_subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE RESTRICT,
+        decision TEXT NOT NULL CHECK (decision IN ('confirm', 'reject')),
+        expected_revision INTEGER NOT NULL CHECK (expected_revision >= 1),
+        decided_at_utc TEXT NOT NULL,
+        UNIQUE (claim_id, actor_subject_id, expected_revision)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS claim_source_suppressions (
+        suppression_id TEXT PRIMARY KEY,
+        subject_id TEXT NOT NULL REFERENCES subjects(subject_id) ON DELETE CASCADE,
+        predicate TEXT NOT NULL,
+        source_evidence_id TEXT NOT NULL,
+        reason_code TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        UNIQUE (subject_id, predicate, source_evidence_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS relationship_view_meta (
+        subject_id TEXT PRIMARY KEY REFERENCES subjects(subject_id) ON DELETE CASCADE,
+        source_revision INTEGER NOT NULL DEFAULT 0 CHECK (source_revision >= 0),
+        acl_epoch INTEGER NOT NULL DEFAULT 0 CHECK (acl_epoch >= 0),
+        invalidated INTEGER NOT NULL DEFAULT 1 CHECK (invalidated IN (0, 1)),
+        updated_at_utc TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS shared_confirmation_sets (
+        shared_memory_id TEXT NOT NULL REFERENCES shared_memories(shared_memory_id) ON DELETE CASCADE,
+        confirmation_set_revision INTEGER NOT NULL CHECK (confirmation_set_revision >= 1),
+        proposal_revision INTEGER NOT NULL CHECK (proposal_revision >= 1),
+        required_subject_ids_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('open', 'confirmed', 'revoked', 'superseded')),
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        PRIMARY KEY (shared_memory_id, confirmation_set_revision)
+    )
+    """,
+    "ALTER TABLE subjects ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE subjects ADD COLUMN created_by_subject_id TEXT REFERENCES subjects(subject_id) ON DELETE SET NULL",
+    "ALTER TABLE subjects ADD COLUMN assurance_ceiling TEXT NOT NULL DEFAULT 'guest'",
+    "ALTER TABLE subjects ADD COLUMN privacy_class TEXT NOT NULL DEFAULT 'user_private'",
+    "ALTER TABLE session_participants ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 0 CHECK (session_generation >= 0)",
+    "ALTER TABLE session_participants ADD COLUMN binding_id TEXT REFERENCES subject_bindings(binding_id) ON DELETE SET NULL",
+    "ALTER TABLE session_participants ADD COLUMN lease_expires_at_utc TEXT",
+    "ALTER TABLE session_participants ADD COLUMN active INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0, 1))",
+    "ALTER TABLE user_model_claims ADD COLUMN claim_status TEXT NOT NULL DEFAULT 'quarantined'",
+    "ALTER TABLE user_model_claims ADD COLUMN confirmation_event_id TEXT",
+    "ALTER TABLE relationship_events ADD COLUMN direction TEXT NOT NULL DEFAULT 'mutual'",
+    "ALTER TABLE relationship_events ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0.0 AND confidence <= 1.0)",
+    "ALTER TABLE relationship_events ADD COLUMN view_eligible INTEGER NOT NULL DEFAULT 0 CHECK (view_eligible IN (0, 1))",
+    "ALTER TABLE shared_memories ADD COLUMN confirmation_set_revision INTEGER NOT NULL DEFAULT 1 CHECK (confirmation_set_revision >= 1)",
+    "ALTER TABLE shared_memories ADD COLUMN required_confirmer_subject_ids_json TEXT NOT NULL DEFAULT '[]'",
+    """
+    INSERT OR IGNORE INTO session_generations (
+        session_id, generation, guest_present, privacy_fenced,
+        owner_subject_id, active_binding_id, revision, created_at_utc, updated_at_utc
+    )
+    SELECT session_id, 0, 1, 1, NULL, NULL, 1,
+           MIN(created_at_utc), MAX(updated_at_utc)
+      FROM session_participants
+     GROUP BY session_id
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_subjects_active_primary ON subjects(subject_kind) WHERE subject_kind = 'primary_user' AND status = 'active'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_subject_bindings_active_client ON subject_bindings(runtime_boot_id, client_id_hash) WHERE status = 'active'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_session_generation_owner ON session_participants(session_id, session_generation) WHERE active = 1 AND participant_role IN ('primary', 'owner')",
+    "CREATE INDEX IF NOT EXISTS idx_subject_bindings_subject_status ON subject_bindings(subject_id, status, expires_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_handoff_leases_session_status ON handoff_leases(session_id, status, expires_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_claim_decisions_claim ON claim_decisions(claim_id, decision)",
+    "CREATE INDEX IF NOT EXISTS idx_claim_suppressions_subject ON claim_source_suppressions(subject_id, predicate)",
+    "CREATE INDEX IF NOT EXISTS idx_relationship_events_subjects ON relationship_events(event_kind, view_eligible, occurred_at_utc)",
+)
+
 
 class MemoryStore:
     """Versioned, single-writer storage rooted below the runtime data root."""
@@ -673,6 +834,59 @@ class MemoryStore:
                 (session_id,),
             ).fetchall()
         return tuple(SessionParticipant.from_dict(json.loads(row["payload_json"])) for row in rows)
+
+    def get_subject_binding(self, binding_id: str) -> SubjectBinding | None:
+        _require_text(binding_id, "binding_id")
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT payload_json FROM subject_bindings WHERE binding_id = ?",
+                (binding_id,),
+            ).fetchone()
+        return None if row is None else SubjectBinding.from_dict(json.loads(row["payload_json"]))
+
+    def active_subject_binding(
+        self, runtime_boot_id: str, client_id_hash: str
+    ) -> SubjectBinding | None:
+        _require_text(runtime_boot_id, "runtime_boot_id")
+        _require_text(client_id_hash, "client_id_hash")
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT payload_json FROM subject_bindings "
+                "WHERE runtime_boot_id = ? AND client_id_hash = ? AND status = 'active'",
+                (runtime_boot_id, client_id_hash),
+            ).fetchone()
+        return None if row is None else SubjectBinding.from_dict(json.loads(row["payload_json"]))
+
+    def get_session_generation(self, session_id: str) -> SessionGenerationState | None:
+        _require_text(session_id, "session_id")
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT * FROM session_generations WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return SessionGenerationState(
+            schema_version=1,
+            session_id=str(row["session_id"]),
+            generation=int(row["generation"]),
+            guest_present=bool(row["guest_present"]),
+            privacy_fenced=bool(row["privacy_fenced"]),
+            owner_subject_id=row["owner_subject_id"],
+            active_binding_id=row["active_binding_id"],
+            revision=int(row["revision"]),
+            created_at_utc=str(row["created_at_utc"]),
+            updated_at_utc=str(row["updated_at_utc"]),
+        )
+
+    def get_handoff_lease(self, lease_id: str) -> HandoffLease | None:
+        _require_text(lease_id, "lease_id")
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT payload_json FROM handoff_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+        return None if row is None else HandoffLease.from_dict(json.loads(row["payload_json"]))
 
     def get_terminal_receipt(
         self, source_store_id: str, session_id: str, request_id: str
@@ -1023,6 +1237,24 @@ class MemoryStore:
         with self._writer_transaction(writer_token) as writer:
             return writer.put_subject(subject)
 
+    def put_subject_binding(
+        self, binding: SubjectBinding, *, writer_token: object
+    ) -> bool:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.put_subject_binding(binding)
+
+    def put_session_generation(
+        self, state: SessionGenerationState, *, writer_token: object
+    ) -> bool:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.put_session_generation(state)
+
+    def put_handoff_lease(
+        self, lease: HandoffLease, *, writer_token: object
+    ) -> bool:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.put_handoff_lease(lease)
+
     def put_session_participant(
         self, participant: SessionParticipant, *, writer_token: object
     ) -> bool:
@@ -1356,6 +1588,10 @@ class MemoryStore:
             if version == 4:
                 self._validate_v4_schema(db)
                 self._apply_migration(db, 5, _MIGRATION_5)
+                version = 5
+            if version == 5:
+                self._validate_v5_schema(db)
+                self._apply_migration(db, 6, _MIGRATION_6)
             self._validate_schema(db)
             mode = str(db.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             if mode != "wal":
@@ -1385,7 +1621,7 @@ class MemoryStore:
         try:
             db.execute("BEGIN IMMEDIATE")
             for statement in statements:
-                db.execute(statement)
+                self._execute_migration_statement(db, statement)
             if version == 1:
                 db.execute(
                     "INSERT INTO memory_meta (singleton, schema_version, updated_at_utc) "
@@ -1411,6 +1647,26 @@ class MemoryStore:
         except Exception:
             db.rollback()
             raise
+
+    @staticmethod
+    def _execute_migration_statement(db: sqlite3.Connection, statement: str) -> None:
+        tokens = statement.strip().split()
+        if (
+            len(tokens) >= 6
+            and tokens[0].casefold() == "alter"
+            and tokens[1].casefold() == "table"
+            and tokens[3].casefold() == "add"
+            and tokens[4].casefold() == "column"
+        ):
+            table_name = tokens[2]
+            column_name = tokens[5]
+            columns = {
+                str(row["name"])
+                for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if column_name in columns:
+                return
+        db.execute(statement)
 
     @staticmethod
     def _validate_v1_schema(db: sqlite3.Connection) -> None:
@@ -1449,11 +1705,20 @@ class MemoryStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
-        MemoryStore._validate_v4_schema(db, SCHEMA_VERSION)
+        MemoryStore._validate_v5_schema(db, SCHEMA_VERSION)
         rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
         names = {str(row["name"]) for row in rows}
-        if _REQUIRED_V5_TABLES - names:
+        if _REQUIRED_V6_TABLES - names:
             raise sqlite3.DatabaseError("required memory schema objects are missing")
+        for table_name, required_columns in _REQUIRED_V6_COLUMNS.items():
+            actual_columns = {
+                str(row["name"])
+                for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if required_columns - actual_columns:
+                raise sqlite3.DatabaseError(
+                    f"required v6 columns are missing from {table_name}"
+                )
         meta = db.execute(
             "SELECT schema_version FROM memory_meta WHERE singleton = 1"
         ).fetchone()
@@ -1477,6 +1742,14 @@ class MemoryStore:
         names = {str(row["name"]) for row in rows}
         if _REQUIRED_V4_TABLES - names:
             raise sqlite3.DatabaseError("required v4 memory schema objects are missing")
+
+    @staticmethod
+    def _validate_v5_schema(db: sqlite3.Connection, expected_version: int = 5) -> None:
+        MemoryStore._validate_v4_schema(db, expected_version)
+        rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+        names = {str(row["name"]) for row in rows}
+        if _REQUIRED_V5_TABLES - names:
+            raise sqlite3.DatabaseError("required v5 memory schema objects are missing")
 
     def _assert_writer(self, writer_token: object) -> None:
         if writer_token is not self._writer_token:
@@ -1546,13 +1819,26 @@ class _MemoryWriter:
                 return False
             if subject.revision <= int(row["revision"]):
                 raise MemoryStoreConflictError("subject revision must advance")
+        if (
+            subject.subject_kind is SubjectKind.PRIMARY_USER
+            and subject.status is SubjectStatus.ACTIVE
+        ):
+            conflict = self.__db.execute(
+                "SELECT subject_id FROM subjects "
+                "WHERE subject_kind = 'primary_user' AND status = 'active' "
+                "AND subject_id <> ?",
+                (subject.subject_id,),
+            ).fetchone()
+            if conflict is not None:
+                raise MemoryStoreConflictError("an active primary subject already exists")
         self.__db.execute(
             """
             INSERT INTO subjects (
                 subject_id, schema_version, revision, subject_kind, display_name, status,
                 identity_assurance, credential_reference_hash, merged_into_subject_id,
-                session_scope_id, created_at_utc, updated_at_utc, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                session_scope_id, created_at_utc, updated_at_utc, payload_json,
+                aliases_json, created_by_subject_id, assurance_ceiling, privacy_class
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(subject_id) DO UPDATE SET
                 schema_version=excluded.schema_version, revision=excluded.revision,
                 subject_kind=excluded.subject_kind, display_name=excluded.display_name,
@@ -1561,7 +1847,10 @@ class _MemoryWriter:
                 merged_into_subject_id=excluded.merged_into_subject_id,
                 session_scope_id=excluded.session_scope_id,
                 created_at_utc=excluded.created_at_utc, updated_at_utc=excluded.updated_at_utc,
-                payload_json=excluded.payload_json
+                payload_json=excluded.payload_json, aliases_json=excluded.aliases_json,
+                created_by_subject_id=excluded.created_by_subject_id,
+                assurance_ceiling=excluded.assurance_ceiling,
+                privacy_class=excluded.privacy_class
             """,
             (
                 subject.subject_id,
@@ -1577,9 +1866,197 @@ class _MemoryWriter:
                 subject.created_at_utc,
                 subject.updated_at_utc,
                 payload,
+                _json(subject.aliases),
+                subject.created_by_subject_id,
+                subject.assurance_ceiling.value,
+                subject.privacy_class.value,
             ),
         )
         self._bump_meta(acl=True)
+        return True
+
+    def put_subject_binding(self, binding: SubjectBinding) -> bool:
+        if not isinstance(binding, SubjectBinding):
+            raise TypeError("binding must be a SubjectBinding contract")
+        payload = _json(binding.to_dict())
+        row = self.__db.execute(
+            "SELECT revision, payload_json FROM subject_bindings WHERE binding_id = ?",
+            (binding.binding_id,),
+        ).fetchone()
+        if row is not None:
+            if row["payload_json"] == payload:
+                return False
+            if binding.revision <= int(row["revision"]):
+                raise MemoryStoreConflictError("binding revision must advance")
+        if binding.status is BindingStatus.ACTIVE:
+            conflict = self.__db.execute(
+                "SELECT binding_id FROM subject_bindings "
+                "WHERE runtime_boot_id = ? AND client_id_hash = ? "
+                "AND status = 'active' AND binding_id <> ?",
+                (binding.runtime_boot_id, binding.client_id_hash, binding.binding_id),
+            ).fetchone()
+            if conflict is not None:
+                raise MemoryStoreConflictError("client already has an active subject binding")
+        self.__db.execute(
+            """
+            INSERT INTO subject_bindings (
+                binding_id, schema_version, revision, subject_id, runtime_boot_id,
+                client_id_hash, assurance, binding_source, status, issued_at_utc,
+                expires_at_utc, revoked_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(binding_id) DO UPDATE SET
+                schema_version=excluded.schema_version,
+                revision=excluded.revision,
+                subject_id=excluded.subject_id,
+                runtime_boot_id=excluded.runtime_boot_id,
+                client_id_hash=excluded.client_id_hash,
+                assurance=excluded.assurance,
+                binding_source=excluded.binding_source,
+                status=excluded.status,
+                issued_at_utc=excluded.issued_at_utc,
+                expires_at_utc=excluded.expires_at_utc,
+                revoked_at_utc=excluded.revoked_at_utc,
+                payload_json=excluded.payload_json
+            """,
+            (
+                binding.binding_id,
+                binding.schema_version,
+                binding.revision,
+                binding.subject_id,
+                binding.runtime_boot_id,
+                binding.client_id_hash,
+                binding.assurance.value,
+                binding.binding_source.value,
+                binding.status.value,
+                binding.issued_at_utc,
+                binding.expires_at_utc,
+                binding.revoked_at_utc,
+                payload,
+            ),
+        )
+        self._bump_meta(acl=True)
+        return True
+
+    def put_session_generation(self, state: SessionGenerationState) -> bool:
+        if not isinstance(state, SessionGenerationState):
+            raise TypeError("state must be a SessionGenerationState contract")
+        row = self.__db.execute(
+            "SELECT * FROM session_generations WHERE session_id = ?",
+            (state.session_id,),
+        ).fetchone()
+        if row is not None:
+            current_generation = int(row["generation"])
+            current_revision = int(row["revision"])
+            if state.generation < current_generation:
+                raise MemoryStoreConflictError("session generation cannot move backwards")
+            if state.revision <= current_revision:
+                current_values = (
+                    int(row["generation"]),
+                    bool(row["guest_present"]),
+                    bool(row["privacy_fenced"]),
+                    row["owner_subject_id"],
+                    row["active_binding_id"],
+                    int(row["revision"]),
+                    str(row["created_at_utc"]),
+                    str(row["updated_at_utc"]),
+                )
+                requested_values = (
+                    state.generation,
+                    state.guest_present,
+                    state.privacy_fenced,
+                    state.owner_subject_id,
+                    state.active_binding_id,
+                    state.revision,
+                    state.created_at_utc,
+                    state.updated_at_utc,
+                )
+                if current_values == requested_values:
+                    return False
+                raise MemoryStoreConflictError("session generation revision must advance")
+        self.__db.execute(
+            """
+            INSERT INTO session_generations (
+                session_id, generation, guest_present, privacy_fenced,
+                owner_subject_id, active_binding_id, revision, created_at_utc, updated_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation=excluded.generation,
+                guest_present=excluded.guest_present,
+                privacy_fenced=excluded.privacy_fenced,
+                owner_subject_id=excluded.owner_subject_id,
+                active_binding_id=excluded.active_binding_id,
+                revision=excluded.revision,
+                created_at_utc=excluded.created_at_utc,
+                updated_at_utc=excluded.updated_at_utc
+            """,
+            (
+                state.session_id,
+                state.generation,
+                int(state.guest_present),
+                int(state.privacy_fenced),
+                state.owner_subject_id,
+                state.active_binding_id,
+                state.revision,
+                state.created_at_utc,
+                state.updated_at_utc,
+            ),
+        )
+        self._bump_meta(acl=True)
+        return True
+
+    def put_handoff_lease(self, lease: HandoffLease) -> bool:
+        if not isinstance(lease, HandoffLease):
+            raise TypeError("lease must be a HandoffLease contract")
+        payload = _json(lease.to_dict())
+        row = self.__db.execute(
+            "SELECT revision, payload_json FROM handoff_leases WHERE lease_id = ?",
+            (lease.lease_id,),
+        ).fetchone()
+        if row is not None:
+            if row["payload_json"] == payload:
+                return False
+            if lease.revision <= int(row["revision"]):
+                raise MemoryStoreConflictError("handoff lease revision must advance")
+        self.__db.execute(
+            """
+            INSERT INTO handoff_leases (
+                lease_id, schema_version, revision, issuer_subject_id,
+                target_subject_id, session_id, session_generation, assurance,
+                status, issued_at_utc, expires_at_utc, consumed_at_utc,
+                revoked_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lease_id) DO UPDATE SET
+                schema_version=excluded.schema_version,
+                revision=excluded.revision,
+                issuer_subject_id=excluded.issuer_subject_id,
+                target_subject_id=excluded.target_subject_id,
+                session_id=excluded.session_id,
+                session_generation=excluded.session_generation,
+                assurance=excluded.assurance,
+                status=excluded.status,
+                issued_at_utc=excluded.issued_at_utc,
+                expires_at_utc=excluded.expires_at_utc,
+                consumed_at_utc=excluded.consumed_at_utc,
+                revoked_at_utc=excluded.revoked_at_utc,
+                payload_json=excluded.payload_json
+            """,
+            (
+                lease.lease_id,
+                lease.schema_version,
+                lease.revision,
+                lease.issuer_subject_id,
+                lease.target_subject_id,
+                lease.session_id,
+                lease.session_generation,
+                lease.assurance.value,
+                lease.status.value,
+                lease.issued_at_utc,
+                lease.expires_at_utc,
+                lease.consumed_at_utc,
+                lease.revoked_at_utc,
+                payload,
+            ),
+        )
         return True
 
     def put_session_participant(self, participant: SessionParticipant) -> bool:
@@ -1595,13 +2072,33 @@ class _MemoryWriter:
                 return False
             if participant.revision <= int(row["revision"]):
                 raise MemoryStoreConflictError("participant revision must advance")
+        if (
+            participant.active
+            and participant.participant_role
+            in {ParticipantRole.PRIMARY, ParticipantRole.OWNER}
+        ):
+            conflict = self.__db.execute(
+                "SELECT participant_id FROM session_participants "
+                "WHERE session_id = ? AND session_generation = ? AND active = 1 "
+                "AND participant_role IN ('primary', 'owner') AND participant_id <> ?",
+                (
+                    participant.session_id,
+                    participant.session_generation,
+                    participant.participant_id,
+                ),
+            ).fetchone()
+            if conflict is not None:
+                raise MemoryStoreConflictError(
+                    "session generation already has an active owner"
+                )
         self.__db.execute(
             """
             INSERT INTO session_participants (
                 participant_id, schema_version, revision, session_id, subject_id,
                 participant_role, identity_assurance, joined_at_utc, left_at_utc,
-                server_binding_source, status, created_at_utc, updated_at_utc, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                server_binding_source, status, created_at_utc, updated_at_utc, payload_json,
+                session_generation, binding_id, lease_expires_at_utc, active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(participant_id) DO UPDATE SET
                 schema_version=excluded.schema_version, revision=excluded.revision,
                 session_id=excluded.session_id, subject_id=excluded.subject_id,
@@ -1610,7 +2107,11 @@ class _MemoryWriter:
                 joined_at_utc=excluded.joined_at_utc, left_at_utc=excluded.left_at_utc,
                 server_binding_source=excluded.server_binding_source, status=excluded.status,
                 created_at_utc=excluded.created_at_utc, updated_at_utc=excluded.updated_at_utc,
-                payload_json=excluded.payload_json
+                payload_json=excluded.payload_json,
+                session_generation=excluded.session_generation,
+                binding_id=excluded.binding_id,
+                lease_expires_at_utc=excluded.lease_expires_at_utc,
+                active=excluded.active
             """,
             (
                 participant.participant_id,
@@ -1627,6 +2128,10 @@ class _MemoryWriter:
                 participant.created_at_utc,
                 participant.updated_at_utc,
                 payload,
+                participant.session_generation,
+                participant.binding_id,
+                participant.lease_expires_at_utc,
+                int(participant.active),
             ),
         )
         self._bump_meta(acl=True)
@@ -3325,8 +3830,9 @@ class _MemoryWriter:
                     shared_memory_id, schema_version, revision, proposal_revision,
                     source_episode_ids_json, proposed_text, participant_subject_ids_json,
                     status, confirmed_at_utc, revoked_at_utc, audience_subject_ids_json,
-                    payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    payload_json, confirmation_set_revision,
+                    required_confirmer_subject_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shared_memory_id) DO UPDATE SET
                     schema_version=excluded.schema_version, revision=excluded.revision,
                     proposal_revision=excluded.proposal_revision,
@@ -3336,7 +3842,9 @@ class _MemoryWriter:
                     status=excluded.status, confirmed_at_utc=excluded.confirmed_at_utc,
                     revoked_at_utc=excluded.revoked_at_utc,
                     audience_subject_ids_json=excluded.audience_subject_ids_json,
-                    payload_json=excluded.payload_json
+                    payload_json=excluded.payload_json,
+                    confirmation_set_revision=excluded.confirmation_set_revision,
+                    required_confirmer_subject_ids_json=excluded.required_confirmer_subject_ids_json
                 """,
                 (
                     item.shared_memory_id, item.schema_version, item.revision,
@@ -3344,6 +3852,37 @@ class _MemoryWriter:
                     _json(item.participant_subject_ids), item.status.value,
                     item.confirmed_at_utc, item.revoked_at_utc,
                     _json(item.audience_subject_ids), payload,
+                    item.confirmation_set_revision,
+                    _json(item.required_confirmer_subject_ids),
+                ),
+            )
+            confirmation_state = {
+                SharedMemoryStatus.PROPOSED: "open",
+                SharedMemoryStatus.CONFIRMED: "confirmed",
+                SharedMemoryStatus.REVOKED: "revoked",
+                SharedMemoryStatus.REJECTED: "superseded",
+                SharedMemoryStatus.DELETION_FENCED: "revoked",
+            }[item.status]
+            self.__db.execute(
+                """
+                INSERT INTO shared_confirmation_sets (
+                    shared_memory_id, confirmation_set_revision, proposal_revision,
+                    required_subject_ids_json, state, created_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(shared_memory_id, confirmation_set_revision) DO UPDATE SET
+                    proposal_revision=excluded.proposal_revision,
+                    required_subject_ids_json=excluded.required_subject_ids_json,
+                    state=excluded.state,
+                    updated_at_utc=excluded.updated_at_utc
+                """,
+                (
+                    item.shared_memory_id,
+                    item.confirmation_set_revision,
+                    item.proposal_revision,
+                    _json(item.required_confirmer_subject_ids),
+                    confirmation_state,
+                    item.created_at_utc,
+                    item.updated_at_utc,
                 ),
             )
         elif isinstance(item, UserModelClaim):
@@ -3353,8 +3892,8 @@ class _MemoryWriter:
                     claim_id, schema_version, revision, subject_id, predicate, value_type,
                     value_json, epistemic_class, sensitivity, source_evidence_ids_json,
                     contradiction_claim_ids_json, supersedes_claim_id, acl_subject_ids_json,
-                    confirmed_at_utc, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confirmed_at_utc, payload_json, claim_status, confirmation_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(claim_id) DO UPDATE SET
                     schema_version=excluded.schema_version, revision=excluded.revision,
                     subject_id=excluded.subject_id, predicate=excluded.predicate,
@@ -3364,7 +3903,9 @@ class _MemoryWriter:
                     contradiction_claim_ids_json=excluded.contradiction_claim_ids_json,
                     supersedes_claim_id=excluded.supersedes_claim_id,
                     acl_subject_ids_json=excluded.acl_subject_ids_json,
-                    confirmed_at_utc=excluded.confirmed_at_utc, payload_json=excluded.payload_json
+                    confirmed_at_utc=excluded.confirmed_at_utc, payload_json=excluded.payload_json,
+                    claim_status=excluded.claim_status,
+                    confirmation_event_id=excluded.confirmation_event_id
                 """,
                 (
                     item.claim_id, item.schema_version, item.revision, item.subject_id,
@@ -3372,7 +3913,8 @@ class _MemoryWriter:
                     item.epistemic_class.value, item.sensitivity.value,
                     _json(item.source_evidence_ids), _json(item.contradiction_claim_ids),
                     item.supersedes_claim_id, _json(item.acl_subject_ids),
-                    item.confirmed_at_utc, payload,
+                    item.confirmed_at_utc, payload, item.status.value,
+                    item.confirmation_event_id,
                 ),
             )
         elif isinstance(item, RelationshipEvent):
@@ -3380,19 +3922,24 @@ class _MemoryWriter:
                 """
                 INSERT INTO relationship_events (
                     relationship_event_id, schema_version, revision, subject_ids_json,
-                    event_kind, summary, source_evidence_ids_json, occurred_at_utc, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    event_kind, summary, source_evidence_ids_json, occurred_at_utc, payload_json,
+                    direction, confidence, view_eligible
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(relationship_event_id) DO UPDATE SET
                     schema_version=excluded.schema_version, revision=excluded.revision,
                     subject_ids_json=excluded.subject_ids_json, event_kind=excluded.event_kind,
                     summary=excluded.summary,
                     source_evidence_ids_json=excluded.source_evidence_ids_json,
-                    occurred_at_utc=excluded.occurred_at_utc, payload_json=excluded.payload_json
+                    occurred_at_utc=excluded.occurred_at_utc, payload_json=excluded.payload_json,
+                    direction=excluded.direction, confidence=excluded.confidence,
+                    view_eligible=excluded.view_eligible
                 """,
                 (
                     item.relationship_event_id, item.schema_version, item.revision,
                     _json(item.subject_ids), item.event_kind.value, item.summary,
                     _json(item.source_evidence_ids), item.occurred_at_utc, payload,
+                    item.direction.value, item.confidence,
+                    int(item.status is RelationshipEventStatus.ACTIVE),
                 ),
             )
         else:

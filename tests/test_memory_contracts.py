@@ -59,6 +59,10 @@ def _access_context(purpose: str = "manage") -> dict:
         "acl_epoch": 3,
         "issued_at_utc": NOW,
         "expires_at_utc": LATER,
+        "session_generation": 0,
+        "guest_present": True,
+        "binding_id": None,
+        "binding_assurance": "guest",
     }
 
 
@@ -141,6 +145,8 @@ SHARED = {
     "expires_at_utc": None,
     "created_at_utc": NOW,
     "updated_at_utc": LATER,
+    "confirmation_set_revision": 1,
+    "required_confirmer_subject_ids": [],
 }
 
 CLAIM = {
@@ -167,6 +173,7 @@ CLAIM = {
     "expires_at_utc": None,
     "created_at_utc": NOW,
     "updated_at_utc": LATER,
+    "confirmation_event_id": None,
 }
 
 RELATIONSHIP = {
@@ -187,6 +194,8 @@ RELATIONSHIP = {
     "expires_at_utc": None,
     "created_at_utc": NOW,
     "updated_at_utc": LATER,
+    "direction": "mutual",
+    "confidence": 1.0,
 }
 
 SUBJECT = {
@@ -202,6 +211,10 @@ SUBJECT = {
     "session_scope_id": None,
     "created_at_utc": NOW,
     "updated_at_utc": LATER,
+    "aliases": [],
+    "created_by_subject_id": None,
+    "assurance_ceiling": "guest",
+    "privacy_class": "user_private",
 }
 
 PARTICIPANT = {
@@ -218,6 +231,10 @@ PARTICIPANT = {
     "status": "active",
     "created_at_utc": NOW,
     "updated_at_utc": LATER,
+    "session_generation": 0,
+    "binding_id": None,
+    "lease_expires_at_utc": None,
+    "active": False,
 }
 
 EDGE = {
