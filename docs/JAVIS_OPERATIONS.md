@@ -327,3 +327,70 @@ Operator rules:
   package.
 - If a gate was not run on the exact installed package, record it as
   `NOT EXECUTED`.
+
+## L2 Governed Memory Operations
+
+L2 autobiographical memory is owned by `MemoryService`; legacy Brain data is a
+read-only archive and must never be used as a write fallback. The commands in
+this section run only against pytest temporary directories below a new
+repository-local test root. They do not inspect, migrate, modify, delete, or
+reindex real Javis user data.
+
+Create an isolated test environment from the repository root:
+
+```powershell
+$SourceRoot = (& git rev-parse --show-toplevel).Trim()
+$Python = Join-Path $SourceRoot 'venv\Scripts\python.exe'
+$RunId = Get-Date -Format 'yyyyMMdd-HHmmss-fffffff'
+$TestRoot = Join-Path $SourceRoot "tmp\l2-release-$RunId"
+New-Item -ItemType Directory -Path $TestRoot | Out-Null
+$env:JAVIS_TEST_MODE = '1'
+$env:PYTHONPATH = $SourceRoot
+$env:TEMP = $TestRoot
+$env:TMP = $TestRoot
+$env:JAVIS_DATA_ROOT = Join-Path $TestRoot 'data'
+if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
+  throw "Repository virtual environment not found: $Python"
+}
+```
+
+Run the Task 13 compatibility and release-source gates:
+
+```powershell
+Set-Location $SourceRoot
+& $Python -m pytest `
+  tests/test_l2_compatibility.py `
+  tests/test_l2_release_contract.py -q
+if ($LASTEXITCODE -ne 0) {
+  throw "L2 release gates failed with exit code $LASTEXITCODE"
+}
+```
+
+The source scans parse Python ASTs and intentionally constrain themselves to
+the governed memory store, authorization boundary, and formal Agent import
+graph. They do not reject words found in docs, tests, user text, legacy archive
+readers, or unrelated modules.
+
+For the complete automated L2 matrix, use the exact file list in
+`docs/superpowers/plans/2026-08-20-javis-l2-autobiographical-memory.md` Task 13.
+Do not replace the explicit list with a PowerShell glob, and do not point
+`JAVIS_DATA_ROOT`, `TEMP`, or `TMP` at production locations.
+
+Manual D-drive acceptance is tracked in
+`docs/verification/JAVIS_L2_D_DRIVE_ACCEPTANCE.md`. Its install, upgrade,
+uninstall, cross-day recall, model switch, SQLite fault, privacy, sharing, and
+deletion rows remain `NOT EXECUTED` until the same final candidate is actually
+exercised and evidence is attached. Automated tests are not permission to mark
+those rows successful.
+
+Operational safety rules:
+
+- Do not open a live memory SQLite file with a writable client.
+- Do not copy, delete, rename, migrate, vacuum, repair, or rebuild real memory
+  data while Javis is running.
+- Do not invoke legacy Brain mutation or index-rebuild endpoints as a recovery
+  mechanism.
+- On memory degradation, preserve the package hash, source commit, content-free
+  runtime status, and redacted logs; keep conversation and cancellation paths
+  available, then reproduce the fault only in an isolated acceptance root.
+- A missing manual artifact is `NOT EXECUTED`, never an inferred success.
