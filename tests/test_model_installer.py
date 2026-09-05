@@ -156,7 +156,10 @@ class ModelInstallerTests(unittest.TestCase):
                 result = model_installer.install_model(self._approved(plan, values))
             self.assertTrue(result["ok"])
             self.assertTrue((target / "local-ai" / "ollama" / "ollama.exe").is_file())
-            self.assertEqual((data_root / "local-ai-root.txt").read_text(encoding="utf-8"), str(target))
+            self.assertEqual(
+                (data_root / "local-ai" / "root.ref").read_text(encoding="utf-8"),
+                str(target),
+            )
             self.assertEqual(result["base_url"], "http://127.0.0.1:11435/v1")
             self.assertTrue(result["configuration_applied"])
             persist_config.assert_called_once_with(

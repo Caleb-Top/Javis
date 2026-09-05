@@ -543,14 +543,17 @@ def _read_plan_token(value: Any) -> dict[str, Any]:
 
 
 def _data_root() -> Path:
-    runtime_root = Path(os.environ.get("JAVIS_DATA_ROOT") or Path(__file__).resolve().parent.parent)
-    if runtime_root.name == "app" and runtime_root.parent.name == "runtime":
-        return runtime_root.parent.parent
-    return runtime_root
+    raw_root = os.environ.get("JAVIS_DATA_ROOT", "").strip()
+    if not raw_root:
+        raise RuntimeError("JAVIS_DATA_ROOT is required for model installation state")
+    runtime_root = Path(raw_root).expanduser()
+    if not runtime_root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    return Path(os.path.abspath(runtime_root))
 
 
 def _pointer_path() -> Path:
-    return _data_root() / "local-ai-root.txt"
+    return _data_root() / "local-ai" / "root.ref"
 
 
 def _normalize_target(value: str) -> Path:

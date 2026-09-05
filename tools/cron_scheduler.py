@@ -9,9 +9,24 @@ from typing import Optional
 
 logger = logging.getLogger("cron")
 
-JOBS_FILE = Path(__file__).parent.parent / "data" / "cron" / "jobs.json"
-HISTORY_FILE = Path(__file__).parent.parent / "data" / "cron" / "history.json"
-LOCK_DIR = Path(__file__).parent.parent / "data" / "cron" / "locks"
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent
+LEGACY_CRON_DIR = _SOURCE_ROOT / "data" / "cron"
+
+
+def _cron_dir() -> Path:
+    raw_root = os.environ.get("JAVIS_DATA_ROOT", "").strip()
+    if not raw_root:
+        return LEGACY_CRON_DIR
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("JAVIS_DATA_ROOT must be absolute")
+    return Path(os.path.abspath(root)) / "actions" / "cron"
+
+
+CRON_DIR = _cron_dir()
+JOBS_FILE = CRON_DIR / "jobs.json"
+HISTORY_FILE = CRON_DIR / "history.json"
+LOCK_DIR = CRON_DIR / "locks"
 
 
 @dataclass
@@ -43,11 +58,17 @@ class CronJob:
 class CronScheduler:
     """Cron 调度器 — 用户可配置 + 文件锁 + 执行历史"""
 
-    def __init__(self, jobs_path: str = None, history_path: str = None):
+    def __init__(self, jobs_path: str = None, history_path: str = None,
+                 lock_dir: str = None):
+        if not jobs_path and not history_path and CRON_DIR == LEGACY_CRON_DIR:
+            raise RuntimeError("JAVIS_DATA_ROOT is required before starting CronScheduler")
         self._jobs_path = Path(jobs_path) if jobs_path else JOBS_FILE
         self._history_path = Path(history_path) if history_path else HISTORY_FILE
+        self._lock_dir = Path(lock_dir) if lock_dir else (
+            LOCK_DIR if CRON_DIR != LEGACY_CRON_DIR else self._jobs_path.parent / "locks"
+        )
         self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
-        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        self._lock_dir.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, CronJob] = {}
         self._lock = threading.Lock()
         self._running_jobs: dict[str, bool] = {}
@@ -136,7 +157,7 @@ class CronScheduler:
 
     def acquire_lock(self, job_id: str) -> bool:
         """获取文件锁 — 防重复执行（跨平台）"""
-        lock_file = LOCK_DIR / f"{job_id}.lock"
+        lock_file = self._lock_dir / f"{job_id}.lock"
         try:
             if sys.platform == "win32":
                 # Windows: 使用 msvcrt 文件锁
@@ -179,7 +200,7 @@ class CronScheduler:
                 os.close(fd)
             except Exception:
                 pass
-        lock_file = LOCK_DIR / f"{job_id}.lock"
+        lock_file = self._lock_dir / f"{job_id}.lock"
         try:
             if lock_file.exists():
                 lock_file.unlink()
@@ -269,9 +290,17 @@ def get_scheduler() -> CronScheduler:
 def register_in_manifest(reg):
     """注册 Cron 调度器工具到 manifest"""
     from core.tool_registry import ToolDef
-    sched = get_scheduler()
 
     async def cron_list():
+        try:
+            sched = get_scheduler()
+        except (RuntimeError, ValueError) as exc:
+            return {
+                "success": True,
+                "state": "unavailable",
+                "reason": str(exc)[:160],
+                "jobs": [],
+            }
         jobs = sched.list_jobs()
         return {
             "success": True,
@@ -286,6 +315,7 @@ def register_in_manifest(reg):
         timeout_seconds: int = 300,
         notify_on_completion: bool = False,
     ):
+        sched = get_scheduler()
         job = sched.add(
             job_id=job_id,
             prompt=prompt,
@@ -296,22 +326,36 @@ def register_in_manifest(reg):
         return {"success": True, "job": job.to_dict()}
 
     async def cron_remove(job_id: str):
+        sched = get_scheduler()
         ok = sched.remove(job_id)
         return {"success": ok, "job_id": job_id}
 
     async def cron_toggle(job_id: str):
+        sched = get_scheduler()
         new_state = sched.toggle(job_id)
         if new_state is None:
             return {"success": False, "error": f"Job not found: {job_id}"}
         return {"success": True, "job_id": job_id, "enabled": new_state}
 
     async def cron_history(job_id: str = "", limit: int = 50):
+        sched = get_scheduler()
         job_id = job_id or None
         history = sched.get_history(job_id, limit)
         return {"success": True, "history": history, "count": len(history)}
 
     async def cron_stats():
-        return {"success": True, **sched.get_stats()}
+        try:
+            return {"success": True, **get_scheduler().get_stats()}
+        except (RuntimeError, ValueError) as exc:
+            return {
+                "success": True,
+                "state": "unavailable",
+                "reason": str(exc)[:160],
+                "total_jobs": 0,
+                "enabled_jobs": 0,
+                "total_runs": 0,
+                "total_failures": 0,
+            }
 
     reg.register_many([
         ToolDef("cron_list", "列出所有定时任务及统计",
