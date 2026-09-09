@@ -22,6 +22,7 @@ from core.life.memory.subjects import (
     BootstrapPrimary,
     CreateKnownPerson,
     DisableSubject,
+    HandoffSession,
     SetGuestPresent,
 )
 
@@ -358,6 +359,25 @@ def test_bound_subject_commands_reject_implicit_or_guest_authority():
     with pytest.raises(ValueError, match="explicit"):
         BindSession.from_dict(bind)
 
+    handoff = {
+        "schema_version": 1,
+        "command_id": "handoff-session-1",
+        "access_context": bound_access_wire("participants.manage"),
+        "target_subject_id": "subject-known",
+        "lease_id": "handoff-lease-1",
+        "expected_generation": 1,
+        "explicit_confirmation": True,
+        "idempotency_key": "handoff-session-idempotency-1",
+        "issued_at_utc": NOW,
+    }
+    parsed_handoff = HandoffSession.from_dict(handoff)
+    assert HandoffSession.from_dict(parsed_handoff.to_dict()) == parsed_handoff
+
+    implicit_handoff = copy.deepcopy(handoff)
+    implicit_handoff["explicit_confirmation"] = False
+    with pytest.raises(ValueError, match="explicit"):
+        HandoffSession.from_dict(implicit_handoff)
+
 
 def test_store_enforces_single_primary_binding_and_generation_owner(tmp_path: Path):
     token = object()
@@ -506,9 +526,10 @@ def test_v5_rows_upgrade_to_guest_fenced_generation_without_elevation(tmp_path: 
             "claim_source_suppressions",
             "relationship_view_meta",
             "shared_confirmation_sets",
+            "session_transition_receipts",
         ):
             db.execute(f"DROP TABLE {table_name}")
-        db.execute("DELETE FROM schema_migrations WHERE version = 6")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (6, 7)")
         db.execute("UPDATE memory_meta SET schema_version = 5")
         db.execute("PRAGMA user_version = 5")
         db.commit()

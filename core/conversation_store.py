@@ -39,6 +39,22 @@ ACCESS_PROJECTION_KEYS = (
     "audience_ceiling",
     "identity_assurance",
     "acl_epoch",
+    "session_generation",
+    "guest_present",
+    "binding_id",
+    "binding_assurance",
+)
+_ACCESS_PROJECTION_REQUIRED_KEYS = frozenset(
+    {
+        "context_id",
+        "actor_subject_id",
+        "actor_kind",
+        "session_id",
+        "participant_subject_ids",
+        "audience_ceiling",
+        "identity_assurance",
+        "acl_epoch",
+    }
 )
 
 
@@ -431,6 +447,60 @@ class ConversationStore:
             ).fetchall()
         rows.reverse()
         return [_message_dict(row) for row in rows]
+
+    def history_for_access(
+        self,
+        access_context: AccessContext,
+        *,
+        limit: int = 80,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(access_context, AccessContext):
+            raise ConversationStoreError("invalid access context")
+        bounded_limit = _limit(limit, maximum=500)
+        with self._lock, closing(self._connect()) as db:
+            rows = db.execute(
+                """
+                SELECT m.*, e.payload_json AS accepted_payload_json
+                FROM conversation_messages AS m
+                JOIN conversation_events AS e
+                  ON e.session_id = m.session_id
+                 AND e.request_id = m.request_id
+                 AND e.type = 'request.accepted'
+                WHERE m.session_id = ?
+                  AND NOT (m.role = 'assistant' AND m.status = 'interrupted')
+                ORDER BY m.id DESC LIMIT ?
+                """,
+                (access_context.session_id, min(2000, bounded_limit * 4)),
+            ).fetchall()
+        visible: list[dict[str, Any]] = []
+        expected_participants = tuple(sorted(access_context.participant_subject_ids))
+        for row in rows:
+            try:
+                accepted_payload = json.loads(str(row["accepted_payload_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            projection = _safe_access_projection(
+                accepted_payload,
+                access_context.session_id,
+            )
+            if projection is None:
+                continue
+            if (
+                projection.get("session_generation", 0)
+                != access_context.session_generation
+                or bool(projection.get("guest_present", True))
+                != access_context.guest_present
+                or projection.get("actor_subject_id")
+                != access_context.actor_subject_id
+                or tuple(sorted(projection.get("participant_subject_ids", ())))
+                != expected_participants
+            ):
+                continue
+            visible.append(_message_dict(row))
+            if len(visible) >= bounded_limit:
+                break
+        visible.reverse()
+        return visible
 
     def append_event(
         self,
@@ -1001,11 +1071,14 @@ def _safe_access_projection(
     except (TypeError, ValueError):
         return None
 
-    required = set(ACCESS_PROJECTION_KEYS) - {"schema_version"}
-    if not required.issubset(candidate):
+    if not _ACCESS_PROJECTION_REQUIRED_KEYS.issubset(candidate):
         return None
     projected = {key: candidate[key] for key in ACCESS_PROJECTION_KEYS if key in candidate}
     projected["schema_version"] = SCHEMA_VERSION
+    projected.setdefault("session_generation", 0)
+    projected.setdefault("guest_present", True)
+    projected.setdefault("binding_id", None)
+    projected.setdefault("binding_assurance", IdentityAssurance.GUEST.value)
     if not _valid_projection_id(projected.get("context_id")):
         return None
     if not _valid_projection_id(projected.get("actor_subject_id")):
@@ -1034,6 +1107,18 @@ def _safe_access_projection(
         return None
     acl_epoch = projected.get("acl_epoch")
     if isinstance(acl_epoch, bool) or not isinstance(acl_epoch, int) or acl_epoch < 0:
+        return None
+    generation = projected.get("session_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        return None
+    if type(projected.get("guest_present")) is not bool:
+        return None
+    binding_id = projected.get("binding_id")
+    if binding_id is not None and not _valid_projection_id(binding_id):
+        return None
+    if projected.get("binding_assurance") not in {
+        item.value for item in IdentityAssurance
+    }:
         return None
     projected["participant_subject_ids"] = list(participants)
     return projected

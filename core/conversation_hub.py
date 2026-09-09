@@ -122,6 +122,7 @@ class ConversationHub:
         self._terminal: dict[str, dict[str, Any]] = {}
         self._subscribers: dict[str, set[asyncio.Queue]] = {}
         self._pending_approvals: dict[str, tuple[str, str, AgentRunRecorder]] = {}
+        self._generation_floors: dict[str, int] = {}
 
     async def attach(
         self,
@@ -169,6 +170,8 @@ class ConversationHub:
         )
 
         async with self._lock:
+            if not self._generation_allowed(normalized):
+                raise ConversationStoreError("stale session generation")
             previous = self._active.get(normalized.session_id)
             should_cancel_previous = bool(
                 previous is not None and not previous.token.cancelled
@@ -266,6 +269,64 @@ class ConversationHub:
             )
             return True
 
+    async def fence_generation(
+        self,
+        session_id: str,
+        generation: int,
+        *,
+        reason: str = "session privacy transition",
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        session = str(session_id or "").strip()
+        if not session or len(session) > 256:
+            raise ConversationStoreError("invalid session_id")
+        if type(generation) is not int or generation < 0:
+            raise ConversationStoreError("invalid session generation")
+        if type(timeout) not in (int, float) or timeout <= 0:
+            raise ValueError("timeout must be positive")
+        completion: asyncio.Future | None = None
+        request_id = ""
+        cancelled = False
+        async with self._lock:
+            self._generation_floors[session] = max(
+                generation, self._generation_floors.get(session, -1)
+            )
+            active = self._active.get(session)
+            if (
+                active is not None
+                and active.request.access_context is not None
+                and active.request.access_context.session_generation <= generation
+            ):
+                request_id = active.request.request_id
+                cancelled = self._request_cancel_locked(active, reason)
+                completion = active.completion
+                if cancelled:
+                    await self._publish(
+                        session,
+                        request_id,
+                        "request.cancellation_pending",
+                        {"reason": str(reason or "session privacy transition")[:160]},
+                    )
+        if completion is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(completion), timeout=float(timeout))
+            except asyncio.TimeoutError as exc:
+                active = self._request_index.get(request_id)
+                if active is not None and active.task is not None:
+                    active.task.cancel()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(active.completion), timeout=min(1.0, float(timeout))
+                        )
+                    except asyncio.TimeoutError:
+                        raise RuntimeError("session_generation_terminal_timeout") from exc
+        return {
+            "session_id": session,
+            "generation": generation,
+            "cancelled": cancelled,
+            "request_id": request_id,
+        }
+
     async def confirm(
         self,
         session_id: str,
@@ -315,6 +376,7 @@ class ConversationHub:
             "known_requests": len(self._request_index),
             "subscribers": sum(len(queues) for queues in self._subscribers.values()),
             "pending_approvals": len(self._pending_approvals),
+            "generation_fences": len(self._generation_floors),
         }
 
     async def shutdown(self) -> None:
@@ -565,9 +627,29 @@ class ConversationHub:
         event_type: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        active = self._request_index.get(request_id) if request_id else None
+        if active is not None and not self._generation_allowed(active.request):
+            if event_type == "request.failed":
+                payload = {
+                    "error": "session generation fenced",
+                    "code": "stale_session_generation",
+                }
+            elif event_type not in {
+                "interaction.interrupted",
+                "request.cancellation_pending",
+                "request.cancelled",
+            }:
+                raise RequestCancelled("session generation fenced")
         event = self.store.append_event(session_id, request_id, event_type, payload)
         self._broadcast_persisted(event)
         return event
+
+    def _generation_allowed(self, request: ConversationRequest) -> bool:
+        context = request.access_context
+        if context is None:
+            return False
+        floor = self._generation_floors.get(request.session_id, -1)
+        return context.session_generation > floor
 
     def _broadcast_persisted(self, event: dict[str, Any]) -> None:
         self._publish_runtime_observation(event)

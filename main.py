@@ -252,7 +252,29 @@ life_session_publisher = LifeSessionPublisher(runtime.life, runtime.conversation
 @asynccontextmanager
 async def _app_lifespan(_app):
     warmup_task = None
-    life_session_publisher.start(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    life_session_publisher.start(loop)
+
+    def fence_conversation(session_id: str, generation: int, reason: str) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            runtime.conversation_hub.fence_generation(
+                session_id,
+                generation,
+                reason=reason,
+            ),
+            loop,
+        )
+        future.result(timeout=7.0)
+
+    runtime.memory_service.register_session_barrier(
+        "conversation", fence_conversation
+    )
+    runtime.memory_service.register_session_barrier(
+        "native_playback",
+        lambda session_id, generation, _reason: native_playback_manager.fence_session(
+            session_id, generation
+        ),
+    )
     if _STARTUP_SIDE_EFFECTS:
         warmup_task = asyncio.create_task(asyncio.to_thread(preload_model))
     try:
@@ -352,10 +374,10 @@ async def api_runtime_access(
     }
 
 
-def _require_runtime_http(request: Request, scope: str) -> None:
+def _require_runtime_http(request: Request, scope: str):
     decision = authorize_runtime_http(request, scope)
     if decision.allowed:
-        return
+        return decision
     status_code = 401 if decision.close_code == 4401 else 403
     raise HTTPException(status_code=status_code, detail=decision.reason_code)
 
@@ -484,7 +506,7 @@ async def api_voice_diagnostics(request: Request):
 
 @app.post("/api/voice/playback/speak")
 async def api_voice_playback_speak(request: Request, data: dict = Body(default={})):
-    _require_runtime_http(request, "playback")
+    decision = _require_runtime_http(request, "playback")
     text = str(data.get("text", "") or "").strip()[:3000]
     if not text:
         return {"ok": False, "error": "text is required", "active": False}
@@ -495,6 +517,31 @@ async def api_voice_playback_speak(request: Request, data: dict = Body(default={
         NativePlaybackManager._validate_stop_id(request_id, "request_id")
     except ValueError as error:
         return {"ok": False, "error": str(error), "active": False}
+    session_generation = 0
+    authorized = getattr(decision, "principal", None)
+    factory = getattr(runtime, "memory_access_factory", None)
+    if authorized is not None and factory is not None:
+        from core.life.memory.access import PrincipalBindingSource, ServerPrincipal
+        from core.life.memory.contracts import AccessPurpose
+
+        try:
+            principal = ServerPrincipal(
+                runtime_boot_id=authorized.runtime_boot_id,
+                session_id=session_id,
+                client_id_hash=authorized.client_id_hash,
+                capability_scopes=authorized.scopes,
+                issued_at_epoch=authorized.issued_at_epoch,
+                expires_at_epoch=authorized.expires_at_epoch,
+                binding_source=PrincipalBindingSource(authorized.binding_source),
+            )
+            context = factory.for_session(
+                session_id,
+                principal=principal,
+                purpose=AccessPurpose.CONVERSATION,
+            )
+            session_generation = context.session_generation
+        except (TypeError, ValueError, RuntimeError):
+            session_generation = 0
     reservation = await asyncio.to_thread(native_playback_manager.reserve)
     from voice.tts import synthesize
 
@@ -521,6 +568,7 @@ async def api_voice_playback_speak(request: Request, data: dict = Body(default={
             reservation,
             session_id=session_id,
             request_id=request_id,
+            session_generation=session_generation,
         )
     except Exception as error:
         return {"ok": False, "error": str(error), "active": False}

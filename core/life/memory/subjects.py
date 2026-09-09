@@ -155,6 +155,7 @@ class HandoffSession(_WireContract):
     target_subject_id: str
     lease_id: str
     expected_generation: int
+    explicit_confirmation: bool
     idempotency_key: str
     issued_at_utc: str
 
@@ -170,8 +171,13 @@ class HandoffSession(_WireContract):
         _id(self.target_subject_id, "target_subject_id")
         _id(self.lease_id, "lease_id")
         _non_negative_int(self.expected_generation, "expected_generation")
+        _boolean(self.explicit_confirmation, "explicit_confirmation")
+        if not self.explicit_confirmation:
+            raise ValueError("explicit_confirmation: session handoff must be explicit")
         if "participants.manage" not in context.capability_scopes:
             raise ValueError("access_context: participants.manage scope is required")
+        if context.actor_kind is not ActorKind.PRIMARY_USER or context.binding_id is None:
+            raise ValueError("access_context: active primary binding is required")
 
 
 @dataclass(frozen=True)

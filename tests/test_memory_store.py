@@ -231,6 +231,7 @@ def test_empty_database_and_reopen_are_idempotent_with_complete_schema(tmp_path:
             "legacy_migration_batches",
             "subject_bindings",
             "session_generations",
+            "session_transition_receipts",
             "handoff_leases",
             "claim_decisions",
             "claim_source_suppressions",
@@ -246,6 +247,7 @@ def test_empty_database_and_reopen_are_idempotent_with_complete_schema(tmp_path:
             (4,),
             (5,),
             (6,),
+            (7,),
         ]
     finally:
         reopened.close()
@@ -266,7 +268,8 @@ def test_v1_database_upgrades_to_latest_and_reopen_does_not_repeat_migration(tmp
         db.execute("DROP TABLE deletion_audits")
         db.execute("DROP TABLE legacy_memory_candidates")
         db.execute("DROP TABLE legacy_migration_batches")
-        db.execute("DELETE FROM schema_migrations WHERE version IN (2, 3, 4, 5, 6)")
+        db.execute("DROP TABLE session_transition_receipts")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (2, 3, 4, 5, 6, 7)")
         db.execute("UPDATE memory_meta SET schema_version = 1")
         db.execute("PRAGMA user_version = 1")
         db.commit()
@@ -287,6 +290,7 @@ def test_v1_database_upgrades_to_latest_and_reopen_does_not_repeat_migration(tmp
         assert raw_rows(path, "SELECT COUNT(*) FROM schema_migrations WHERE version = 4") == [(1,)]
         assert raw_rows(path, "SELECT COUNT(*) FROM schema_migrations WHERE version = 5") == [(1,)]
         assert raw_rows(path, "SELECT COUNT(*) FROM schema_migrations WHERE version = 6") == [(1,)]
+        assert raw_rows(path, "SELECT COUNT(*) FROM schema_migrations WHERE version = 7") == [(1,)]
     finally:
         reopened.close()
 
@@ -304,7 +308,8 @@ def test_v2_database_adds_content_free_shared_decision_receipts(tmp_path: Path):
         db.execute("DROP TABLE deletion_audits")
         db.execute("DROP TABLE legacy_memory_candidates")
         db.execute("DROP TABLE legacy_migration_batches")
-        db.execute("DELETE FROM schema_migrations WHERE version IN (3, 4, 5, 6)")
+        db.execute("DROP TABLE session_transition_receipts")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (3, 4, 5, 6, 7)")
         db.execute("UPDATE memory_meta SET schema_version = 2")
         db.execute("PRAGMA user_version = 2")
         db.commit()
@@ -343,7 +348,8 @@ def test_v3_database_adds_content_free_deletion_audit(tmp_path: Path):
         db.execute("DROP TABLE deletion_audits")
         db.execute("DROP TABLE legacy_memory_candidates")
         db.execute("DROP TABLE legacy_migration_batches")
-        db.execute("DELETE FROM schema_migrations WHERE version IN (4, 5, 6)")
+        db.execute("DROP TABLE session_transition_receipts")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (4, 5, 6, 7)")
         db.execute("UPDATE memory_meta SET schema_version = 3")
         db.execute("PRAGMA user_version = 3")
         db.commit()
@@ -383,7 +389,8 @@ def test_v4_database_adds_legacy_quarantine_tables(tmp_path: Path):
     try:
         db.execute("DROP TABLE legacy_memory_candidates")
         db.execute("DROP TABLE legacy_migration_batches")
-        db.execute("DELETE FROM schema_migrations WHERE version IN (5, 6)")
+        db.execute("DROP TABLE session_transition_receipts")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (5, 6, 7)")
         db.execute("UPDATE memory_meta SET schema_version = 4")
         db.execute("PRAGMA user_version = 4")
         db.commit()

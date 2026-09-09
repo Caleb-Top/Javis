@@ -48,7 +48,9 @@ from .subjects import (
     BootstrapPrimary,
     CreateKnownPerson,
     DisableSubject,
+    HandoffSession,
     LockSession,
+    SetGuestPresent,
 )
 
 
@@ -181,6 +183,7 @@ class MemoryService:
         if javis_identity_id is not None and not self._javis_identity_id:
             raise ValueError("javis_identity_id must be bounded text")
         self._prompt_invalidators: list[Callable[[], None]] = []
+        self._session_barriers: dict[str, Callable[[str, int, str], None]] = {}
 
         self._lock = threading.RLock()
         self._writer_token = object()
@@ -282,10 +285,17 @@ class MemoryService:
                 "acl_epoch": 0,
                 "index_generation": 0,
             }
+            result["privacy_barrier"] = {
+                "state": "unavailable",
+                "fenced_session_count": 0,
+            }
             return result
         try:
             store_status = store.status()
             metadata = store.metadata()
+            fenced_session_count = sum(
+                1 for state in store.session_generations() if state.privacy_fenced
+            )
             result["store"] = {
                 "state": store_status.get("state", "degraded"),
                 "reason_code": store_status.get("reason_code"),
@@ -296,6 +306,10 @@ class MemoryService:
                 "acl_epoch": int(metadata.get("acl_epoch", 0)),
                 "index_generation": int(metadata.get("index_generation", 0)),
             }
+            result["privacy_barrier"] = {
+                "state": "degraded" if fenced_session_count else "ready",
+                "fenced_session_count": fenced_session_count,
+            }
         except Exception:
             result["store"] = {
                 "state": "degraded",
@@ -304,6 +318,10 @@ class MemoryService:
                 "terminal_cursor": 0,
                 "acl_epoch": 0,
                 "index_generation": 0,
+            }
+            result["privacy_barrier"] = {
+                "state": "degraded",
+                "fenced_session_count": 0,
             }
         return result
 
@@ -323,12 +341,14 @@ class MemoryService:
             result = self._subject_binder(store, writer_token).bootstrap_primary(
                 command, principal
             )
+            state = store.get_session_generation(command.access_context.session_id)
             return {
                 "schema_version": 1,
                 "command_id": command.command_id,
                 "session_id": command.access_context.session_id,
                 "state": "bound",
                 "replayed": result.replayed,
+                "generation": 0 if state is None else state.generation,
             }
 
         return self._submit_subject_command("bootstrap_primary", operation)
@@ -359,14 +379,42 @@ class MemoryService:
 
         def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
             self._subject_binder(store, writer_token).rebind_primary(command, principal)
+            state = store.get_session_generation(command.access_context.session_id)
             return {
                 "schema_version": 1,
                 "command_id": command.command_id,
                 "session_id": command.access_context.session_id,
                 "state": "bound",
+                "generation": 0 if state is None else state.generation,
             }
 
         return self._submit_subject_command("rebind_primary", operation)
+
+    def handoff_session(
+        self, command: HandoffSession, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, HandoffSession):
+            raise TypeError("command must be HandoffSession")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            return self._subject_binder(store, writer_token).handoff_session(
+                command, principal
+            )
+
+        return self._submit_subject_command("handoff_session", operation)
+
+    def set_guest_present(
+        self, command: SetGuestPresent, principal: ServerPrincipal
+    ) -> Future[dict[str, Any]]:
+        if not isinstance(command, SetGuestPresent):
+            raise TypeError("command must be SetGuestPresent")
+
+        def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
+            return self._subject_binder(store, writer_token).set_guest_present(
+                command, principal
+            )
+
+        return self._submit_subject_command("set_guest_present", operation)
 
     def lock_session(
         self, command: LockSession, principal: ServerPrincipal
@@ -375,15 +423,15 @@ class MemoryService:
             raise TypeError("command must be LockSession")
 
         def operation(store: MemoryStore, writer_token: object) -> dict[str, Any]:
-            changed = self._subject_binder(store, writer_token).lock_session(
+            result = self._subject_binder(store, writer_token).lock_session(
                 command, principal
             )
-            self._invalidate_memory_contexts()
             return {
                 "schema_version": 1,
                 "command_id": command.command_id,
                 "state": "locked",
-                "changed": changed,
+                "changed": not result.get("replayed", False),
+                "generation": result.get("generation", command.expected_generation + 1),
             }
 
         return self._submit_subject_command("lock_session", operation)
@@ -569,6 +617,19 @@ class MemoryService:
             if invalidator not in self._prompt_invalidators:
                 self._prompt_invalidators.append(invalidator)
 
+    def register_session_barrier(
+        self,
+        name: str,
+        barrier: Callable[[str, int, str], None],
+    ) -> None:
+        normalized = str(name or "").strip()
+        if not normalized or len(normalized) > 64:
+            raise ValueError("barrier name must be bounded text")
+        if not callable(barrier):
+            raise TypeError("barrier must be callable")
+        with self._lock:
+            self._session_barriers[normalized] = barrier
+
     def record_terminal_receipt(self, **values: Any) -> Future[dict[str, Any]]:
         frozen = dict(values)
         return self._submit_store_mutation(
@@ -615,6 +676,33 @@ class MemoryService:
         self, session_id: str
     ) -> Future[tuple[SessionParticipant, ...]]:
         return self._submit_read("active_session_participants", (), session_id)
+
+    def get_session_generation(self, session_id: str) -> Future[Any]:
+        return self._submit_read("get_session_generation", None, session_id)
+
+    def get_session_transition_receipt(self, command_id: str) -> Future[Any]:
+        return self._submit_read("get_session_transition_receipt", None, command_id)
+
+    def session_access_snapshot(
+        self, session_id: str, runtime_boot_id: str, client_id_hash: str
+    ) -> Future[dict[str, Any]]:
+        return self._submit_read(
+            "session_access_snapshot",
+            {},
+            session_id,
+            runtime_boot_id,
+            client_id_hash,
+        )
+
+    def ensure_session(self, session_id: str) -> Future[Any]:
+        session = str(session_id or "").strip()
+        if not session or len(session) > 256:
+            raise ValueError("session_id must be bounded text")
+
+        def operation(store: MemoryStore, writer_token: object) -> Any:
+            return self._subject_binder(store, writer_token).ensure_guest_session(session)
+
+        return self._submit_subject_command("ensure_guest_session", operation)
 
     def get_terminal_receipt(
         self, source_store_id: str, session_id: str, request_id: str
@@ -754,7 +842,22 @@ class MemoryService:
             writer_token=writer_token,
             runtime_boot_id=self._runtime_boot_id,
             javis_identity_id=self._javis_identity_id,
+            privacy_barrier=self._run_session_privacy_barrier,
         )
+
+    def _run_session_privacy_barrier(
+        self, session_id: str, generation: int, reason: str
+    ) -> None:
+        with self._lock:
+            barriers = tuple(self._session_barriers.items())
+        for name, barrier in barriers:
+            try:
+                barrier(session_id, generation, reason)
+            except Exception as exc:
+                with self._lock:
+                    self._last_error_reason = f"privacy_barrier_{name}_failed"[:96]
+                raise
+        self._invalidate_memory_contexts()
 
     def _submit_subject_command(
         self,
@@ -914,6 +1017,7 @@ class MemoryService:
                         binder = self._subject_binder(store, self._writer_token)
                         binder.ensure_javis_subject()
                         binder.retire_stale_bindings()
+                        binder.reset_sessions_to_guest()
                     resumed = self._deletion_worker(store, self._writer_token).resume_pending()
                 with self._lock:
                     self._store = store

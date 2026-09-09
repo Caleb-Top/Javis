@@ -1330,10 +1330,7 @@ class HandoffLease(_WireContract):
         object.__setattr__(
             self, "assurance", _enum(self.assurance, IdentityAssurance, "assurance")
         )
-        if self.assurance not in {
-            IdentityAssurance.OWNER_ATTESTED,
-            IdentityAssurance.VERIFIED,
-        }:
+        if self.assurance is not IdentityAssurance.OWNER_ATTESTED:
             raise _field_error("assurance", "handoff requires owner-attested assurance")
         object.__setattr__(self, "status", _enum(self.status, BindingStatus, "status"))
         issued = _timestamp(self.issued_at_utc, "issued_at_utc")

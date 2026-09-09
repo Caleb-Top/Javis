@@ -30,6 +30,7 @@ class _PlaybackContext:
     generation: int
     session_id: str
     request_id: str
+    session_generation: int
 
 
 class WindowsWavePlayer:
@@ -89,6 +90,7 @@ class NativePlaybackManager:
         self._generation = 0
         self._reservation_consumed = False
         self._playback: _PlaybackContext | None = None
+        self._session_generation_floors: dict[str, int] = {}
         self._started_at = 0.0
         self._duration_ms = 0
 
@@ -122,6 +124,7 @@ class NativePlaybackManager:
         *,
         session_id: str = "",
         request_id: str = "",
+        session_generation: int = 0,
     ) -> dict:
         sample_rate, channels, pcm, duration_ms = self._inspect_wav(audio)
         mono = _pcm16_mono(pcm, channels)
@@ -135,6 +138,7 @@ class NativePlaybackManager:
             reservation,
             session_id=session_id,
             request_id=request_id,
+            session_generation=session_generation,
         )
 
     def reserve(self) -> int:
@@ -156,12 +160,25 @@ class NativePlaybackManager:
         *,
         session_id: str = "",
         request_id: str = "",
+        session_generation: int = 0,
     ) -> dict:
         self._validate_lifecycle_identity(session_id, request_id)
+        if type(session_generation) is not int or session_generation < 0:
+            raise ValueError("invalid session generation")
         if mono is None or sample_rate is None or duration_ms is None:
             sample_rate, channels, pcm, duration_ms = self._inspect_wav(audio)
             mono = _pcm16_mono(pcm, channels)
         with self._lock:
+            if session_id and session_generation <= self._session_generation_floors.get(
+                session_id, -1
+            ):
+                return {
+                    "ok": False,
+                    "active": False,
+                    "cancelled": True,
+                    "native": True,
+                    "reason_code": "stale_session_generation",
+                }
             if reservation is not None and (
                 reservation != self._generation or self._reservation_consumed
             ):
@@ -191,6 +208,7 @@ class NativePlaybackManager:
                 generation=generation,
                 session_id=session_id,
                 request_id=request_id,
+                session_generation=session_generation,
             )
             self._path = path
             self._stop_event = stop_event
@@ -244,6 +262,34 @@ class NativePlaybackManager:
             "aec_reference": True,
             "playback_id": playback.playback_id,
             "generation": playback.generation,
+            "session_generation": playback.session_generation,
+        }
+
+    def fence_session(self, session_id: str, generation: int) -> dict:
+        self._validate_stop_id(session_id, "session_id")
+        if type(generation) is not int or generation < 0:
+            raise ValueError("invalid session generation")
+        with self._lock:
+            self._session_generation_floors[session_id] = max(
+                generation, self._session_generation_floors.get(session_id, -1)
+            )
+            playback = self._playback
+        if (
+            playback is not None
+            and playback.session_id == session_id
+            and playback.session_generation <= generation
+        ):
+            return self._stop_current(
+                outcome=PlaybackOutcome.STOPPED,
+                reason_code="session_generation_fenced",
+                expected=playback,
+            )
+        return {
+            "ok": True,
+            "active": playback is not None,
+            "native": True,
+            "stopped": False,
+            "stale": False,
         }
 
     def _feed_reference(
@@ -302,6 +348,11 @@ class NativePlaybackManager:
                 generation=generation,
                 session_id=session_id,
                 request_id=request_id,
+                session_generation=(
+                    self._playback.session_generation
+                    if self._playback is not None
+                    else 0
+                ),
             )
         return self._stop_current(
             outcome=PlaybackOutcome.STOPPED,
@@ -422,6 +473,11 @@ class NativePlaybackManager:
                 ),
                 "request_id": (
                     self._playback.request_id if self._playback is not None else None
+                ),
+                "session_generation": (
+                    self._playback.session_generation
+                    if self._playback is not None
+                    else None
                 ),
                 "raw_microphone_audio_persisted": False,
             }

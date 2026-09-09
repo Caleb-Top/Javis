@@ -57,7 +57,6 @@ class ConversationWebSocketGateway:
         self.authorize = authorize
         self.voice_turn_registry = voice_turn_registry
         self.presence_responder = presence_responder or PresenceResponder()
-        self._bound_memory_sessions: set[tuple[str, str]] = set()
 
     async def serve(self, ws) -> None:
         if self.authorize is not None:
@@ -312,12 +311,6 @@ class ConversationWebSocketGateway:
                 "invalid_presence_invocation", str(exc)[:200]
             ) from exc
 
-        if (
-            presence_decision.execution_lane != DETERMINISTIC_LOCAL_LANE
-            and str(command.payload.get("interaction_mode") or "") != "live"
-        ):
-            await self._bind_memory_session(command)
-
         request = ConversationRequest(
             session_id=command.session_id,
             request_id=command.request_id,
@@ -370,12 +363,20 @@ class ConversationWebSocketGateway:
                 select_route = getattr(llm, "use_route", None)
                 if callable(select_route):
                     select_route(active_request.interaction_mode)
-            history = [
-                card
-                for card in self.runtime.conversation_store.history(
+            history_reader = getattr(
+                self.runtime.conversation_store, "history_for_access", None
+            )
+            raw_history = (
+                history_reader(active_request.access_context, limit=80)
+                if callable(history_reader)
+                else self.runtime.conversation_store.history(
                     active_request.session_id,
                     limit=80,
                 )
+            )
+            history = [
+                card
+                for card in raw_history
                 if card.get("request_id") != active_request.request_id
             ]
             chat_kwargs = {
@@ -413,30 +414,6 @@ class ConversationWebSocketGateway:
                     request_id=command.request_id,
                 )
         return result
-
-    async def _bind_memory_session(self, command: ClientCommand) -> None:
-        principal = command.server_principal
-        if not isinstance(principal, ServerPrincipal):
-            return
-        key = (command.session_id, principal.client_id_hash)
-        if key in self._bound_memory_sessions:
-            return
-        service = getattr(self.runtime, "memory_service", None)
-        bind = getattr(service, "bind_primary_session", None)
-        if not callable(bind):
-            return
-        try:
-            result = bind(command.session_id, principal)
-            if inspect.isawaitable(result):
-                await result
-            else:
-                await asyncio.wrap_future(result)
-        except Exception as exc:
-            logger.warning("Memory identity binding degraded: %s", str(exc)[:120])
-            return
-        if len(self._bound_memory_sessions) >= 128:
-            self._bound_memory_sessions.pop()
-        self._bound_memory_sessions.add(key)
 
     @staticmethod
     def _attach_server_principal(ws, command: ClientCommand) -> ClientCommand:

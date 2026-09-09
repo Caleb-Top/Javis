@@ -65,7 +65,7 @@ from core.life.memory.contracts import (
 
 
 DATABASE_RELATIVE_PATH = Path("memory") / "autobiographical.sqlite3"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _READ_PERMISSIONS = frozenset({"read", "manage", "delete"})
 _PROJECTION_STATES = frozenset({"pending", "excluded", "not_selected", "projected"})
 _TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -126,6 +126,7 @@ _REQUIRED_V6_TABLES = _REQUIRED_V5_TABLES | {
     "relationship_view_meta",
     "shared_confirmation_sets",
 }
+_REQUIRED_V7_TABLES = _REQUIRED_V6_TABLES | {"session_transition_receipts"}
 _REQUIRED_V6_COLUMNS = {
     "subjects": {
         "aliases_json",
@@ -174,6 +175,25 @@ def _utc_now() -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _transition_receipt_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    result = json.loads(str(row["result_json"]))
+    if not isinstance(result, dict):
+        raise MemoryStoreError("session transition result is invalid")
+    return {
+        "command_id": str(row["command_id"]),
+        "session_id": str(row["session_id"]),
+        "command_kind": str(row["command_kind"]),
+        "idempotency_key_hash": str(row["idempotency_key_hash"]),
+        "payload_digest": str(row["payload_digest"]),
+        "expected_generation": int(row["expected_generation"]),
+        "next_generation": int(row["next_generation"]),
+        "state": str(row["state"]),
+        "result": result,
+        "created_at_utc": str(row["created_at_utc"]),
+        "updated_at_utc": str(row["updated_at_utc"]),
+    }
 
 
 def _enum_value(value: Any) -> Any:
@@ -720,6 +740,27 @@ _MIGRATION_6 = (
     "CREATE INDEX IF NOT EXISTS idx_relationship_events_subjects ON relationship_events(event_kind, view_eligible, occurred_at_utc)",
 )
 
+_MIGRATION_7 = (
+    """
+    CREATE TABLE IF NOT EXISTS session_transition_receipts (
+        command_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        command_kind TEXT NOT NULL,
+        idempotency_key_hash TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        expected_generation INTEGER NOT NULL CHECK (expected_generation >= 0),
+        next_generation INTEGER NOT NULL CHECK (next_generation >= 1),
+        state TEXT NOT NULL CHECK (state IN ('fenced', 'completed')),
+        result_json TEXT NOT NULL,
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        UNIQUE (session_id, idempotency_key_hash)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_session_transition_state "
+    "ON session_transition_receipts(session_id, state, expected_generation)",
+)
+
 
 class MemoryStore:
     """Versioned, single-writer storage rooted below the runtime data root."""
@@ -899,6 +940,103 @@ class MemoryStore:
                 (lease_id,),
             ).fetchone()
         return None if row is None else HandoffLease.from_dict(json.loads(row["payload_json"]))
+
+    def session_generations(self) -> tuple[SessionGenerationState, ...]:
+        with self._read_connection() as db:
+            rows = db.execute(
+                "SELECT session_id FROM session_generations ORDER BY session_id"
+            ).fetchall()
+        return tuple(
+            state
+            for row in rows
+            if (state := self.get_session_generation(str(row["session_id"]))) is not None
+        )
+
+    def get_session_transition_receipt(self, command_id: str) -> dict[str, Any] | None:
+        _require_text(command_id, "command_id")
+        with self._read_connection() as db:
+            row = db.execute(
+                "SELECT * FROM session_transition_receipts WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+        return None if row is None else _transition_receipt_dict(row)
+
+    def session_access_snapshot(
+        self,
+        session_id: str,
+        runtime_boot_id: str,
+        client_id_hash: str,
+    ) -> dict[str, Any]:
+        for name, value in (
+            ("session_id", session_id),
+            ("runtime_boot_id", runtime_boot_id),
+            ("client_id_hash", client_id_hash),
+        ):
+            _require_text(value, name)
+        with self._read_connection() as db:
+            db.execute("BEGIN")
+            meta = db.execute(
+                "SELECT acl_epoch FROM memory_meta WHERE singleton = 1"
+            ).fetchone()
+            generation = db.execute(
+                "SELECT * FROM session_generations WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            binding_row = db.execute(
+                "SELECT payload_json FROM subject_bindings "
+                "WHERE runtime_boot_id = ? AND client_id_hash = ? AND status = 'active'",
+                (runtime_boot_id, client_id_hash),
+            ).fetchone()
+            participant_rows = db.execute(
+                "SELECT payload_json FROM session_participants "
+                "WHERE session_id = ? AND status = 'active' AND active = 1 "
+                "ORDER BY participant_id",
+                (session_id,),
+            ).fetchall()
+            binding = (
+                None
+                if binding_row is None
+                else SubjectBinding.from_dict(json.loads(binding_row["payload_json"]))
+            )
+            participants = tuple(
+                SessionParticipant.from_dict(json.loads(row["payload_json"]))
+                for row in participant_rows
+            )
+            subject_ids = {participant.subject_id for participant in participants}
+            if binding is not None:
+                subject_ids.add(binding.subject_id)
+            subject_ids.add("subject-javis")
+            subjects: dict[str, Subject] = {}
+            for subject_id in sorted(subject_ids):
+                subject_row = db.execute(
+                    "SELECT payload_json FROM subjects WHERE subject_id = ?",
+                    (subject_id,),
+                ).fetchone()
+                if subject_row is not None:
+                    subjects[subject_id] = Subject.from_dict(
+                        json.loads(subject_row["payload_json"])
+                    )
+        state = None
+        if generation is not None:
+            state = SessionGenerationState(
+                schema_version=1,
+                session_id=str(generation["session_id"]),
+                generation=int(generation["generation"]),
+                guest_present=bool(generation["guest_present"]),
+                privacy_fenced=bool(generation["privacy_fenced"]),
+                owner_subject_id=generation["owner_subject_id"],
+                active_binding_id=generation["active_binding_id"],
+                revision=int(generation["revision"]),
+                created_at_utc=str(generation["created_at_utc"]),
+                updated_at_utc=str(generation["updated_at_utc"]),
+            )
+        return {
+            "acl_epoch": 0 if meta is None else int(meta["acl_epoch"]),
+            "generation": state,
+            "binding": binding,
+            "participants": participants,
+            "subjects": subjects,
+        }
 
     def get_terminal_receipt(
         self, source_store_id: str, session_id: str, request_id: str
@@ -1303,6 +1441,57 @@ class MemoryStore:
         with self._writer_transaction(writer_token) as writer:
             return writer.put_session_participant(participant)
 
+    def ensure_guest_session(
+        self,
+        state: SessionGenerationState,
+        guest_subject: Subject,
+        participant: SessionParticipant,
+        *,
+        writer_token: object,
+    ) -> SessionGenerationState:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.ensure_guest_session(state, guest_subject, participant)
+
+    def fence_session_transition(
+        self,
+        *,
+        command_id: str,
+        session_id: str,
+        command_kind: str,
+        idempotency_key_hash: str,
+        payload_digest: str,
+        expected_generation: int,
+        at_utc: str,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.fence_session_transition(
+                command_id=command_id,
+                session_id=session_id,
+                command_kind=command_kind,
+                idempotency_key_hash=idempotency_key_hash,
+                payload_digest=payload_digest,
+                expected_generation=expected_generation,
+                at_utc=at_utc,
+            )
+
+    def complete_session_transition(
+        self,
+        command_id: str,
+        state: SessionGenerationState,
+        participants: Iterable[SessionParticipant],
+        *,
+        at_utc: str,
+        writer_token: object,
+    ) -> dict[str, Any]:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.complete_session_transition(
+                command_id,
+                state,
+                tuple(participants),
+                at_utc=at_utc,
+            )
+
     def put_item(
         self,
         item: ExperienceEpisode | JournalEntry | SharedMemory | UserModelClaim | RelationshipEvent,
@@ -1634,6 +1823,10 @@ class MemoryStore:
             if version == 5:
                 self._validate_v5_schema(db)
                 self._apply_migration(db, 6, _MIGRATION_6)
+                version = 6
+            if version == 6:
+                self._validate_v6_schema(db)
+                self._apply_migration(db, 7, _MIGRATION_7)
             self._validate_schema(db)
             mode = str(db.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             if mode != "wal":
@@ -1747,10 +1940,10 @@ class MemoryStore:
 
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
-        MemoryStore._validate_v5_schema(db, SCHEMA_VERSION)
+        MemoryStore._validate_v6_schema(db, SCHEMA_VERSION)
         rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
         names = {str(row["name"]) for row in rows}
-        if _REQUIRED_V6_TABLES - names:
+        if _REQUIRED_V7_TABLES - names:
             raise sqlite3.DatabaseError("required memory schema objects are missing")
         for table_name, required_columns in _REQUIRED_V6_COLUMNS.items():
             actual_columns = {
@@ -1768,6 +1961,23 @@ class MemoryStore:
             raise sqlite3.DatabaseError("memory metadata schema version is inconsistent")
         if int(db.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
             raise sqlite3.DatabaseError("foreign key enforcement is unavailable")
+
+    @staticmethod
+    def _validate_v6_schema(db: sqlite3.Connection, expected_version: int = 6) -> None:
+        MemoryStore._validate_v5_schema(db, expected_version)
+        rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+        names = {str(row["name"]) for row in rows}
+        if _REQUIRED_V6_TABLES - names:
+            raise sqlite3.DatabaseError("required v6 memory schema objects are missing")
+        for table_name, required_columns in _REQUIRED_V6_COLUMNS.items():
+            actual_columns = {
+                str(row["name"])
+                for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if required_columns - actual_columns:
+                raise sqlite3.DatabaseError(
+                    f"required v6 columns are missing from {table_name}"
+                )
 
     @staticmethod
     def _validate_v3_schema(db: sqlite3.Connection, expected_version: int = 3) -> None:
@@ -1810,7 +2020,24 @@ class MemoryStore:
             AccessPurpose.MANAGE,
         }:
             return False
-        return context.acl_epoch == self.metadata()["acl_epoch"]
+        if context.acl_epoch != self.metadata()["acl_epoch"]:
+            return False
+        state = self.get_session_generation(context.session_id)
+        if state is None:
+            return context.session_generation == 0 and context.binding_id is None
+        if (
+            state.privacy_fenced
+            or state.generation != context.session_generation
+            or state.guest_present != context.guest_present
+        ):
+            return False
+        if context.guest_present:
+            return context.audience_ceiling is Audience.GUEST
+        return bool(
+            context.binding_id is not None
+            and state.owner_subject_id == context.actor_subject_id
+            and state.active_binding_id == context.binding_id
+        )
 
     def _read_user_version(self) -> int:
         if not self.path.is_file():
@@ -2242,6 +2469,267 @@ class _MemoryWriter:
         )
         self._bump_meta(acl=True)
         return True
+
+    def ensure_guest_session(
+        self,
+        state: SessionGenerationState,
+        guest_subject: Subject,
+        participant: SessionParticipant,
+    ) -> SessionGenerationState:
+        if not isinstance(state, SessionGenerationState):
+            raise TypeError("state must be a SessionGenerationState contract")
+        if not isinstance(guest_subject, Subject):
+            raise TypeError("guest_subject must be a Subject contract")
+        if not isinstance(participant, SessionParticipant):
+            raise TypeError("participant must be a SessionParticipant contract")
+        if (
+            state.generation != 0
+            or not state.guest_present
+            or state.privacy_fenced
+            or state.owner_subject_id is not None
+            or state.active_binding_id is not None
+            or guest_subject.subject_kind is not SubjectKind.SESSION_GUEST
+            or guest_subject.session_scope_id != state.session_id
+            or participant.session_id != state.session_id
+            or participant.session_generation != state.generation
+            or participant.subject_id != guest_subject.subject_id
+            or participant.participant_role is not ParticipantRole.GUEST
+            or not participant.active
+        ):
+            raise ValueError("initial guest session contracts are inconsistent")
+        existing_row = self.__db.execute(
+            "SELECT * FROM session_generations WHERE session_id = ?",
+            (state.session_id,),
+        ).fetchone()
+        if existing_row is not None:
+            return SessionGenerationState(
+                schema_version=1,
+                session_id=str(existing_row["session_id"]),
+                generation=int(existing_row["generation"]),
+                guest_present=bool(existing_row["guest_present"]),
+                privacy_fenced=bool(existing_row["privacy_fenced"]),
+                owner_subject_id=existing_row["owner_subject_id"],
+                active_binding_id=existing_row["active_binding_id"],
+                revision=int(existing_row["revision"]),
+                created_at_utc=str(existing_row["created_at_utc"]),
+                updated_at_utc=str(existing_row["updated_at_utc"]),
+            )
+        existing_subject = self.__db.execute(
+            "SELECT payload_json FROM subjects WHERE subject_id = ?",
+            (guest_subject.subject_id,),
+        ).fetchone()
+        if existing_subject is None:
+            self.put_subject(guest_subject)
+        elif Subject.from_dict(json.loads(existing_subject["payload_json"])) != guest_subject:
+            raise MemoryStoreConflictError("guest subject idempotency conflict")
+        self.put_session_generation(state)
+        self.put_session_participant(participant)
+        return state
+
+    def fence_session_transition(
+        self,
+        *,
+        command_id: str,
+        session_id: str,
+        command_kind: str,
+        idempotency_key_hash: str,
+        payload_digest: str,
+        expected_generation: int,
+        at_utc: str,
+    ) -> dict[str, Any]:
+        for name, value in (
+            ("command_id", command_id),
+            ("session_id", session_id),
+            ("command_kind", command_kind),
+            ("idempotency_key_hash", idempotency_key_hash),
+            ("payload_digest", payload_digest),
+            ("at_utc", at_utc),
+        ):
+            _require_text(value, name)
+        _require_non_negative(expected_generation, "expected_generation")
+        if len(idempotency_key_hash) != 64 or len(payload_digest) != 64:
+            raise ValueError("transition digests must be SHA-256 hex")
+        existing = self.__db.execute(
+            "SELECT * FROM session_transition_receipts "
+            "WHERE command_id = ? OR (session_id = ? AND idempotency_key_hash = ?)",
+            (command_id, session_id, idempotency_key_hash),
+        ).fetchone()
+        if existing is not None:
+            receipt = _transition_receipt_dict(existing)
+            if (
+                receipt["command_id"] != command_id
+                or receipt["session_id"] != session_id
+                or receipt["command_kind"] != command_kind
+                or receipt["idempotency_key_hash"] != idempotency_key_hash
+                or receipt["payload_digest"] != payload_digest
+                or receipt["expected_generation"] != expected_generation
+            ):
+                raise MemoryStoreConflictError("session transition idempotency conflict")
+            return {**receipt, "replayed": True}
+        pending = self.__db.execute(
+            "SELECT command_id FROM session_transition_receipts "
+            "WHERE session_id = ? AND state = 'fenced' LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if pending is not None:
+            raise MemoryStoreConflictError("session transition already in progress")
+        row = self.__db.execute(
+            "SELECT * FROM session_generations WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            if expected_generation != 0:
+                raise MemoryStoreConflictError("stale session generation")
+            created_at = at_utc
+            revision = 1
+        else:
+            if int(row["generation"]) != expected_generation:
+                raise MemoryStoreConflictError("stale session generation")
+            created_at = str(row["created_at_utc"])
+            revision = int(row["revision"]) + 1
+        fenced = SessionGenerationState(
+            schema_version=1,
+            session_id=session_id,
+            generation=expected_generation,
+            guest_present=True,
+            privacy_fenced=True,
+            owner_subject_id=None,
+            active_binding_id=None,
+            revision=revision,
+            created_at_utc=created_at,
+            updated_at_utc=at_utc,
+        )
+        self.put_session_generation(fenced)
+        result = {
+            "schema_version": 1,
+            "command_id": command_id,
+            "session_id": session_id,
+            "state": "fenced",
+            "generation": expected_generation,
+        }
+        self.__db.execute(
+            "INSERT INTO session_transition_receipts ("
+            "command_id, session_id, command_kind, idempotency_key_hash, payload_digest, "
+            "expected_generation, next_generation, state, result_json, created_at_utc, updated_at_utc"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, 'fenced', ?, ?, ?)",
+            (
+                command_id,
+                session_id,
+                command_kind,
+                idempotency_key_hash,
+                payload_digest,
+                expected_generation,
+                expected_generation + 1,
+                _json(result),
+                at_utc,
+                at_utc,
+            ),
+        )
+        return {
+            "command_id": command_id,
+            "session_id": session_id,
+            "command_kind": command_kind,
+            "idempotency_key_hash": idempotency_key_hash,
+            "payload_digest": payload_digest,
+            "expected_generation": expected_generation,
+            "next_generation": expected_generation + 1,
+            "state": "fenced",
+            "result": result,
+            "created_at_utc": at_utc,
+            "updated_at_utc": at_utc,
+            "replayed": False,
+        }
+
+    def complete_session_transition(
+        self,
+        command_id: str,
+        state: SessionGenerationState,
+        participants: tuple[SessionParticipant, ...],
+        *,
+        at_utc: str,
+    ) -> dict[str, Any]:
+        _require_text(command_id, "command_id")
+        _require_text(at_utc, "at_utc")
+        if not isinstance(state, SessionGenerationState):
+            raise TypeError("state must be a SessionGenerationState contract")
+        if any(not isinstance(item, SessionParticipant) for item in participants):
+            raise TypeError("participants must contain SessionParticipant contracts")
+        if not participants or len(participants) > 16:
+            raise ValueError("participants must contain between 1 and 16 entries")
+        receipt_row = self.__db.execute(
+            "SELECT * FROM session_transition_receipts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        if receipt_row is None:
+            raise MemoryStoreConflictError("session transition receipt is missing")
+        receipt = _transition_receipt_dict(receipt_row)
+        if receipt["state"] == "completed":
+            return {**receipt["result"], "replayed": True}
+        if (
+            state.session_id != receipt["session_id"]
+            or state.generation != receipt["next_generation"]
+            or state.privacy_fenced
+            or state.revision < 2
+            or any(
+                item.session_id != state.session_id
+                or item.session_generation != state.generation
+                or not item.active
+                for item in participants
+            )
+        ):
+            raise ValueError("completed session transition contracts are inconsistent")
+        current = self.__db.execute(
+            "SELECT * FROM session_generations WHERE session_id = ?",
+            (state.session_id,),
+        ).fetchone()
+        if (
+            current is None
+            or int(current["generation"]) != receipt["expected_generation"]
+            or not bool(current["privacy_fenced"])
+        ):
+            raise MemoryStoreConflictError("session transition fence is stale")
+        active_rows = self.__db.execute(
+            "SELECT payload_json FROM session_participants "
+            "WHERE session_id = ? AND status = 'active' AND active = 1",
+            (state.session_id,),
+        ).fetchall()
+        for row in active_rows:
+            current_participant = SessionParticipant.from_dict(
+                json.loads(row["payload_json"])
+            )
+            self.put_session_participant(
+                replace(
+                    current_participant,
+                    revision=current_participant.revision + 1,
+                    left_at_utc=at_utc,
+                    status=ParticipantStatus.LEFT,
+                    updated_at_utc=at_utc,
+                    active=False,
+                )
+            )
+        for participant in participants:
+            self.put_session_participant(participant)
+        committed_state = replace(
+            state,
+            revision=int(current["revision"]) + 1,
+            created_at_utc=str(current["created_at_utc"]),
+            updated_at_utc=at_utc,
+        )
+        self.put_session_generation(committed_state)
+        result = {
+            "schema_version": 1,
+            "command_id": command_id,
+            "session_id": state.session_id,
+            "state": "completed",
+            "generation": state.generation,
+            "guest_present": state.guest_present,
+        }
+        self.__db.execute(
+            "UPDATE session_transition_receipts SET state = 'completed', result_json = ?, "
+            "updated_at_utc = ? WHERE command_id = ?",
+            (_json(result), at_utc, command_id),
+        )
+        return {**result, "replayed": False}
 
     def put_item(
         self,
