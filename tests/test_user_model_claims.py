@@ -1,6 +1,7 @@
 from dataclasses import replace
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,6 +17,7 @@ from tests.test_session_handoff_privacy import service, principal, bootstrap, fa
 from tests.test_memory_acl_recall import episode
 from core.life.memory.claims import DecideClaim
 from core.life.memory.store import DATABASE_RELATIVE_PATH, MemoryStoreAuthorizationError, MemoryStoreConflictError
+from core.life.memory.service import MemoryService
 
 
 def proposal(**changes):
@@ -135,7 +137,7 @@ def test_confirmed_sensitive_claim_requires_confirmed_epistemic_class(tmp_path):
         assert len(RecallEngine().recall(store, request).items) == 1
 
 
-def seed_decision(service, *, source_status="active"):
+def seed_decision(service, *, source_status="active", expires_at_utc=None):
     candidate = principal()
     candidate = replace(candidate, capability_scopes=(*candidate.capability_scopes, "relationship.manage"))
     bootstrap(service, candidate)
@@ -149,6 +151,7 @@ def seed_decision(service, *, source_status="active"):
         owner_subject_id=access.actor_subject_id, subject_id=access.actor_subject_id,
         acl_subject_ids=[access.actor_subject_id], status="candidate",
         source_evidence_ids=[source.episode_id],
+        expires_at_utc=expires_at_utc,
     )
     service.put_item(item).result(timeout=5)
     access = factory(service).for_identity_management(SESSION, principal=candidate)
@@ -227,3 +230,53 @@ def test_decision_receipt_failure_rolls_back_claim_and_fts(service):
         assert db.execute("SELECT COUNT(*) FROM memory_fts WHERE item_id = ?", (item.claim_id,)).fetchone()[0] == 0
         db.execute("DROP TRIGGER fail_claim_receipt")
     assert service.decide_claim(command).result(timeout=5).revision == 2
+
+
+def test_expiry_preserves_decision_history_and_cannot_reactivate(service, monkeypatch):
+    future = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expiry = future.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    _, access, item = seed_decision(service, expires_at_utc=expiry)
+    confirmed = service.decide_claim(DecideClaim(access, item.claim_id, 1, "confirm", "expiry-confirm")).result(timeout=5)
+    monkeypatch.setattr("core.life.memory.store._utc_now", lambda: expiry)
+    assert service.expire_claims().result(timeout=5) == 1
+    assert service.expire_claims().result(timeout=5) == 0
+    with sqlite3.connect(service.data_root / DATABASE_RELATIVE_PATH) as db:
+        payload = json.loads(db.execute("SELECT payload_json FROM memory_items WHERE item_id = ?", (item.claim_id,)).fetchone()[0])
+        assert payload["status"] == "expired"
+        assert payload["revision"] == 3
+        assert payload["confirmed_at_utc"] is None
+        assert payload["confirmation_event_id"] == confirmed.confirmation_event_id
+        assert db.execute("SELECT COUNT(*) FROM claim_decisions WHERE decision_id = ?", (confirmed.confirmation_event_id,)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM memory_fts WHERE item_id = ?", (item.claim_id,)).fetchone()[0] == 0
+    with pytest.raises(MemoryStoreConflictError, match="reactivated"):
+        service.put_item(replace(item, revision=4, status=ClaimStatus.ACTIVE, expires_at_utc=None)).result(timeout=5)
+
+
+def test_expiry_batches_are_bounded_and_restart_finishes_pending(tmp_path):
+    token = object()
+    with MemoryStore(tmp_path, writer_token=token) as store:
+        seed(store, token)
+        for index in range(3):
+            store.put_item(claim(claim_id=f"expiry-{index}", expires_at_utc="2026-08-20T10:07:00.000Z"), writer_token=token)
+        assert store.expire_claims(writer_token=token, limit=2) == 2
+    service = MemoryService(tmp_path).start()
+    try:
+        assert service.status()["state"] == "ready"
+        with sqlite3.connect(tmp_path / DATABASE_RELATIVE_PATH) as db:
+            assert db.execute("SELECT COUNT(*) FROM memory_items WHERE status = 'expired'").fetchone()[0] == 3
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("changes", [
+    {"value": "detailed"}, {"subject_id": "owner-b"},
+    {"source_evidence_ids": ("different-source",)}, {"predicate": "communication.directness"},
+])
+def test_generic_write_cannot_silently_rewrite_claim_evidence(tmp_path, changes):
+    token = object()
+    with MemoryStore(tmp_path, writer_token=token) as store:
+        seed(store, token)
+        original = claim()
+        store.put_item(original, writer_token=token)
+        with pytest.raises(MemoryStoreConflictError, match="correction requires"):
+            store.put_item(replace(original, revision=2, **changes), writer_token=token)

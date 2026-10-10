@@ -477,6 +477,17 @@ class MemoryService:
             "decide_claim", operation, priority=MemoryCommandPriority.CRITICAL, critical=True
         )
 
+    def expire_claims(self) -> Future[int]:
+        def operation(store: MemoryStore, writer_token: object) -> int:
+            count = store.expire_claims(writer_token=writer_token)
+            if count:
+                self._invalidate_memory_contexts()
+            return count
+
+        return self._submit_write(
+            "expire_claims", operation, priority=MemoryCommandPriority.NORMAL, critical=False
+        )
+
     def propose_shared_memory(self, command: ProposeSharedMemory) -> Future[SharedMemory]:
         return self._submit_shared_transition("propose_shared_memory", command)
 
@@ -1034,6 +1045,7 @@ class MemoryService:
                         binder.retire_stale_bindings()
                         binder.reset_sessions_to_guest()
                     resumed = self._deletion_worker(store, self._writer_token).resume_pending()
+                    store.expire_claims(writer_token=self._writer_token)
                 with self._lock:
                     self._store = store
                     if store_status.get("state") == "ready" and not store.read_only:
@@ -1057,6 +1069,7 @@ class MemoryService:
                 self._startup_complete.set()
 
             next_reconcile = time.monotonic() + self._reconcile_interval
+            next_claim_expiry = time.monotonic() + 5.0
             while True:
                 if self._stop_requested.is_set() and self._queue.empty():
                     break
@@ -1082,6 +1095,17 @@ class MemoryService:
                             self._last_error_reason = _bounded_reason(exc)
                     finally:
                         self._queue.task_done()
+                if (
+                    store is not None and self._state == "ready"
+                    and time.monotonic() >= next_claim_expiry
+                ):
+                    try:
+                        if store.expire_claims(writer_token=self._writer_token):
+                            self._invalidate_memory_contexts()
+                    except Exception as exc:
+                        with self._lock:
+                            self._last_error_reason = _bounded_reason(exc)
+                    next_claim_expiry = time.monotonic() + 5.0
                 if (
                     store is not None
                     and self._conversation_store is not None

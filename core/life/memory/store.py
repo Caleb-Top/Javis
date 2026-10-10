@@ -1405,6 +1405,10 @@ class MemoryStore:
         with self._writer_transaction(writer_token) as writer:
             return writer.decide_claim(command)
 
+    def expire_claims(self, *, writer_token: object, limit: int = 128) -> int:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.expire_claims(limit=limit)
+
     def put_subject(self, subject: Subject, *, writer_token: object) -> bool:
         with self._writer_transaction(writer_token) as writer:
             return writer.put_subject(subject)
@@ -2774,7 +2778,7 @@ class _MemoryWriter:
         payload = _json(wire)
         content_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         row = self.__db.execute(
-            "SELECT item_kind, revision, content_hash FROM memory_items WHERE item_id = ?",
+            "SELECT item_kind, revision, content_hash, payload_json FROM memory_items WHERE item_id = ?",
             (item_id,),
         ).fetchone()
         if row is not None:
@@ -2784,6 +2788,20 @@ class _MemoryWriter:
                 return False
             if item.revision <= int(row["revision"]):
                 raise MemoryStoreConflictError("item revision must advance")
+            if isinstance(item, UserModelClaim):
+                previous = UserModelClaim.from_dict(json.loads(row["payload_json"]))
+                if any(getattr(previous, name) != getattr(item, name) for name in (
+                    "owner_subject_id", "subject_id", "predicate", "value_type", "value",
+                    "source_evidence_ids", "source_digest", "supersedes_claim_id",
+                )):
+                    raise MemoryStoreConflictError("claim correction requires a new claim")
+                if previous.status in {
+                    ClaimStatus.REJECTED, ClaimStatus.EXPIRED, ClaimStatus.SUPERSEDED,
+                    ClaimStatus.DELETION_FENCED,
+                } and item.status in {
+                    ClaimStatus.CANDIDATE, ClaimStatus.ACTIVE, ClaimStatus.CONFIRMED,
+                }:
+                    raise MemoryStoreConflictError("terminal claim cannot be reactivated")
 
         envelope = self._envelope(item, kind, item_id, payload, content_hash)
         self.__db.execute(
@@ -2819,6 +2837,25 @@ class _MemoryWriter:
             )
         self._bump_meta(acl=True, index=True)
         return True
+
+    def expire_claims(self, *, limit: int = 128) -> int:
+        if type(limit) is not int or not 1 <= limit <= 128:
+            raise ValueError("claim expiry limit must be between 1 and 128")
+        now = _utc_now()
+        rows = self.__db.execute(
+            "SELECT payload_json FROM memory_items WHERE item_kind = 'user_model_claim' "
+            "AND status IN ('active', 'candidate', 'quarantined') "
+            "AND deletion_fenced = 0 AND expires_at_utc <= ? "
+            "ORDER BY expires_at_utc, item_id LIMIT ?", (now, limit),
+        ).fetchall()
+        for row in rows:
+            current = UserModelClaim.from_dict(json.loads(row["payload_json"]))
+            # Confirmation history remains in claim_decisions after lifecycle expiry.
+            self.put_item(replace(
+                current, revision=current.revision + 1, status=ClaimStatus.EXPIRED,
+                confirmed_at_utc=None, updated_at_utc=now,
+            ))
+        return len(rows)
 
     def decide_claim(self, command: DecideClaim) -> UserModelClaim:
         if not isinstance(command, DecideClaim):

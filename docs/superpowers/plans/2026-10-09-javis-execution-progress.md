@@ -35,7 +35,8 @@
 - [x] T5-A 固定提议字段和值域；数据库搜索和缓存召回均检查普通 prompt 资格，按 session/generation/binding 划分缓存。
 - [ ] T5 写入边界统一治理：通用 put_item 仍需接入来源真实性和决策收据验证；T5-A 只封住普通搜索与 prompt，不代表数据写入已完整治理。
 - [x] T5-B1 确认/拒绝单写者事务、修订 CAS、幂等决策收据、拒绝来源抑制；当前绑定和 relationship.manage 校验。
-- [ ] T5-B2 纠正关系、过期转换、通用写入治理。B1 的来源检查只验证 active completed episode；原始用户自述证据验证仍属 C，确认入口尚未对外开放。
+- [x] T5-B2a 过期转换：启动及单写者后台批量清理、FTS 退出、保留决策历史；禁止终态复活与原地改值/主体/来源。
+- [ ] T5-B2b 纠正关系与完整通用写入治理。B1 的来源检查只验证 active completed episode；原始用户自述证据验证仍属 C，确认入口尚未对外开放。
 - [ ] T5-C 验证真实来源并接入单写者；删除/replay 不复活。
 - [ ] T4 集成审计：重启时未完成围栏恢复、旧 WS replay、播放请求归属与迟到音频。
 
@@ -58,3 +59,11 @@
 - 通用 put_item 对被拒绝来源的新 claim ID 也拒绝，数据库重新打开后仍有效。
 - 存储/服务邻接验证 57 passed；新增重开数据库和收据故障注入后 Claim 专项 30 passed。
 - 故障注入证明 receipt INSERT 失败时 claim revision、status、FTS 同事务回滚。完整删除 suppression、纠正、原始证据提取仍未交付。
+
+### T5-B2a 增量
+
+- 过期扫描复用同一 writer：启动清理一批，后台每 5 秒最多 128 条；普通召回的即时 expiry 检查继续生效。
+- confirmed 转 expired 清当前确认时间，保留 confirmation_event_id 和独立 claim_decisions 历史；重复扫描不增加 revision。
+- 通用写入拒绝 rejected/expired/superseded/deletion_fenced 回到可用状态；修改 value、主体或来源必须新建纠正记录。
+- 存储/服务/Claim 邻接 61 passed；追加原地改写用例后 Claim 专项 36 passed。
+- 纠正事务、原始证据验证与完整删除抑制仍为下一步；L0-B 与 L3-T6..L8 的剩余范围不变。
