@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.life.memory.claims import claim_prompt_eligible
 from core.life.memory.contracts import (
     AccessContext,
     AccessPurpose,
@@ -1377,6 +1378,22 @@ class MemoryStore:
                     "item_id TEXT PRIMARY KEY, item_kind TEXT NOT NULL) WITHOUT ROWID"
                 )
                 db.execute(visible_sql, parameters[:-2])
+                # Apply claim semantics before ranking so rejected candidates cannot
+                # consume the result limit or escape through direct store searches.
+                claim_rows = db.execute(
+                    "SELECT i.item_id, i.payload_json FROM visible_memory_ids AS v "
+                    "JOIN memory_items AS i ON i.item_id = v.item_id "
+                    "WHERE v.item_kind = 'user_model_claim'"
+                ).fetchall()
+                for row in claim_rows:
+                    claim = UserModelClaim.from_dict(json.loads(row["payload_json"]))
+                    if not claim_prompt_eligible(
+                        claim, query.access_context, at_utc=query.issued_at_utc
+                    ):
+                        db.execute(
+                            "DELETE FROM visible_memory_ids WHERE item_id = ?",
+                            (row["item_id"],),
+                        )
                 rows = db.execute(rank_sql, parameters[-2:]).fetchall()
                 db.rollback()
         except sqlite3.OperationalError:

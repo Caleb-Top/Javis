@@ -22,6 +22,7 @@ from .contracts import (
     SharedMemory,
     UserModelClaim,
 )
+from .claims import claim_prompt_eligible
 
 
 class RecallStore(Protocol):
@@ -95,6 +96,10 @@ class RecallEngine:
         used_bytes = 0
         truncated = False
         for contract in contracts:
+            if isinstance(contract, UserModelClaim) and not claim_prompt_eligible(
+                contract, context, at_utc=query.issued_at_utc
+            ):
+                continue
             item = _to_recall_item(contract, query)
             encoded = len(item.prompt_text.encode("utf-8"))
             if used_bytes + encoded > query.max_total_bytes:
@@ -280,6 +285,12 @@ def _cache_key(query: RecallQuery, index_generation: int) -> tuple[Any, ...]:
         )
     ).hexdigest()
     return (
+        context.runtime_boot_id,
+        context.session_id,
+        context.session_generation,
+        context.binding_id,
+        context.binding_assurance.value,
+        context.guest_present,
         context.actor_subject_id,
         participant_hash,
         context.purpose.value,
