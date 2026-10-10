@@ -462,6 +462,21 @@ class MemoryService:
         frozen_acl = None if acl is None else {str(key): tuple(value) for key, value in acl.items()}
         return self._submit_store_mutation("put_item", item, acl=frozen_acl)
 
+    def decide_claim(self, command) -> Future[UserModelClaim]:
+        from .claims import DecideClaim
+
+        if not isinstance(command, DecideClaim):
+            raise TypeError("command must be DecideClaim")
+
+        def operation(store: MemoryStore, writer_token: object) -> UserModelClaim:
+            result = store.decide_claim(command, writer_token=writer_token)
+            self._invalidate_memory_contexts()
+            return result
+
+        return self._submit_write(
+            "decide_claim", operation, priority=MemoryCommandPriority.CRITICAL, critical=True
+        )
+
     def propose_shared_memory(self, command: ProposeSharedMemory) -> Future[SharedMemory]:
         return self._submit_shared_transition("propose_shared_memory", command)
 

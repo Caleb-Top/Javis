@@ -111,6 +111,28 @@ class ClaimProposal:
         return cls(predicate, value_type, value, tuple(sources))
 
 
+@dataclass(frozen=True)
+class DecideClaim:
+    access_context: AccessContext
+    claim_id: str
+    expected_revision: int
+    decision: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.access_context, AccessContext):
+            raise ValueError("claim_access_context_required")
+        for value in (self.claim_id, self.idempotency_key):
+            if type(value) is not str or not value or len(value) > 256 or any(
+                c in value for c in "\r\n\x00"
+            ):
+                raise ValueError("claim_identifier_invalid")
+        if type(self.expected_revision) is not int or self.expected_revision < 1:
+            raise ValueError("claim_revision_invalid")
+        if self.decision not in {"confirm", "reject"}:
+            raise ValueError("claim_decision_invalid")
+
+
 def claim_prompt_eligible(claim: UserModelClaim, context: AccessContext, *, at_utc: str) -> bool:
     """Additional semantic gate after ACL filtering, including cached candidates."""
     if (

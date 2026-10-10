@@ -1,4 +1,6 @@
 from dataclasses import replace
+import json
+import sqlite3
 
 import pytest
 
@@ -10,6 +12,10 @@ from core.life.memory.recall import RecallEngine
 from core.life.memory.store import MemoryStore
 from tests.test_memory_acl_recall import context, query, seed
 from tests.test_memory_contracts import CLAIM
+from tests.test_session_handoff_privacy import service, principal, bootstrap, factory, SESSION
+from tests.test_memory_acl_recall import episode
+from core.life.memory.claims import DecideClaim
+from core.life.memory.store import DATABASE_RELATIVE_PATH, MemoryStoreAuthorizationError, MemoryStoreConflictError
 
 
 def proposal(**changes):
@@ -127,3 +133,97 @@ def test_confirmed_sensitive_claim_requires_confirmed_epistemic_class(tmp_path):
         access = replace(context("owner-a", store.metadata()["acl_epoch"]), guest_present=False)
         request = replace(query(access, "brief"), item_kinds=())
         assert len(RecallEngine().recall(store, request).items) == 1
+
+
+def seed_decision(service, *, source_status="active"):
+    candidate = principal()
+    candidate = replace(candidate, capability_scopes=(*candidate.capability_scopes, "relationship.manage"))
+    bootstrap(service, candidate)
+    access = factory(service).for_identity_management(SESSION, principal=candidate)
+    source = replace(
+        episode("episode-claim-source", access.actor_subject_id, "User prefers brief answers"),
+        participant_subject_ids=access.participant_subject_ids, status=source_status,
+    )
+    service.put_item(source).result(timeout=5)
+    item = claim(
+        owner_subject_id=access.actor_subject_id, subject_id=access.actor_subject_id,
+        acl_subject_ids=[access.actor_subject_id], status="candidate",
+        source_evidence_ids=[source.episode_id],
+    )
+    service.put_item(item).result(timeout=5)
+    access = factory(service).for_identity_management(SESSION, principal=candidate)
+    return candidate, access, item
+
+
+def test_confirm_claim_is_durable_and_replay_does_not_advance_revision(service):
+    candidate, access, item = seed_decision(service)
+    command = DecideClaim(access, item.claim_id, 1, "confirm", "confirm-one")
+    result = service.decide_claim(command).result(timeout=5)
+    assert result.status is ClaimStatus.CONFIRMED
+    assert result.epistemic_class is ClaimEpistemicClass.CONFIRMED
+    assert result.confirmation_event_id
+    assert result.revision == 2
+    assert service.decide_claim(command).result(timeout=5) == result
+    fresh = factory(service).for_identity_management(SESSION, principal=candidate)
+    with pytest.raises(MemoryStoreConflictError, match="idempotency"):
+        service.decide_claim(replace(command, access_context=fresh, decision="reject")).result(timeout=5)
+
+
+def test_reject_claim_suppresses_new_ids_from_same_source(service):
+    _, access, item = seed_decision(service)
+    command = DecideClaim(access, item.claim_id, 1, "reject", "reject-one")
+    result = service.decide_claim(command).result(timeout=5)
+    assert result.status is ClaimStatus.REJECTED
+    assert service.decide_claim(command).result(timeout=5) == result
+    with pytest.raises(MemoryStoreConflictError, match="suppressed"):
+        service.put_item(replace(item, claim_id="claim-replayed-new-id")).result(timeout=5)
+
+
+@pytest.mark.parametrize("status", ["quarantined", "candidate"])
+def test_confirm_rejects_inactive_source_without_advancing_claim(service, status):
+    _, access, item = seed_decision(service, source_status=status)
+    with pytest.raises(MemoryStoreConflictError, match="not live"):
+        service.decide_claim(DecideClaim(access, item.claim_id, 1, "confirm", "bad-source")).result(timeout=5)
+    result = service.decide_claim(DecideClaim(access, item.claim_id, 1, "reject", "reject-source")).result(timeout=5)
+    assert result.revision == 2
+
+
+def test_claim_decision_requires_current_binding_and_scope(service):
+    _, access, item = seed_decision(service)
+    for invalid in (
+        replace(access, session_generation=access.session_generation + 1),
+        replace(access, capability_scopes=("identity.manage",)),
+        replace(access, guest_present=True),
+    ):
+        with pytest.raises(MemoryStoreAuthorizationError):
+            service.decide_claim(DecideClaim(invalid, item.claim_id, 1, "confirm", "unauthorized")).result(timeout=5)
+
+
+def test_rejection_suppression_survives_store_reopen(service):
+    _, access, item = seed_decision(service)
+    service.decide_claim(DecideClaim(access, item.claim_id, 1, "reject", "durable-reject")).result(timeout=5)
+    root = service.data_root
+    assert service.shutdown()
+    token = object()
+    with MemoryStore(root, writer_token=token) as reopened:
+        with pytest.raises(MemoryStoreConflictError, match="suppressed"):
+            reopened.put_item(replace(item, claim_id="new-id-after-restart"), writer_token=token)
+
+
+def test_decision_receipt_failure_rolls_back_claim_and_fts(service):
+    _, access, item = seed_decision(service)
+    path = service.data_root / DATABASE_RELATIVE_PATH
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TRIGGER fail_claim_receipt BEFORE INSERT ON claim_decisions "
+                   "BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END")
+    command = DecideClaim(access, item.claim_id, 1, "confirm", "atomic-confirm")
+    with pytest.raises(sqlite3.IntegrityError, match="injected"):
+        service.decide_claim(command).result(timeout=5)
+    with sqlite3.connect(path) as db:
+        payload = json.loads(db.execute("SELECT payload_json FROM memory_items WHERE item_id = ?", (item.claim_id,)).fetchone()[0])
+        assert payload["revision"] == 1
+        assert payload["status"] == "candidate"
+        assert db.execute("SELECT COUNT(*) FROM claim_decisions").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_fts WHERE item_id = ?", (item.claim_id,)).fetchone()[0] == 0
+        db.execute("DROP TRIGGER fail_claim_receipt")
+    assert service.decide_claim(command).result(timeout=5).revision == 2

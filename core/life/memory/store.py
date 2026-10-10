@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from core.life.memory.claims import claim_prompt_eligible
+from core.life.memory.claims import DecideClaim, claim_prompt_eligible, validate_claim_value
 from core.life.memory.contracts import (
     AccessContext,
     AccessPurpose,
@@ -26,6 +26,7 @@ from core.life.memory.contracts import (
     Audience,
     BindingStatus,
     ClaimStatus,
+    ClaimEpistemicClass,
     ConfirmSharedMemory,
     CorrectMemory,
     DeletionRequest,
@@ -1400,6 +1401,10 @@ class MemoryStore:
             return ()
         return tuple(self._decode_item(row["item_kind"], row["payload_json"]) for row in rows)
 
+    def decide_claim(self, command: DecideClaim, *, writer_token: object) -> UserModelClaim:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.decide_claim(command)
+
     def put_subject(self, subject: Subject, *, writer_token: object) -> bool:
         with self._writer_transaction(writer_token) as writer:
             return writer.put_subject(subject)
@@ -2755,6 +2760,16 @@ class _MemoryWriter:
         acl: Mapping[str, Iterable[str]] | None = None,
     ) -> bool:
         kind, item_id = self._kind_and_id(item)
+        if isinstance(item, UserModelClaim) and item.status in {
+            ClaimStatus.CANDIDATE, ClaimStatus.ACTIVE, ClaimStatus.CONFIRMED
+        }:
+            for source_id in item.source_evidence_ids:
+                if self.__db.execute(
+                    "SELECT 1 FROM claim_source_suppressions WHERE subject_id = ? "
+                    "AND predicate = ? AND source_evidence_id = ?",
+                    (item.subject_id, item.predicate, source_id),
+                ).fetchone() is not None:
+                    raise MemoryStoreConflictError("claim source suppressed")
         wire = item.to_dict()
         payload = _json(wire)
         content_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -2804,6 +2819,99 @@ class _MemoryWriter:
             )
         self._bump_meta(acl=True, index=True)
         return True
+
+    def decide_claim(self, command: DecideClaim) -> UserModelClaim:
+        if not isinstance(command, DecideClaim):
+            raise TypeError("command must be DecideClaim")
+        context = command.access_context
+        now = _utc_now()
+        if (
+            context.purpose is not AccessPurpose.MANAGE
+            or "relationship.manage" not in context.capability_scopes
+            or context.actor_kind not in {ActorKind.PRIMARY_USER, ActorKind.KNOWN_PERSON}
+            or context.guest_present or context.audience_ceiling is Audience.GUEST
+            or context.binding_id is None
+            or not context.issued_at_utc <= now < context.expires_at_utc
+        ):
+            raise MemoryStoreAuthorizationError("claim management denied")
+        binding = self.__db.execute(
+            "SELECT b.payload_json FROM subject_bindings AS b "
+            "JOIN session_generations AS g ON g.active_binding_id = b.binding_id "
+            "JOIN subjects AS s ON s.subject_id = b.subject_id "
+            "WHERE b.binding_id = ? AND b.subject_id = ? AND b.runtime_boot_id = ? "
+            "AND b.client_id_hash = ? AND b.status = 'active' AND s.status = 'active' "
+            "AND g.session_id = ? AND g.generation = ? AND g.privacy_fenced = 0 "
+            "AND g.guest_present = 0 AND g.owner_subject_id = b.subject_id",
+            (context.binding_id, context.actor_subject_id, context.runtime_boot_id,
+             context.client_id_hash, context.session_id, context.session_generation),
+        ).fetchone()
+        if binding is None or SubjectBinding.from_dict(
+            json.loads(binding["payload_json"])
+        ).expires_at_utc <= now:
+            raise MemoryStoreAuthorizationError("claim binding unavailable")
+        row = self.__db.execute(
+            "SELECT payload_json FROM memory_items WHERE item_id = ? "
+            "AND item_kind = 'user_model_claim' AND deletion_fenced = 0",
+            (command.claim_id,),
+        ).fetchone()
+        if row is None:
+            raise MemoryStoreConflictError("claim unavailable")
+        current = UserModelClaim.from_dict(json.loads(row["payload_json"]))
+        if current.owner_subject_id != context.actor_subject_id or current.subject_id != context.actor_subject_id:
+            raise MemoryStoreAuthorizationError("claim owner mismatch")
+        decision_id = "claim-decision-" + hashlib.sha256(
+            f"{context.actor_subject_id}\0{command.idempotency_key}".encode()
+        ).hexdigest()
+        receipt = self.__db.execute(
+            "SELECT * FROM claim_decisions WHERE decision_id = ?", (decision_id,)
+        ).fetchone()
+        if receipt is not None:
+            if (receipt["claim_id"], receipt["decision"], receipt["expected_revision"]) != (
+                command.claim_id, command.decision, command.expected_revision
+            ):
+                raise MemoryStoreConflictError("claim decision idempotency conflict")
+            return current
+        epoch = self.__db.execute("SELECT acl_epoch FROM memory_meta WHERE singleton = 1").fetchone()[0]
+        if epoch != context.acl_epoch:
+            raise MemoryStoreAuthorizationError("claim context stale")
+        if current.revision != command.expected_revision:
+            raise MemoryStoreConflictError("claim revision conflict")
+        if current.status not in {ClaimStatus.CANDIDATE, ClaimStatus.ACTIVE}:
+            raise MemoryStoreConflictError("claim transition invalid")
+        if current.expires_at_utc is not None and current.expires_at_utc <= now:
+            raise MemoryStoreConflictError("claim expired")
+        if command.decision == "confirm":
+            validate_claim_value(current.predicate, current.value_type, current.value)
+            if current.contradiction_claim_ids:
+                raise MemoryStoreConflictError("claim contradiction unresolved")
+            sources = self._live_source_episodes(current.source_evidence_ids, context, now)
+            if any(ExperienceEpisode.from_dict(json.loads(source["payload_json"])).outcome != "completed" for source in sources):
+                raise MemoryStoreConflictError("claim source not completed")
+            updated = replace(
+                current, revision=current.revision + 1, status=ClaimStatus.CONFIRMED,
+                epistemic_class=ClaimEpistemicClass.CONFIRMED,
+                confirmed_at_utc=now, confirmation_event_id=decision_id, updated_at_utc=now,
+            )
+        else:
+            updated = replace(current, revision=current.revision + 1,
+                              status=ClaimStatus.REJECTED, updated_at_utc=now)
+        self.put_item(updated)
+        self.__db.execute(
+            "INSERT INTO claim_decisions VALUES (?, ?, ?, ?, ?, ?)",
+            (decision_id, current.claim_id, context.actor_subject_id, command.decision,
+             command.expected_revision, now),
+        )
+        if command.decision == "reject":
+            for source_id in current.source_evidence_ids:
+                suppression_id = hashlib.sha256(
+                    f"{current.subject_id}\0{current.predicate}\0{source_id}".encode()
+                ).hexdigest()
+                self.__db.execute(
+                    "INSERT OR IGNORE INTO claim_source_suppressions VALUES (?, ?, ?, ?, ?, ?)",
+                    (suppression_id, current.subject_id, current.predicate, source_id,
+                     "claim_rejected", now),
+                )
+        return updated
 
     def propose_shared_memory(self, command: ProposeSharedMemory) -> SharedMemory:
         if not isinstance(command, ProposeSharedMemory):

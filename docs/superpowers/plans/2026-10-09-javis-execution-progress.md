@@ -34,7 +34,8 @@
 
 - [x] T5-A 固定提议字段和值域；数据库搜索和缓存召回均检查普通 prompt 资格，按 session/generation/binding 划分缓存。
 - [ ] T5 写入边界统一治理：通用 put_item 仍需接入来源真实性和决策收据验证；T5-A 只封住普通搜索与 prompt，不代表数据写入已完整治理。
-- [ ] T5-B 持久决策与 CAS、纠正关系、拒绝抑制、过期。
+- [x] T5-B1 确认/拒绝单写者事务、修订 CAS、幂等决策收据、拒绝来源抑制；当前绑定和 relationship.manage 校验。
+- [ ] T5-B2 纠正关系、过期转换、通用写入治理。B1 的来源检查只验证 active completed episode；原始用户自述证据验证仍属 C，确认入口尚未对外开放。
 - [ ] T5-C 验证真实来源并接入单写者；删除/replay 不复活。
 - [ ] T4 集成审计：重启时未完成围栏恢复、旧 WS replay、播放请求归属与迟到音频。
 
@@ -49,3 +50,11 @@
 - 覆盖提议越权字段、predicate/值域、推断/观察/敏感/冲突/第三方 Claim、缓存到期、代际缓存隔离、搜索 limit 前过滤。
 - 第一批支持固定交流风格、语言、确认风格、时间窗、受控话题边界、回答格式和单位。自由文本偏好、goal 与身份类 predicate 尚未开放，不视为完整 predicate 交付。
 - T5-B/C、API/UI、真实硬件与安装升级：NOT EXECUTED / 未完成。
+
+### T5-B1 增量
+
+- `DecideClaim` 经 MemoryService writer 调用单一数据库事务；确认生成 confirmed 记录和 decision receipt，拒绝持久化 source suppression。
+- 同一决策精确重放不再增加 revision；变更决策载荷冲突；旧 generation、无 scope、guest-present 拒绝。
+- 通用 put_item 对被拒绝来源的新 claim ID 也拒绝，数据库重新打开后仍有效。
+- 存储/服务邻接验证 57 passed；新增重开数据库和收据故障注入后 Claim 专项 30 passed。
+- 故障注入证明 receipt INSERT 失败时 claim revision、status、FTS 同事务回滚。完整删除 suppression、纠正、原始证据提取仍未交付。
