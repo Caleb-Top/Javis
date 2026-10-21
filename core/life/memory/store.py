@@ -1704,6 +1704,7 @@ class MemoryStore:
         receipt_values: Mapping[str, Any],
         *,
         writer_token: object,
+        evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically persist an episode, finalize its receipt, and move the cursor."""
 
@@ -1726,6 +1727,8 @@ class MemoryStore:
         )
         with self._writer_transaction(writer_token) as writer:
             created = writer.put_item(episode)
+            if evidence is not None:
+                writer.project_explicit_claims(episode, evidence)
             receipt = writer.record_terminal_receipt(**values)
             writer.set_source_progress(
                 str(values["source_store_id"]), int(values["terminal_row_id"])
@@ -2952,6 +2955,72 @@ class _MemoryWriter:
         if command.decision == "reject":
             self._suppress_claim_sources(current, "claim_rejected", now)
         return updated
+
+    def project_explicit_claims(self, episode: ExperienceEpisode, evidence: Mapping[str, Any]) -> None:
+        from .claim_extraction import extract_claim_proposals
+
+        now = _utc_now()
+        if episode.status is not MemoryItemStatus.ACTIVE or (
+            episode.expires_at_utc is not None and episode.expires_at_utc <= now
+        ):
+            return
+        if self.__db.execute(
+            "SELECT 1 FROM subjects WHERE subject_id = ? AND status = 'active' "
+            "AND subject_kind IN ('primary_user', 'known_person')",
+            (episode.owner_subject_id,),
+        ).fetchone() is None:
+            return
+        for proposal in extract_claim_proposals(episode, evidence):
+            if self.__db.execute(
+                "SELECT 1 FROM claim_source_suppressions WHERE subject_id = ? "
+                "AND predicate = ? AND source_evidence_id = ?",
+                (episode.owner_subject_id, proposal.predicate, episode.episode_id),
+            ).fetchone() is not None:
+                continue
+            claim_id = "claim-" + hashlib.sha256(
+                f"{episode.episode_id}\0{proposal.predicate}\0{_json(proposal.value)}".encode()
+            ).hexdigest()
+            if self.__db.execute("SELECT 1 FROM memory_items WHERE item_id = ?", (claim_id,)).fetchone():
+                continue
+            rows = self.__db.execute(
+                "SELECT i.payload_json FROM memory_items i JOIN user_model_claims c "
+                "ON c.claim_id = i.item_id WHERE c.subject_id = ? AND c.predicate = ? "
+                "AND i.deletion_fenced = 0 AND i.status IN ('candidate', 'active', 'confirmed') "
+                "AND (i.expires_at_utc IS NULL OR i.expires_at_utc > ?)",
+                (episode.owner_subject_id, proposal.predicate, now),
+            ).fetchall()
+            conflicts = tuple(
+                item for item in (UserModelClaim.from_dict(json.loads(row["payload_json"])) for row in rows)
+                if item.value != proposal.value
+            )
+            rule = PREDICATE_REGISTRY[proposal.predicate]
+            claim = UserModelClaim(
+                schema_version=1, claim_id=claim_id, revision=1,
+                owner_subject_id=episode.owner_subject_id, subject_id=episode.owner_subject_id,
+                audience=Audience.OWNER_PRIVATE, privacy_class="user_private",
+                predicate=proposal.predicate, value_type=proposal.value_type, value=proposal.value,
+                epistemic_class=ClaimEpistemicClass.EXPLICIT_STATEMENT, confidence=1.0,
+                sensitivity=rule.sensitivity,
+                status=ClaimStatus.CANDIDATE if conflicts or rule.requires_confirmation else ClaimStatus.ACTIVE,
+                source_evidence_ids=(episode.episode_id,), source_digest=episode.source_digest,
+                contradiction_claim_ids=tuple(item.claim_id for item in conflicts[:64]),
+                supersedes_claim_id=None, acl_subject_ids=(episode.owner_subject_id,),
+                confirmed_at_utc=None, confirmation_event_id=None,
+                expires_at_utc=episode.expires_at_utc, created_at_utc=now, updated_at_utc=now,
+            )
+            self.put_item(claim)
+            for previous in conflicts:
+                self.put_item(replace(
+                    previous, revision=previous.revision + 1, updated_at_utc=now,
+                    contradiction_claim_ids=(*previous.contradiction_claim_ids[:63], claim_id),
+                ))
+            self.put_derivation_edge(DerivationEdge(
+                schema_version=1, edge_id="edge-" + claim_id,
+                source_kind="experience_episode", source_id=episode.episode_id,
+                target_kind="user_model_claim", target_id=claim_id, relation="derived_from",
+                extractor="explicit_user_preference", extractor_version="deterministic.v1",
+                source_digest=episode.source_digest, created_at_utc=now, active=True,
+            ))
 
     def _suppress_claim_sources(self, claim: UserModelClaim, reason: str, now: str) -> None:
         for source_id in claim.source_evidence_ids:

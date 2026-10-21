@@ -1207,7 +1207,9 @@ class MemoryService:
                         extraction.episode,
                         decision.receipt_values,
                         writer_token=writer_token,
+                        evidence=evidence,
                     )
+                    self._invalidate_memory_contexts()
                     projected += 1
                 else:
                     final_values = dict(

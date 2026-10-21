@@ -39,6 +39,7 @@
 - [x] T5-B2b 纠正事务：新候选、旧记录 superseded、派生边和幂等收据原子提交。
 - [ ] 完整通用写入治理与原始证据验证。当前来源检查只验证 active completed episode；原始用户自述证据验证仍属 C，确认/纠正入口尚未对外开放。
 - [ ] T5-C 验证真实来源并接入单写者；删除/replay 不复活。
+- [x] T5-C 首批原文提取接入：明确记住 + 第一人称受控偏好，中英文全句匹配；与 episode/receipt/cursor 原子提交，跨回合矛盾退出普通 prompt。
 - [x] T5-C 删除 claim 来源抑制：围栏事务写入无内容抑制记录，清理后换 ID 写入与重启重放被拒绝；不等于完整来源提取已交付。
 - [ ] T4 集成审计：重启时未完成围栏恢复、旧 WS replay、播放请求归属与迟到音频。
 
@@ -84,3 +85,12 @@
 - 定向验证 3 passed / 3.54 秒，补充 suppression INSERT 故障回滚 1 passed / 1.48 秒。未运行全量测试。
 - 尚未证明完整 T5：原始用户内容核验、通用写入治理、跨时证据与矛盾规则仍待完成；此改动也不替代 T10 主体删除完整验收。
 - 并行证据审查完成：提取接入 `_reconcile_terminal_page` 的已验证 completed evidence；episode、claim、派生边、receipt 与 cursor 必须在 `project_episode` 同一事务提交，禁止提交 receipt 后单独写 claim 导致崩溃漏提取。来源使用 complete user message，不能以 assistant 摘要证明用户自述。
+
+### 原始会话提取接入增量
+
+- 已接入 completed evidence 原文到 ClaimProposal，再由单写者分配 owner-private、状态和敏感级别；支持首批 verbosity/directness/formality/units/response_format/language 的中英文明确记忆句式。
+- 只匹配 episode 已引用的完整 user message；拒绝引号、第三方、助手内容、额外指令、guest-present 及缺失显式无 guest 声明。历史弱身份数据不自动升级。
+- episode、claim、派生边、receipt、cursor 同事务写入；故障注入后全部回滚，恢复重试生成一次。已有抑制来源跳过 claim，不阻塞 episode 处理。
+- 同主体同 predicate 的不同值互相标记 contradiction，新记录 candidate，双方普通 prompt 不可用；不自动覆盖已有偏好。
+- 并行智能体只新增提取模块与专项测试，74 passed；主线程端到端原文提取/冲突/回滚/重试 2 passed，最终运行 2.31 秒。未重复全量测试。
+- 剩余范围不变：自由表达与其余 predicate、敏感/边界候选、三条跨时 observed、inferred、矛盾解决与通用写入治理尚未完整交付；T5 不标记完成。
