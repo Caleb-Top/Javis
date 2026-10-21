@@ -15,7 +15,7 @@ from tests.test_memory_acl_recall import context, query, seed
 from tests.test_memory_contracts import CLAIM
 from tests.test_session_handoff_privacy import service, principal, bootstrap, factory, SESSION
 from tests.test_memory_acl_recall import episode
-from core.life.memory.claims import DecideClaim
+from core.life.memory.claims import CorrectClaim, DecideClaim
 from core.life.memory.store import DATABASE_RELATIVE_PATH, MemoryStoreAuthorizationError, MemoryStoreConflictError
 from core.life.memory.service import MemoryService
 
@@ -280,3 +280,53 @@ def test_generic_write_cannot_silently_rewrite_claim_evidence(tmp_path, changes)
         store.put_item(original, writer_token=token)
         with pytest.raises(MemoryStoreConflictError, match="correction requires"):
             store.put_item(replace(original, revision=2, **changes), writer_token=token)
+
+
+def correction(access, item):
+    return CorrectClaim(access, item.claim_id, item.revision, ClaimProposal.from_dict({
+        "predicate": item.predicate, "value_type": "string", "value": "detailed",
+        "source_evidence_ids": list(item.source_evidence_ids),
+    }), "correction-one")
+
+
+def test_correction_is_atomic_linked_and_idempotent(service):
+    _, access, item = seed_decision(service)
+    command = correction(access, item)
+    updated = service.correct_claim(command).result(timeout=5)
+    assert updated.claim_id != item.claim_id
+    assert updated.supersedes_claim_id == item.claim_id
+    assert updated.value == "detailed"
+    assert updated.status is ClaimStatus.CANDIDATE
+    assert service.correct_claim(command).result(timeout=5) == updated
+    with pytest.raises(MemoryStoreConflictError, match="idempotency"):
+        service.correct_claim(replace(command, proposal=replace(command.proposal, value="balanced"))).result(timeout=5)
+    with sqlite3.connect(service.data_root / DATABASE_RELATIVE_PATH) as db:
+        assert db.execute("SELECT status FROM memory_items WHERE item_id = ?", (item.claim_id,)).fetchone()[0] == "superseded"
+        assert db.execute("SELECT COUNT(*) FROM derivation_edges WHERE target_id = ?", (updated.claim_id,)).fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM correction_receipts").fetchone()[0] == 1
+
+
+def test_correction_receipt_failure_rolls_back_both_records(service):
+    _, access, item = seed_decision(service)
+    path = service.data_root / DATABASE_RELATIVE_PATH
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TRIGGER fail_correction BEFORE INSERT ON correction_receipts BEGIN SELECT RAISE(ABORT, 'correction failed'); END")
+    command = correction(access, item)
+    with pytest.raises(sqlite3.IntegrityError, match="correction failed"):
+        service.correct_claim(command).result(timeout=5)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM user_model_claims").fetchone()[0] == 1
+        assert db.execute("SELECT status, revision FROM memory_items WHERE item_id = ?", (item.claim_id,)).fetchone() == ("candidate", 1)
+        assert db.execute("SELECT COUNT(*) FROM derivation_edges").fetchone()[0] == 0
+        db.execute("DROP TRIGGER fail_correction")
+    assert service.correct_claim(command).result(timeout=5).value == "detailed"
+
+
+def test_correction_rejects_stale_generation_before_any_write(service):
+    _, access, item = seed_decision(service)
+    command = correction(replace(access, session_generation=access.session_generation + 1), item)
+    with pytest.raises(MemoryStoreAuthorizationError, match="binding"):
+        service.correct_claim(command).result(timeout=5)
+    with sqlite3.connect(service.data_root / DATABASE_RELATIVE_PATH) as db:
+        assert db.execute("SELECT COUNT(*) FROM correction_receipts").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM user_model_claims").fetchone()[0] == 1

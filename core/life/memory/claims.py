@@ -133,6 +133,26 @@ class DecideClaim:
             raise ValueError("claim_decision_invalid")
 
 
+@dataclass(frozen=True)
+class CorrectClaim:
+    access_context: AccessContext
+    claim_id: str
+    expected_revision: int
+    proposal: ClaimProposal
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        DecideClaim(self.access_context, self.claim_id, self.expected_revision,
+                    "confirm", self.idempotency_key)
+        if not isinstance(self.proposal, ClaimProposal):
+            raise ValueError("claim_proposal_required")
+        normalized = ClaimProposal.from_dict({
+            "predicate": self.proposal.predicate, "value_type": self.proposal.value_type,
+            "value": self.proposal.value, "source_evidence_ids": self.proposal.source_evidence_ids,
+        })
+        object.__setattr__(self, "proposal", normalized)
+
+
 def claim_prompt_eligible(claim: UserModelClaim, context: AccessContext, *, at_utc: str) -> bool:
     """Additional semantic gate after ACL filtering, including cached candidates."""
     if (

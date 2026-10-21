@@ -488,6 +488,21 @@ class MemoryService:
             "expire_claims", operation, priority=MemoryCommandPriority.NORMAL, critical=False
         )
 
+    def correct_claim(self, command) -> Future[UserModelClaim]:
+        from .claims import CorrectClaim
+
+        if not isinstance(command, CorrectClaim):
+            raise TypeError("command must be CorrectClaim")
+
+        def operation(store: MemoryStore, writer_token: object) -> UserModelClaim:
+            result = store.correct_claim(command, writer_token=writer_token)
+            self._invalidate_memory_contexts()
+            return result
+
+        return self._submit_write(
+            "correct_claim", operation, priority=MemoryCommandPriority.CRITICAL, critical=True
+        )
+
     def propose_shared_memory(self, command: ProposeSharedMemory) -> Future[SharedMemory]:
         return self._submit_shared_transition("propose_shared_memory", command)
 

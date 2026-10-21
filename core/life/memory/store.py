@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from core.life.memory.claims import DecideClaim, claim_prompt_eligible, validate_claim_value
+from core.life.memory.claims import CorrectClaim, DecideClaim, PREDICATE_REGISTRY, claim_prompt_eligible, validate_claim_value
 from core.life.memory.contracts import (
     AccessContext,
     AccessPurpose,
@@ -1408,6 +1408,10 @@ class MemoryStore:
     def expire_claims(self, *, writer_token: object, limit: int = 128) -> int:
         with self._writer_transaction(writer_token) as writer:
             return writer.expire_claims(limit=limit)
+
+    def correct_claim(self, command: CorrectClaim, *, writer_token: object) -> UserModelClaim:
+        with self._writer_transaction(writer_token) as writer:
+            return writer.correct_claim(command)
 
     def put_subject(self, subject: Subject, *, writer_token: object) -> bool:
         with self._writer_transaction(writer_token) as writer:
@@ -2862,6 +2866,10 @@ class _MemoryWriter:
             raise TypeError("command must be DecideClaim")
         context = command.access_context
         now = _utc_now()
+        self._require_claim_actor(context, now)
+        return self._decide_claim_authorized(command, now)
+
+    def _require_claim_actor(self, context: AccessContext, now: str) -> None:
         if (
             context.purpose is not AccessPurpose.MANAGE
             or "relationship.manage" not in context.capability_scopes
@@ -2886,6 +2894,9 @@ class _MemoryWriter:
             json.loads(binding["payload_json"])
         ).expires_at_utc <= now:
             raise MemoryStoreAuthorizationError("claim binding unavailable")
+
+    def _decide_claim_authorized(self, command: DecideClaim, now: str) -> UserModelClaim:
+        context = command.access_context
         row = self.__db.execute(
             "SELECT payload_json FROM memory_items WHERE item_id = ? "
             "AND item_kind = 'user_model_claim' AND deletion_fenced = 0",
@@ -2949,6 +2960,85 @@ class _MemoryWriter:
                      "claim_rejected", now),
                 )
         return updated
+
+    def correct_claim(self, command: CorrectClaim) -> UserModelClaim:
+        if not isinstance(command, CorrectClaim):
+            raise TypeError("command must be CorrectClaim")
+        context = command.access_context
+        now = _utc_now()
+        self._require_claim_actor(context, now)
+        proposal = command.proposal
+        correction_id = "claim-correction-" + hashlib.sha256(
+            f"{context.actor_subject_id}\0{command.idempotency_key}".encode()
+        ).hexdigest()
+        new_id = "claim-" + hashlib.sha256(correction_id.encode()).hexdigest()
+        digest = hashlib.sha256(_json({
+            "target": command.claim_id, "revision": command.expected_revision,
+            "predicate": proposal.predicate, "value_type": proposal.value_type.value,
+            "value": proposal.value, "sources": proposal.source_evidence_ids,
+        }).encode()).hexdigest()
+        receipt = self.__db.execute(
+            "SELECT * FROM correction_receipts WHERE correction_id = ?", (correction_id,)
+        ).fetchone()
+        if receipt is not None:
+            row = self.__db.execute("SELECT payload_json FROM memory_items WHERE item_id = ?", (new_id,)).fetchone()
+            if row is None:
+                raise MemoryStoreConflictError("corrected claim unavailable")
+            existing = UserModelClaim.from_dict(json.loads(row[0]))
+            if existing.source_digest != digest or receipt["target_id"] != command.claim_id:
+                raise MemoryStoreConflictError("claim correction idempotency conflict")
+            return existing
+        epoch = self.__db.execute("SELECT acl_epoch FROM memory_meta WHERE singleton = 1").fetchone()[0]
+        if epoch != context.acl_epoch:
+            raise MemoryStoreAuthorizationError("claim context stale")
+        row = self.__db.execute(
+            "SELECT payload_json FROM memory_items WHERE item_id = ? AND item_kind = 'user_model_claim'",
+            (command.claim_id,),
+        ).fetchone()
+        if row is None:
+            raise MemoryStoreConflictError("claim unavailable")
+        current = UserModelClaim.from_dict(json.loads(row[0]))
+        if current.owner_subject_id != context.actor_subject_id or current.subject_id != context.actor_subject_id:
+            raise MemoryStoreAuthorizationError("claim owner mismatch")
+        if current.revision != command.expected_revision or current.status not in {
+            ClaimStatus.CANDIDATE, ClaimStatus.ACTIVE, ClaimStatus.CONFIRMED,
+        }:
+            raise MemoryStoreConflictError("claim correction revision or state conflict")
+        if proposal.predicate != current.predicate:
+            raise MemoryStoreConflictError("claim correction predicate mismatch")
+        self._live_source_episodes(proposal.source_evidence_ids, context, now)
+        corrected = replace(
+            current, claim_id=new_id, revision=1, value_type=proposal.value_type,
+            value=proposal.value, status=ClaimStatus.CANDIDATE,
+            epistemic_class=ClaimEpistemicClass.EXPLICIT_STATEMENT,
+            sensitivity=PREDICATE_REGISTRY[proposal.predicate].sensitivity,
+            confidence=1.0, audience=Audience.OWNER_PRIVATE,
+            acl_subject_ids=(context.actor_subject_id,),
+            source_evidence_ids=proposal.source_evidence_ids, source_digest=digest,
+            contradiction_claim_ids=(), supersedes_claim_id=current.claim_id,
+            confirmed_at_utc=None, confirmation_event_id=None, expires_at_utc=None,
+            created_at_utc=now, updated_at_utc=now,
+        )
+        self.put_item(corrected)
+        self.put_item(replace(current, revision=current.revision + 1,
+                              status=ClaimStatus.SUPERSEDED, confirmed_at_utc=None, updated_at_utc=now))
+        for source_kind, source_id, relation in (
+            ("user_model_claim", current.claim_id, "corrects"),
+            *(("experience_episode", source_id, "derived_from") for source_id in proposal.source_evidence_ids),
+        ):
+            edge_id = "claim-edge-" + hashlib.sha256(f"{new_id}\0{source_id}".encode()).hexdigest()
+            self.put_derivation_edge(DerivationEdge(
+                schema_version=1, edge_id=edge_id, source_kind=source_kind, source_id=source_id,
+                target_kind="user_model_claim", target_id=new_id, relation=relation,
+                extractor="claim_correction", extractor_version="deterministic.v1",
+                source_digest=digest, created_at_utc=now, active=True,
+            ))
+        self.__db.execute(
+            "INSERT INTO correction_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (correction_id, context.actor_subject_id, "user_model_claim", current.claim_id,
+             command.expected_revision, "user_model_claim", new_id, now),
+        )
+        return corrected
 
     def propose_shared_memory(self, command: ProposeSharedMemory) -> SharedMemory:
         if not isinstance(command, ProposeSharedMemory):
