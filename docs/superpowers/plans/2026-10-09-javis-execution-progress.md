@@ -39,6 +39,7 @@
 - [x] T5-B2b 纠正事务：新候选、旧记录 superseded、派生边和幂等收据原子提交。
 - [ ] 完整通用写入治理与原始证据验证。当前来源检查只验证 active completed episode；原始用户自述证据验证仍属 C，确认/纠正入口尚未对外开放。
 - [ ] T5-C 验证真实来源并接入单写者；删除/replay 不复活。
+- [x] T5-C 删除 claim 来源抑制：围栏事务写入无内容抑制记录，清理后换 ID 写入与重启重放被拒绝；不等于完整来源提取已交付。
 - [ ] T4 集成审计：重启时未完成围栏恢复、旧 WS replay、播放请求归属与迟到音频。
 
 ## 验收原则
@@ -75,3 +76,11 @@
 - 纠正复用 correction_receipts，当前绑定校验与决策路径共用；成功创建新 candidate 并 supersede 旧记录，建立旧 claim/来源 episode 到新记录的边。
 - 精确重放返回同一新记录；同 key 改值冲突；收据写入失败完整回滚新旧记录和派生边。
 - 已执行纠正与共享授权路径 4 项定向测试，3.72 秒；另补旧 generation 拒绝测试。完整 T5 仍需来源提取、写入治理、删除/replay suppression。
+
+### 删除来源抑制增量
+
+- claim 删除围栏复用拒绝来源抑制表及单写者事务；仅保留 subject/predicate/source ID 和原因，不保留被删值。
+- derived_only 删除 claim 保留来源 episode；即使更换 claim ID，也不能由该来源重新生成同 predicate 的可用记录。清理目标记录和重开数据库后仍有效。
+- 定向验证 3 passed / 3.54 秒，补充 suppression INSERT 故障回滚 1 passed / 1.48 秒。未运行全量测试。
+- 尚未证明完整 T5：原始用户内容核验、通用写入治理、跨时证据与矛盾规则仍待完成；此改动也不替代 T10 主体删除完整验收。
+- 并行证据审查完成：提取接入 `_reconcile_terminal_page` 的已验证 completed evidence；episode、claim、派生边、receipt 与 cursor 必须在 `project_episode` 同一事务提交，禁止提交 receipt 后单独写 claim 导致崩溃漏提取。来源使用 complete user message，不能以 assistant 摘要证明用户自述。

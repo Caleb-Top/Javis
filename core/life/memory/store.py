@@ -2950,16 +2950,18 @@ class _MemoryWriter:
              command.expected_revision, now),
         )
         if command.decision == "reject":
-            for source_id in current.source_evidence_ids:
-                suppression_id = hashlib.sha256(
-                    f"{current.subject_id}\0{current.predicate}\0{source_id}".encode()
-                ).hexdigest()
-                self.__db.execute(
-                    "INSERT OR IGNORE INTO claim_source_suppressions VALUES (?, ?, ?, ?, ?, ?)",
-                    (suppression_id, current.subject_id, current.predicate, source_id,
-                     "claim_rejected", now),
-                )
+            self._suppress_claim_sources(current, "claim_rejected", now)
         return updated
+
+    def _suppress_claim_sources(self, claim: UserModelClaim, reason: str, now: str) -> None:
+        for source_id in claim.source_evidence_ids:
+            suppression_id = hashlib.sha256(
+                f"{claim.subject_id}\0{claim.predicate}\0{source_id}".encode()
+            ).hexdigest()
+            self.__db.execute(
+                "INSERT OR IGNORE INTO claim_source_suppressions VALUES (?, ?, ?, ?, ?, ?)",
+                (suppression_id, claim.subject_id, claim.predicate, source_id, reason, now),
+            )
 
     def correct_claim(self, command: CorrectClaim) -> UserModelClaim:
         if not isinstance(command, CorrectClaim):
@@ -4001,6 +4003,15 @@ class _MemoryWriter:
         for kind, item_id in sorted(all_targets):
             target_state = "fenced_primary" if (kind, item_id) in primary else "fenced_derived"
             session_id = request_id = None
+            if kind == MemoryItemKind.USER_MODEL_CLAIM.value:
+                claim_row = self.__db.execute(
+                    "SELECT payload_json FROM memory_items WHERE item_id = ?", (item_id,)
+                ).fetchone()
+                # Keep content-free replay protection after the claim itself is removed.
+                self._suppress_claim_sources(
+                    UserModelClaim.from_dict(json.loads(claim_row["payload_json"])),
+                    "claim_deleted", now,
+                )
             if kind == MemoryItemKind.EXPERIENCE_EPISODE.value:
                 episode = self.__db.execute(
                     "SELECT session_id, request_id FROM experience_episodes WHERE episode_id = ?",

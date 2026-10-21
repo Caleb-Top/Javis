@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from core.life.memory.store import (
     DATABASE_RELATIVE_PATH,
     MemoryStoreAuthorizationError,
     MemoryStoreConflictError,
+    MemoryStore,
 )
 from core.prompt_builder import PromptBuilder
 
@@ -257,6 +259,60 @@ def test_derived_only_deletion_covers_db_fts_cache_prompt_restart_reindex_and_re
         assert _recall(reopened).items == ()
     finally:
         assert reopened.shutdown(timeout=20)
+
+
+@pytest.mark.parametrize("inject_failure", [False, True])
+def test_claim_deletion_suppresses_new_ids_after_restart_without_removing_source(tmp_path: Path, inject_failure):
+    from tests.test_user_model_claims import claim
+
+    conversations = _conversation(tmp_path / "conversation")
+    data_root = tmp_path / "data"
+    service = MemoryService(
+        data_root, conversation_store=conversations, reconcile_interval_seconds=60
+    ).start()
+    try:
+        episode = _seed(service, conversations)
+        item = claim(
+            owner_subject_id="subject-user", subject_id="subject-user",
+            acl_subject_ids=["subject-user"], source_evidence_ids=[episode.episode_id],
+            status="candidate",
+        )
+        service.put_item(item).result(timeout=20)
+        wire = _forget(episode.episode_id).to_dict()
+        wire["scope"] = "item"
+        wire["target_selector"]["item_kind"] = "user_model_claim"
+        wire["target_selector"]["item_id"] = item.claim_id
+        command = ForgetMemory.from_dict(wire)
+        if inject_failure:
+            with sqlite3.connect(data_root / DATABASE_RELATIVE_PATH) as db:
+                db.execute("CREATE TRIGGER fail_claim_suppression BEFORE INSERT ON claim_source_suppressions "
+                           "BEGIN SELECT RAISE(ABORT, 'suppression failed'); END")
+            with pytest.raises(sqlite3.IntegrityError, match="suppression failed"):
+                service.forget_memory(command).result(timeout=20)
+            with sqlite3.connect(data_root / DATABASE_RELATIVE_PATH) as db:
+                assert db.execute("SELECT status, deletion_fenced FROM memory_items WHERE item_id = ?",
+                                  (item.claim_id,)).fetchone() == ("candidate", 0)
+                assert db.execute("SELECT COUNT(*) FROM deletion_targets").fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM claim_source_suppressions").fetchone()[0] == 0
+                db.execute("DROP TRIGGER fail_claim_suppression")
+        result = service.forget_memory(command).result(timeout=20)
+        assert result["state"] == "verified"
+        assert service.forget_memory(command).result(timeout=20) == result
+        with pytest.raises(MemoryStoreConflictError, match="suppressed"):
+            service.put_item(replace(item, claim_id="new-before-restart")).result(timeout=20)
+        with sqlite3.connect(data_root / DATABASE_RELATIVE_PATH) as db:
+            assert db.execute("SELECT COUNT(*) FROM user_model_claims").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM experience_episodes").fetchone()[0] == 1
+            assert db.execute(
+                "SELECT subject_id, predicate, source_evidence_id, reason_code "
+                "FROM claim_source_suppressions"
+            ).fetchone() == ("subject-user", item.predicate, episode.episode_id, "claim_deleted")
+    finally:
+        assert service.shutdown(timeout=20)
+    token = object()
+    with MemoryStore(data_root, writer_token=token) as reopened:
+        with pytest.raises(MemoryStoreConflictError, match="suppressed"):
+            reopened.put_item(replace(item, claim_id="new-after-restart"), writer_token=token)
 
 
 def test_source_and_derived_redacts_content_but_preserves_ordering_tombstones(tmp_path: Path):
