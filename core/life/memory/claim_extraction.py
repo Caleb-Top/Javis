@@ -6,12 +6,14 @@ import re
 from collections import Counter
 from typing import Any, Mapping
 
-from .claims import ClaimProposal, PREDICATE_REGISTRY
-from .contracts import ExperienceEpisode
+from .claims import ClaimProposal, PREDICATE_REGISTRY, validate_claim_value
+from .contracts import ClaimValueType, ExperienceEpisode
 
 
 # These are entire preference objects, never keyword searches in arbitrary prose.
 _OBJECTS = (
+    ("workflow.preferred_confirmation_style", "concise", r"concise confirmations?", r"简洁(?:的)?确认(?:方式)?"),
+    ("workflow.preferred_confirmation_style", "detailed", r"detailed confirmations?", r"详细(?:的)?确认(?:方式)?"),
     ("communication.verbosity", "brief", r"(?:brief|short|concise) (?:answers|responses|replies)", r"(?:简短|简洁|精简)(?:的)?(?:回答|回复)"),
     ("communication.verbosity", "balanced", r"(?:balanced|moderately detailed) (?:answers|responses|replies)", r"(?:适中|详略适中)(?:的)?(?:回答|回复)"),
     ("communication.verbosity", "detailed", r"(?:detailed|in-depth) (?:answers|responses|replies)", r"(?:详细|详尽)(?:的)?(?:回答|回复)"),
@@ -29,8 +31,36 @@ _OBJECTS = (
     ("communication.language", "zh", r"(?:Chinese|(?:answers|responses|replies) in Chinese)", r"(?:使用|用)?中文(?:回答|回复)?"),
     ("communication.language", "en", r"(?:English|(?:answers|responses|replies) in English)", r"(?:使用|用)?英文(?:回答|回复)?|(?:使用|用)?英语(?:回答|回复)?"),
 )
+
 _EN_REMEMBER = r"(?:please )?(?:remember|save|record|note)(?: that)?"
 _ZH_REMEMBER = r"(?:请)?(?:记住|记下|记录)"
+
+# Only category names are captured, never personal details or arbitrary topics.
+_BOUNDARY_TOPICS = (
+    ("health", "健康"), ("finances", "财务(?:信息)?"),
+    ("relationships", "人际关系"), ("family", "家庭"),
+    ("work", "工作"), ("identity", "身份(?:信息)?"),
+)
+_BOUNDARY_PATTERNS = tuple(
+    (predicate, topic, re.compile(pattern, re.IGNORECASE | re.ASCII))
+    for topic, chinese in _BOUNDARY_TOPICS
+    for predicate, english, zh in (
+        ("boundary.do_not_mention", rf"do not mention my {topic}", rf"不要提及我的{chinese}"),
+        ("boundary.do_not_store", rf"do not store my {topic}", rf"不要保存我的{chinese}"),
+        ("boundary.ask_before_topic", rf"ask me before discussing my {topic}", rf"讨论我的{chinese}之前先问我"),
+    )
+    for pattern in (
+        rf"{_EN_REMEMBER}[ ,:]*{english}[.!]?",
+        rf"{_ZH_REMEMBER}[，,:： ]*{zh}[。！!]?",
+    )
+)
+_FOCUS_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE | re.ASCII)
+    for pattern in (
+        rf"{_EN_REMEMBER}[ ,:]*my focus window is (?P<window>[0-9]{{2}}:[0-9]{{2}}-[0-9]{{2}}:[0-9]{{2}})[.!]?",
+        rf"{_ZH_REMEMBER}[，,:： ]*我的专注时段是[ ]*(?P<window>[0-9]{{2}}:[0-9]{{2}}-[0-9]{{2}}:[0-9]{{2}})[。！!]?",
+    )
+)
 _PATTERNS = tuple(
     (predicate, value, re.compile(pattern, re.IGNORECASE | re.ASCII))
     for predicate, value, english, chinese in _OBJECTS
@@ -102,16 +132,34 @@ def extract_claim_proposals(
         content = message.get("content")
         if type(content) is not str:
             continue
-        for predicate, value, pattern in _PATTERNS:
+        for predicate, value, pattern in (*_PATTERNS, *_BOUNDARY_PATTERNS):
             if pattern.fullmatch(content.strip()):
+                found.setdefault(predicate, set()).add(value)
+        for pattern in _FOCUS_PATTERNS:
+            match = pattern.fullmatch(content.strip())
+            if match:
+                predicate = "workflow.focus_window"
+                try:
+                    value = validate_claim_value(
+                        predicate, PREDICATE_REGISTRY[predicate].value_type,
+                        match.group("window"),
+                    )
+                except ValueError:
+                    continue
                 found.setdefault(predicate, set()).add(value)
     # Conflicting explicit statements are not resolved by guessing chronology.
     return tuple(
         ClaimProposal.from_dict({
             "predicate": predicate,
             "value_type": PREDICATE_REGISTRY[predicate].value_type,
-            "value": next(iter(values)),
+            "value": (
+                tuple(sorted(values))
+                if PREDICATE_REGISTRY[predicate].value_type is ClaimValueType.STRING_SET
+                else next(iter(values))
+            ),
             "source_evidence_ids": (episode.episode_id,),
         })
-        for predicate, values in sorted(found.items()) if len(values) == 1
+        for predicate, values in sorted(found.items())
+        if len(values) == 1
+        or PREDICATE_REGISTRY[predicate].value_type is ClaimValueType.STRING_SET
     )

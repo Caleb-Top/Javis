@@ -85,3 +85,30 @@ def test_claim_failure_rolls_back_episode_edges_and_cursor(tmp_path):
             assert db.execute("SELECT COUNT(*) FROM derivation_edges").fetchone()[0] == 1
     finally:
         assert service.shutdown()
+
+
+@pytest.mark.parametrize("text,predicate,value,sensitivity,status", [
+    ("Remember: do not mention my health.", "boundary.do_not_mention", ["health"], "sensitive", "candidate"),
+    ("Remember: do not store my finances.", "boundary.do_not_store", ["finances"], "sensitive", "candidate"),
+    ("Remember: ask me before discussing my family.", "boundary.ask_before_topic", ["family"], "sensitive", "candidate"),
+    ("Remember: I prefer concise confirmations.", "workflow.preferred_confirmation_style", "concise", "ordinary", "active"),
+    ("Remember: my focus window is 22:00-06:00.", "workflow.focus_window", "22:00-06:00", "personal", "active"),
+])
+def test_workflow_and_boundary_projection_policy(tmp_path, text, predicate, value, sensitivity, status):
+    service, conversations = start(tmp_path)
+    try:
+        complete(conversations, "policy", text)
+        assert service.reconcile_once().result(timeout=5)["advanced"] == 1
+        with sqlite3.connect(service.data_root / DATABASE_RELATIVE_PATH) as db:
+            row = db.execute("SELECT payload_json FROM user_model_claims").fetchone()
+            assert row is not None
+            wire = json.loads(row[0])
+            assert (wire["predicate"], wire["value"], wire["sensitivity"], wire["status"]) == (
+                predicate, value, sensitivity, status,
+            )
+            assert wire["confirmation_event_id"] is None
+            access = replace(_access("recall"), guest_present=False)
+            assert claim_prompt_eligible(UserModelClaim.from_dict(wire), access,
+                                         at_utc=wire["updated_at_utc"]) is (status == "active")
+    finally:
+        assert service.shutdown()
