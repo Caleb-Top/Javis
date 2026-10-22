@@ -29,6 +29,7 @@ export function createAvatarController(options: AvatarControllerOptions): Avatar
   const now = options.now ?? Date.now;
   const mixer = new ExpressionMixer(options.capabilities);
   let latestRevision = -1;
+  let expiresAt = Number.NEGATIVE_INFINITY;
   let disposed = false;
 
   function publish(frame = mixer.snapshot()): void {
@@ -40,6 +41,7 @@ export function createAvatarController(options: AvatarControllerOptions): Avatar
     const expiry = Date.parse(intent.expires_at);
     if (
       disposed
+      || !Number.isFinite(currentTime)
       || intent.schema_version !== 1
       || !Number.isInteger(intent.revision)
       || intent.revision <= latestRevision
@@ -48,6 +50,7 @@ export function createAvatarController(options: AvatarControllerOptions): Avatar
     ) return false;
 
     latestRevision = intent.revision;
+    expiresAt = expiry;
     const target = mapExpressionIntent(intent);
     mixer.submit(target);
     if (intent.interrupt) mixer.interrupt();
@@ -56,7 +59,13 @@ export function createAvatarController(options: AvatarControllerOptions): Avatar
   }
 
   function tick(at = now()): void {
-    if (!disposed) publish(mixer.tick(at));
+    if (disposed) return;
+    if (!isFresh(at)) mixer.reset();
+    publish(mixer.tick(at));
+  }
+
+  function isFresh(at: number): boolean {
+    return Number.isFinite(at) && at < expiresAt;
   }
 
   function interrupt(): void {
@@ -67,6 +76,11 @@ export function createAvatarController(options: AvatarControllerOptions): Avatar
 
   function setSpeakingLevel(level: number): void {
     if (disposed) return;
+    if (!isFresh(now())) {
+      mixer.reset();
+      publish();
+      return;
+    }
     mixer.setSpeakingLevel(level);
     publish();
   }

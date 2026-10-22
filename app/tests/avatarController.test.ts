@@ -40,3 +40,32 @@ test("interrupt and dispose immediately neutralize active mouth output", () => {
   controller.tick(now + 100);
   assert.equal(frames.length, count);
 });
+
+test("accepted intent expires and late mouth callbacks cannot revive it", () => {
+  const frames: ExpressionMixerSnapshot[] = [];
+  let now = Date.parse("2026-08-20T10:00:00Z");
+  const controller = createAvatarController({
+    sink: { setExpressionTarget: frame => frames.push(frame) },
+    capabilities: capabilitiesFixture(), now: () => now,
+  });
+  const speaking = intentFixture("speaking", {
+    revision: 7, expires_at: new Date(now + 100).toISOString(),
+  });
+  assert.equal(controller.applyIntent(speaking), true);
+  controller.setSpeakingLevel(0.5);
+  assert.equal(frames.at(-1)?.mouth, 0.5);
+  now += 100;
+  controller.setSpeakingLevel(0.6);
+  assert.equal(frames.at(-1)?.state, "idle");
+  assert.equal(frames.at(-1)?.mouth, 0);
+  controller.tick();
+  assert.equal(frames.at(-1)?.mouth, 0);
+  assert.equal(controller.applyIntent({ ...speaking, expires_at: new Date(now + 1000).toISOString() }), false);
+  assert.equal(controller.applyIntent({ ...speaking, revision: 8, expires_at: new Date(now + 1000).toISOString() }), true);
+  controller.setSpeakingLevel(0.4);
+  assert.equal(frames.at(-1)?.mouth, 0.4);
+  now += 1000;
+  controller.tick();
+  assert.equal(frames.at(-1)?.state, "idle");
+  assert.equal(frames.at(-1)?.gaze, "none");
+});

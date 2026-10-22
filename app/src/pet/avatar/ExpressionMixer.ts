@@ -88,6 +88,14 @@ export class ExpressionMixer {
     this.#transitionFromMouth = 0;
   }
 
+  reset(): void {
+    this.#current = { ...NEUTRAL, blinkEnabled: this.#capabilities.has("blink") };
+    this.#target = { ...this.#current };
+    this.#transitionFromMouth = 0;
+    this.#transitionStartedAt = 0;
+    this.#interrupted = false;
+  }
+
   setSpeakingLevel(level: number): void {
     if (this.#interrupted || this.#target.state !== "speaking") {
       this.#current = { ...this.#current, mouth: 0 };

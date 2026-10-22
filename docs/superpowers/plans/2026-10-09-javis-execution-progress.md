@@ -126,3 +126,10 @@
 - 回调和加载失败分支均检查 dispose/重建代次，旧异步结果不再覆盖当前预览状态。
 - 使用 WEBGL_lose_context 扩展真实触发丢失/恢复，两尺寸恢复后彩色像素各 3394，无页面异常、无页面横向溢出；截图已查看。扩展模拟不等价于真实 GPU 驱动故障或 Windows WebView2 验收。
 - 浏览器定向验证 4.67 秒；TypeScript noEmit 通过。未跑全量测试。证据仍在 tmp/avatar-preview-evidence，包括新增 context-lost-390.png 和 context-lost-1280.png。
+
+### L0-B 表达运行中到期增量
+
+- AvatarController 不再仅在接收时检查 expires_at：tick 和 speaking level 回调都检查当前有效期，到期时 mixer 清为 idle/闭口/无注视，不残留过期动作。
+- 到期不重置已接收 revision，因此旧版本换一个未来到期时间仍不能复活；只有更新版本的合法意图能重新接管。
+- 控制器和 mixer 五项定向测试通过，约 0.20 秒；桌面/移动实际浏览器非空画面、状态变化、打断、WebGL 恢复检查通过约 5.95 秒，无页面异常。未运行全量测试。
+- 此修复覆盖共享 3D 表达控制器；其余九态视觉质量、资产、性能分级与实机安装验收仍需完成。
