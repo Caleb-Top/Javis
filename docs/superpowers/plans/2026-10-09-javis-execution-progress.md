@@ -139,3 +139,10 @@
 - ExpressionMixer 保留音量包络的最后输出（包括结束零值），后续 animation tick 不再用默认 speaking mouth 覆盖它；新意图清除旧包络覆盖值。
 - setSpeakingLevel 同样检查 mouth 能力，缺失能力保持闭口；打断后的迟到非零包络仍被拒绝。
 - mixer/controller/envelope 九项定向测试通过约 0.24 秒；双尺寸浏览器非空画面、交互、恢复检查通过约 5.63 秒，未运行全量测试。
+
+### L0-B 生产窗口可见性增量
+
+- PetSurface 接入 document.visibilitychange，同时暂停控制器 RAF 与 AvatarSurface 渲染，并向 PerformanceGovernor 提交可见性状态；隐藏时完成异步挂载也不启动持续循环。
+- 显示事件保留 avatarHost 的故障隐藏状态，不绕过 context-loss 兜底；销毁移除监听。reduced-motion 仍使用单帧，不被恢复事件重新启动连续动画。
+- 新增 scripts/verify_pet_visibility.cjs：实际浏览器加载生产 PetSurface，注入渲染器计数与可见性事件验证隐藏挂载、暂停、恢复、兜底保持、销毁后不恢复，全部通过约 5.31 秒。该测试不等价于真实系统最小化或 GPU 性能测量。
+- TypeScript noEmit 通过；仅运行受影响的 Pet 集成检查，不跑全量测试。

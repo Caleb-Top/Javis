@@ -113,16 +113,30 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
   }
 
   function driveAvatarController(): void {
-    if (avatarFrameId !== null || !avatarController || disposed) return;
+    if (avatarFrameId !== null || !avatarController || disposed || document.hidden || avatarHost.hidden
+      || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     const tick = (): void => {
       avatarFrameId = null;
-      if (!avatarController || disposed) return;
+      if (!avatarController || disposed || document.hidden || avatarHost.hidden) return;
       const now = Date.now();
       avatarController.tick(now);
       if (speakingEnvelope.active()) avatarController.setSpeakingLevel(speakingEnvelope.level(now));
       avatarFrameId = window.requestAnimationFrame(tick);
     };
     avatarFrameId = window.requestAnimationFrame(tick);
+  }
+
+  function syncAvatarVisibility(): void {
+    if (disposed) return;
+    const visible = !document.hidden && !avatarHost.hidden;
+    const reduced = !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    performanceGovernor?.setRenderState({ visible, surface: "pet" });
+    avatarSurface?.setVisible(visible && !reduced);
+    if (!visible || reduced) cancelAvatarFrame();
+    if (visible && reduced) {
+      avatarController?.tick();
+      avatarSurface?.renderOnce();
+    } else if (visible) driveAvatarController();
   }
 
   function releaseAvatar(): void {
@@ -238,6 +252,7 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
     surface.dataset.avatarFallbackStatus = decision.status;
     avatarSurface?.setVisible(false);
     showVisualFallback(skin);
+    syncAvatarVisibility();
   }
 
   function handleAvatarContextRestored(
@@ -320,12 +335,7 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
       }
       applyLatestIntent();
 
-      if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-        mountedSurface.setVisible(false);
-        mountedSurface.renderOnce();
-      } else {
-        driveAvatarController();
-      }
+      syncAvatarVisibility();
     } catch {
       if (!disposed && skinLoads.isCurrent(generation)) {
         performanceGovernor?.reportFailure("load");
@@ -452,6 +462,7 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
   document.addEventListener("javis:pet-skin-changed", handleSkinChanged);
   document.addEventListener("javis:stop-audio", handleStopAudio);
   document.addEventListener("javis:playback-envelope-start", handlePlaybackEnvelopeStart);
+  document.addEventListener("visibilitychange", syncAvatarVisibility);
 
   let unsubscribeExpression = (): void => undefined;
   try {
@@ -485,6 +496,7 @@ export function createPetSurface(options: PetSurfaceOptions): PetSurfaceControll
       document.removeEventListener("javis:pet-skin-changed", handleSkinChanged);
       document.removeEventListener("javis:stop-audio", handleStopAudio);
       document.removeEventListener("javis:playback-envelope-start", handlePlaybackEnvelopeStart);
+      document.removeEventListener("visibilitychange", syncAvatarVisibility);
       options.root.innerHTML = "";
     },
   };
