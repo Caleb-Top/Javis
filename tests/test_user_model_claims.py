@@ -330,3 +330,60 @@ def test_correction_rejects_stale_generation_before_any_write(service):
     with sqlite3.connect(service.data_root / DATABASE_RELATIVE_PATH) as db:
         assert db.execute("SELECT COUNT(*) FROM correction_receipts").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM user_model_claims").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("previously_confirmed", [False, True])
+def test_reject_conflict_then_independently_confirm_preserves_resolution_receipt(service, previously_confirmed):
+    actor, access, item = seed_decision(service)
+    if previously_confirmed:
+        item = service.decide_claim(DecideClaim(access, item.claim_id, 1, "confirm", "initial-confirm")).result(timeout=5)
+    source = replace(episode("different-source", item.owner_subject_id, "Detailed answers"),
+                     participant_subject_ids=access.participant_subject_ids)
+    service.put_item(source).result(timeout=5)
+    rival = claim(claim_id="rival", owner_subject_id=item.owner_subject_id,
+                  subject_id=item.subject_id, acl_subject_ids=[item.subject_id],
+                  value="detailed", status="candidate", source_evidence_ids=[source.episode_id],
+                  contradiction_claim_ids=[item.claim_id])
+    service.put_item(rival).result(timeout=5)
+    item = replace(item, revision=item.revision + 1, contradiction_claim_ids=(rival.claim_id,))
+    service.put_item(item).result(timeout=5)
+    fresh = lambda: factory(service).for_identity_management(SESSION, principal=actor)
+    with pytest.raises(MemoryStoreConflictError, match="contradiction unresolved"):
+        service.decide_claim(DecideClaim(fresh(), item.claim_id, item.revision, "confirm", "resolve")).result(timeout=5)
+    service.decide_claim(DecideClaim(fresh(), rival.claim_id, 1, "reject", "reject-rival")).result(timeout=5)
+    command = DecideClaim(fresh(), item.claim_id, item.revision, "confirm", "resolve")
+    path = service.data_root / DATABASE_RELATIVE_PATH
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TRIGGER fail_resolution BEFORE INSERT ON claim_decisions "
+                   "WHEN NEW.decision = 'confirm' BEGIN SELECT RAISE(ABORT, 'resolution failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="resolution failed"):
+        service.decide_claim(command).result(timeout=5)
+    with sqlite3.connect(path) as db:
+        old = json.loads(db.execute("SELECT payload_json FROM user_model_claims WHERE claim_id = ?", (item.claim_id,)).fetchone()[0])
+        assert old["contradiction_claim_ids"] == [rival.claim_id]
+        assert old["revision"] == item.revision
+        db.execute("DROP TRIGGER fail_resolution")
+    resolved = service.decide_claim(command).result(timeout=5)
+    assert resolved.status is ClaimStatus.CONFIRMED
+    assert resolved.contradiction_claim_ids == ()
+    assert service.decide_claim(command).result(timeout=5) == resolved
+    with sqlite3.connect(path) as db:
+        assert json.loads(db.execute("SELECT resolved_claim_ids_json FROM claim_decisions WHERE decision_id = ?",
+                                     (resolved.confirmation_event_id,)).fetchone()[0]) == [rival.claim_id]
+
+
+def test_v7_upgrade_preserves_existing_claim_decisions(service):
+    _, access, item = seed_decision(service)
+    confirmed = service.decide_claim(DecideClaim(access, item.claim_id, 1, "confirm", "old-confirm")).result(timeout=5)
+    root = service.data_root
+    assert service.shutdown()
+    with sqlite3.connect(root / DATABASE_RELATIVE_PATH) as db:
+        db.execute("ALTER TABLE claim_decisions DROP COLUMN resolved_claim_ids_json")
+        db.execute("DELETE FROM schema_migrations WHERE version = 8")
+        db.execute("UPDATE memory_meta SET schema_version = 7")
+        db.execute("PRAGMA user_version = 7")
+    with MemoryStore(root, writer_token=object()) as upgraded:
+        assert upgraded.status()["state"] == "ready"
+    with sqlite3.connect(root / DATABASE_RELATIVE_PATH) as db:
+        assert db.execute("SELECT resolved_claim_ids_json FROM claim_decisions WHERE decision_id = ?",
+                          (confirmed.confirmation_event_id,)).fetchone() == ("[]",)

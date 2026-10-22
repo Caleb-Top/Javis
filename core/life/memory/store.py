@@ -67,7 +67,7 @@ from core.life.memory.contracts import (
 
 
 DATABASE_RELATIVE_PATH = Path("memory") / "autobiographical.sqlite3"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _READ_PERMISSIONS = frozenset({"read", "manage", "delete"})
 _PROJECTION_STATES = frozenset({"pending", "excluded", "not_selected", "projected"})
 _TERMINAL_OUTCOMES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -761,6 +761,11 @@ _MIGRATION_7 = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_session_transition_state "
     "ON session_transition_receipts(session_id, state, expected_generation)",
+)
+
+
+_MIGRATION_8 = (
+    "ALTER TABLE claim_decisions ADD COLUMN resolved_claim_ids_json TEXT NOT NULL DEFAULT '[]'",
 )
 
 
@@ -1860,6 +1865,9 @@ class MemoryStore:
             if version == 6:
                 self._validate_v6_schema(db)
                 self._apply_migration(db, 7, _MIGRATION_7)
+                version = 7
+            if version == 7:
+                self._apply_migration(db, 8, _MIGRATION_8)
             self._validate_schema(db)
             mode = str(db.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower()
             if mode != "wal":
@@ -1974,6 +1982,10 @@ class MemoryStore:
     @staticmethod
     def _validate_schema(db: sqlite3.Connection) -> None:
         MemoryStore._validate_v6_schema(db, SCHEMA_VERSION)
+        if "resolved_claim_ids_json" not in {
+            str(row["name"]) for row in db.execute("PRAGMA table_info(claim_decisions)")
+        }:
+            raise sqlite3.DatabaseError("claim resolution receipt column is missing")
         rows = db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
         names = {str(row["name"]) for row in rows}
         if _REQUIRED_V7_TABLES - names:
@@ -2927,14 +2939,30 @@ class _MemoryWriter:
             raise MemoryStoreAuthorizationError("claim context stale")
         if current.revision != command.expected_revision:
             raise MemoryStoreConflictError("claim revision conflict")
-        if current.status not in {ClaimStatus.CANDIDATE, ClaimStatus.ACTIVE}:
+        if current.status not in {ClaimStatus.CANDIDATE, ClaimStatus.ACTIVE} and not (
+            command.decision == "confirm" and current.status is ClaimStatus.CONFIRMED
+            and current.contradiction_claim_ids
+        ):
             raise MemoryStoreConflictError("claim transition invalid")
         if current.expires_at_utc is not None and current.expires_at_utc <= now:
             raise MemoryStoreConflictError("claim expired")
         if command.decision == "confirm":
             validate_claim_value(current.predicate, current.value_type, current.value)
-            if current.contradiction_claim_ids:
-                raise MemoryStoreConflictError("claim contradiction unresolved")
+            for conflicting_id in current.contradiction_claim_ids:
+                conflict = self.__db.execute(
+                    "SELECT i.payload_json FROM memory_items i JOIN claim_decisions d "
+                    "ON d.claim_id = i.item_id WHERE i.item_id = ? "
+                    "AND i.item_kind = 'user_model_claim' AND i.status = 'rejected' "
+                    "AND d.decision = 'reject' AND d.actor_subject_id = ?",
+                    (conflicting_id, context.actor_subject_id),
+                ).fetchone()
+                if conflict is None:
+                    raise MemoryStoreConflictError("claim contradiction unresolved")
+                rejected = UserModelClaim.from_dict(json.loads(conflict["payload_json"]))
+                if (rejected.owner_subject_id != current.owner_subject_id
+                    or rejected.subject_id != current.subject_id
+                    or rejected.predicate != current.predicate):
+                    raise MemoryStoreConflictError("claim contradiction unresolved")
             sources = self._live_source_episodes(current.source_evidence_ids, context, now)
             if any(ExperienceEpisode.from_dict(json.loads(source["payload_json"])).outcome != "completed" for source in sources):
                 raise MemoryStoreConflictError("claim source not completed")
@@ -2942,15 +2970,18 @@ class _MemoryWriter:
                 current, revision=current.revision + 1, status=ClaimStatus.CONFIRMED,
                 epistemic_class=ClaimEpistemicClass.CONFIRMED,
                 confirmed_at_utc=now, confirmation_event_id=decision_id, updated_at_utc=now,
+                contradiction_claim_ids=(),
             )
         else:
             updated = replace(current, revision=current.revision + 1,
                               status=ClaimStatus.REJECTED, updated_at_utc=now)
         self.put_item(updated)
         self.__db.execute(
-            "INSERT INTO claim_decisions VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO claim_decisions (decision_id, claim_id, actor_subject_id, decision, "
+            "expected_revision, decided_at_utc, resolved_claim_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (decision_id, current.claim_id, context.actor_subject_id, command.decision,
-             command.expected_revision, now),
+             command.expected_revision, now,
+             _json(current.contradiction_claim_ids if command.decision == "confirm" else ())),
         )
         if command.decision == "reject":
             self._suppress_claim_sources(current, "claim_rejected", now)
