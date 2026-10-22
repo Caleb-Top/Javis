@@ -304,9 +304,12 @@ export async function mountAvatarPreview(root: HTMLElement): Promise<() => void>
   const contextLost = root.querySelector<HTMLInputElement>("[data-control=\"contextLost\"]")!;
   contextLost.addEventListener("change", () => update({ contextLost: contextLost.checked }));
   root.querySelector<HTMLButtonElement>(".avatar-preview-interrupt")!.addEventListener("click", () => {
-    model.update({ interrupt: true, speaking: false });
+    model.update({ interrupt: true, speaking: false, state: "listening", gaze: "user" });
     speaking.checked = false;
+    root.querySelector<HTMLSelectElement>('[data-control="state"]')!.value = "listening";
+    root.querySelector<HTMLSelectElement>('[data-control="gaze"]')!.value = "user";
     envelope.stop();
+    syncStage();
     applyIntent();
     model.update({ interrupt: false });
   });

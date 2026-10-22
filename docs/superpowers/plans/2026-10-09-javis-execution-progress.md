@@ -111,3 +111,11 @@
 - schema v8 为 claim_decisions 增加 resolved_claim_ids_json，保存本次解除的引用；清引用、更新记录和写收据同事务。过期/删除冲突的其他解决策略尚未交付。
 - 三项确认/重确认/回滚定向检查 3 passed / 2.90 秒；v7 旧收据及四条既有升级路径 5 passed / 3.92 秒。未运行全量测试。
 - T5 完整通用写入治理、observed/inferred 和其他矛盾解决仍未完成；L0-B/L4-L8 范围不变。
+
+### L0-B 实际浏览器预览增量
+
+- 检查真实预览而非仅用 DOM fake：已有媒体查询保证默认小屏布局，未重复修改 CSS。
+- 修复 speaking 状态点击 Interrupt 后 applyIntent 再次启动 speaking envelope：现在同步转 listening、gaze=user、关闭 speaking 控件并刷新状态。
+- 新增可复用 scripts/verify_avatar_preview.cjs，通过 Playwright + Edge 截图与像素差检查 1280x900 / 390x844：彩色像素各 3383、状态变化像素各 1243，interrupt=true、overflow=false、pageerror=[]。
+- 本地截图与结果：G:/Javis/tmp/avatar-preview-evidence/preview-1280.png、preview-390.png、results.json。浏览器验证约 4.65 秒，预览模型四项测试通过约 0.32 秒。
+- 预览运行于 http://127.0.0.1:5181/?avatar-preview=1。此次只是默认 procedural3d smoke 与打断修复，不代表所有九态/资产/档位/背景/尺寸/真实 GPU 性能或 D 盘安装包验收完成。
