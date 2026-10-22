@@ -44,6 +44,7 @@ export class ExpressionMixer {
   #transitionFromMouth = 0;
   #transitionStartedAt = 0;
   #interrupted = false;
+  #speakingLevel: number | null = null;
 
   constructor(capabilities: readonly string[] | Readonly<Partial<Record<AvatarCapability, boolean>>>) {
     this.#capabilities = capabilitySet(capabilities);
@@ -52,6 +53,7 @@ export class ExpressionMixer {
   submit(target: ExpressionTarget): void {
     if (target.interrupt) this.interrupt();
     this.#interrupted = false;
+    this.#speakingLevel = null;
     this.#transitionFromMouth = this.#current.mouth;
     this.#transitionStartedAt = 0;
     this.#target = {
@@ -76,7 +78,9 @@ export class ExpressionMixer {
     const safeNow = Number.isFinite(now) ? Math.max(0, now) : 0;
     if (this.#transitionStartedAt === 0) this.#transitionStartedAt = Math.max(0, safeNow - 16);
     const progress = Math.min(1, Math.max(0, (safeNow - this.#transitionStartedAt) / 180));
-    const mouth = this.#transitionFromMouth + (this.#target.mouth - this.#transitionFromMouth) * progress;
+    const mouth = this.#speakingLevel ?? (
+      this.#transitionFromMouth + (this.#target.mouth - this.#transitionFromMouth) * progress
+    );
     this.#current = { ...this.#target, mouth: Math.min(0.65, Math.max(0, mouth)) };
     return this.snapshot();
   }
@@ -86,6 +90,7 @@ export class ExpressionMixer {
     this.#target = { ...this.#target, mouth: 0, gesture: "none", interrupt: true };
     this.#current = { ...this.#current, mouth: 0, gesture: "none", interrupt: true };
     this.#transitionFromMouth = 0;
+    this.#speakingLevel = 0;
   }
 
   reset(): void {
@@ -94,14 +99,17 @@ export class ExpressionMixer {
     this.#transitionFromMouth = 0;
     this.#transitionStartedAt = 0;
     this.#interrupted = false;
+    this.#speakingLevel = null;
   }
 
   setSpeakingLevel(level: number): void {
-    if (this.#interrupted || this.#target.state !== "speaking") {
+    if (this.#interrupted || this.#target.state !== "speaking" || !this.#capabilities.has("mouth")) {
+      this.#speakingLevel = 0;
       this.#current = { ...this.#current, mouth: 0 };
       return;
     }
     const safeLevel = Number.isFinite(level) ? Math.min(0.65, Math.max(0, level)) : 0;
+    this.#speakingLevel = safeLevel;
     this.#current = { ...this.#current, mouth: safeLevel };
   }
 
