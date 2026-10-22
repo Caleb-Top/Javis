@@ -197,6 +197,7 @@ export async function mountAvatarPreview(root: HTMLElement): Promise<() => void>
   let generation = 0;
   let frameId = 0;
   let disposed = false;
+  let rendererContextLost = false;
 
   const currentSize = () => {
     const selected = model.snapshot().size;
@@ -223,7 +224,7 @@ export async function mountAvatarPreview(root: HTMLElement): Promise<() => void>
     stage.style.setProperty("--preview-width", `${size.width}px`);
     stage.style.setProperty("--preview-height", `${size.height}px`);
     stage.style.setProperty("--preview-scale", String(snapshot.scale));
-    const fallback = snapshot.contextLost
+    const fallback = snapshot.contextLost || rendererContextLost
       ? "context-lost"
       : snapshot.tier === "sprite2d" || snapshot.tier === "orb"
         ? snapshot.tier
@@ -240,6 +241,7 @@ export async function mountAvatarPreview(root: HTMLElement): Promise<() => void>
     surface?.dispose();
     controller = null;
     surface = null;
+    rendererContextLost = false;
     host.replaceChildren();
     syncStage();
     if (snapshot.tier === "sprite2d" || snapshot.tier === "orb") return;
@@ -254,6 +256,16 @@ export async function mountAvatarPreview(root: HTMLElement): Promise<() => void>
         width: size.width,
         height: size.height,
         pixelRatio: snapshot.scale,
+        onContextLost() {
+          if (disposed || rebuildGeneration !== generation) return;
+          rendererContextLost = true;
+          syncStage();
+        },
+        onContextRestored() {
+          if (disposed || rebuildGeneration !== generation) return;
+          rendererContextLost = false;
+          syncStage();
+        },
       });
       if (disposed || rebuildGeneration !== generation) {
         nextSurface.dispose();
@@ -267,6 +279,7 @@ export async function mountAvatarPreview(root: HTMLElement): Promise<() => void>
       syncStage();
       applyIntent();
     } catch {
+      if (disposed || rebuildGeneration !== generation) return;
       stage.dataset.fallback = "sprite2d";
       status.value = "sprite2d";
     }

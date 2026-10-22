@@ -35,9 +35,28 @@ async function main() {
       const interrupted = await page.locator('[data-control="state"]').inputValue() === 'listening'
         && !(await page.locator('[data-control="speaking"]').isChecked())
         && (await page.locator('.avatar-preview-status').textContent()).startsWith('listening');
+      const lossSupported = await canvas.evaluate(element => {
+        const gl = element.getContext('webgl2') || element.getContext('webgl');
+        element.__avatarTestContextLoss = gl?.getExtension('WEBGL_lose_context');
+        element.__avatarTestContextLoss?.loseContext();
+        return !!element.__avatarTestContextLoss;
+      });
+      if (!lossSupported) throw new Error('WEBGL_lose_context is unavailable; recovery not verified');
+      await page.waitForFunction(() => document.querySelector('.avatar-preview-stage').dataset.fallback === 'context-lost');
+      await page.locator('[data-control="contextLost"]').check();
+      await page.locator('[data-control="contextLost"]').uncheck();
+      const lossCannotBeClearedBySimulation = await page.locator('.avatar-preview-stage').getAttribute('data-fallback') === 'context-lost';
+      await page.screenshot({ path: path.join(output, `context-lost-${viewport.width}.png`), fullPage: true });
+      await canvas.evaluate(element => element.__avatarTestContextLoss.restoreContext());
+      await page.waitForFunction(() => document.querySelector('.avatar-preview-stage').dataset.fallback === 'none');
+      const restored = await sharp(await canvas.screenshot()).ensureAlpha().raw().toBuffer();
+      let restoredColored = 0;
+      for (let i = 0; i < restored.length; i += 4) {
+        if (Math.max(restored[i], restored[i + 1], restored[i + 2]) - Math.min(restored[i], restored[i + 1], restored[i + 2]) > 25) restoredColored++;
+      }
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
       await page.screenshot({ path: path.join(output, `preview-${viewport.width}.png`), fullPage: true });
-      results.push({ viewport, colored, changed, interrupted, overflow, errors });
+      results.push({ viewport, colored, changed, interrupted, lossCannotBeClearedBySimulation, restoredColored, overflow, errors });
       await page.close();
     }
   } finally {
@@ -45,7 +64,7 @@ async function main() {
   }
   await fs.writeFile(path.join(output, 'results.json'), JSON.stringify(results, null, 2));
   console.log(JSON.stringify(results, null, 2));
-  if (results.some(result => !result.interrupted || result.overflow || result.errors.length || result.colored < 100 || result.changed < 10)) {
+  if (results.some(result => !result.interrupted || !result.lossCannotBeClearedBySimulation || result.restoredColored < 100 || result.overflow || result.errors.length || result.colored < 100 || result.changed < 10)) {
     process.exitCode = 1;
   }
 }

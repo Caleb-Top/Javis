@@ -119,3 +119,10 @@
 - 新增可复用 scripts/verify_avatar_preview.cjs，通过 Playwright + Edge 截图与像素差检查 1280x900 / 390x844：彩色像素各 3383、状态变化像素各 1243，interrupt=true、overflow=false、pageerror=[]。
 - 本地截图与结果：G:/Javis/tmp/avatar-preview-evidence/preview-1280.png、preview-390.png、results.json。浏览器验证约 4.65 秒，预览模型四项测试通过约 0.32 秒。
 - 预览运行于 http://127.0.0.1:5181/?avatar-preview=1。此次只是默认 procedural3d smoke 与打断修复，不代表所有九态/资产/档位/背景/尺寸/真实 GPU 性能或 D 盘安装包验收完成。
+
+### L0-B WebGL 故障预览增量
+
+- 预览接入 AvatarSurface 的真实 context-lost/restored 回调，与模拟开关分别维护；真实丢失时进入可见兜底，恢复后重新展示渲染，模拟开关不能解除真实故障。
+- 回调和加载失败分支均检查 dispose/重建代次，旧异步结果不再覆盖当前预览状态。
+- 使用 WEBGL_lose_context 扩展真实触发丢失/恢复，两尺寸恢复后彩色像素各 3394，无页面异常、无页面横向溢出；截图已查看。扩展模拟不等价于真实 GPU 驱动故障或 Windows WebView2 验收。
+- 浏览器定向验证 4.67 秒；TypeScript noEmit 通过。未跑全量测试。证据仍在 tmp/avatar-preview-evidence，包括新增 context-lost-390.png 和 context-lost-1280.png。
